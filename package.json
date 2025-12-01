@@ -1,0 +1,21 @@
+{
+  "name": "drawing-renamer",
+  "version": "1.0.0",
+  "description": "CLI tool to automatically rename AutoCAD PDF drawings using a PDF drawing register.",
+  "main": "rename-drawings.js",
+  "type": "commonjs",
+  "bin": {
+    "rename-drawings": "./rename-drawings.js"
+  },
+  "scripts": {
+    "start": "node rename-drawings.js"
+  },
+  "author": "Your Name",
+  "license": "MIT",
+  "dependencies": {
+    "pdf-parse": "^1.1.1"
+  },
+  "engines": {
+    "node": ">=16"
+  }
+}
