@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Menu } = require('electron');
 // If this file is executed with plain `node main.js` (not Electron), show a helpful message
 if (!process.versions || !process.versions.electron) {
   console.error('This script is the Electron main process. Do not run it with `node main.js`.');
@@ -19,6 +19,15 @@ function createWindow() {
     }
   });
   win.loadFile('index.html');
+  // Remove the default application menu (File/Edit/View) and hide the menu bar
+  try {
+    Menu.setApplicationMenu(null);
+    // Also hide the menu bar on Windows/Linux
+    win.setMenuBarVisibility(false);
+    win.setAutoHideMenuBar(true);
+  } catch (e) {
+    // If running under a different environment, ignore
+  }
 }
 
 app.whenReady().then(() => {

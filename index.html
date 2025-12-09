@@ -3,19 +3,15 @@
   <head>
     <meta charset="utf-8" />
     <title>Drawing Renamer</title>
-    <style>
-      body { font-family: Arial, sans-serif; padding: 16px }
-      label { display:block; margin-top:8px }
-      #log { white-space: pre-wrap; background:#111; color:#eee; padding:8px; height:300px; overflow:auto }
-    </style>
+    <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
     <h2>Drawing Renamer</h2>
     <label>Register path (file or directory):</label>
-    <input id="register" style="width:70%" placeholder="Optional: path to register PDF or folder" />
+  <input id="register" class="wide" placeholder="Optional: path to register PDF or folder" />
     <button id="choose">Choose folder...</button>
     <label><input type="checkbox" id="dry" /> Dry run (don't rename files)</label>
-    <div style="margin-top:12px">
+    <div class="mt">
       <button id="start">Start</button>
     </div>
 

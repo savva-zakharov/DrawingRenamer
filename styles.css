@@ -1,0 +1,35 @@
+/* Basic styling for the Drawing Renamer UI */
+:root{
+  --bg: #ffffff;
+  --muted: #6b6b6b;
+  --code-bg: #0f1113;
+  --code-fg: #eaeaea;
+  --accent: #2b8fff;
+}
+
+html,body{
+  height:100%;
+  margin:0;
+  background:var(--bg);
+  color:#222;
+  font-family:Segoe UI, Roboto, Arial, sans-serif;
+}
+
+body{ padding:16px }
+
+h2{ margin-top:0 }
+
+label{ display:block; margin-top:8px; color:var(--muted) }
+
+input.wide{ width:70%; padding:6px 8px; font-size:14px; }
+button{ padding:6px 10px; font-size:14px; margin-left:8px }
+
+.mt{ margin-top:12px }
+
+#log{ white-space: pre-wrap; background:var(--code-bg); color:var(--code-fg); padding:8px; height:100px; overflow:auto; border-radius:4px }
+
+/* Small responsive tweak */
+@media (max-width:600px){
+  input.wide{ width:100%; display:block; margin-bottom:8px }
+  button{ margin-left:0 }
+}
