@@ -10,7 +10,8 @@
   "scripts": {
     "start": "node renamer.js",
     "start-gui": "electron .",
-    "electron": "electron ."
+    "electron": "electron .",
+    "dist": "electron-builder --win --x64"
   },
   "author": "Your Name",
   "license": "MIT",
@@ -18,9 +19,22 @@
     "pdf-parse": "^1.1.1"
   },
   "devDependencies": {
-    "electron": "^25.9.8"
+    "electron": "^25.9.8",
+    "electron-rebuild": "^3.2.9",
+    "electron-builder": "^24.6.0"
   },
   "engines": {
     "node": ">=16"
+  },
+  "build": {
+    "appId": "com.yourcompany.drawingrenamer",
+    "productName": "DrawingRenamer",
+    "files": ["**/*"],
+    "directories": { "output": "dist" },
+    "icon": "build/icon.ico",
+    "win": {
+      "target": ["portable"]
+    },
+    "publish": null
   }
 }
