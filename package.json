@@ -9,8 +9,8 @@
   },
   "scripts": {
     "start": "node renamer.js",
-    "start-gui": "electron .",
-    "electron": "electron .",
+    "start-gui": "neu run",
+    "build-gui": "neu build",
     "dist": "electron-builder --win --x64"
   },
   "author": "Your Name",
@@ -18,11 +18,7 @@
   "dependencies": {
     "pdf-parse": "^1.1.1"
   },
-  "devDependencies": {
-    "electron": "^25.9.8",
-    "electron-rebuild": "^3.2.9",
-    "electron-builder": "^24.6.0"
-  },
+  "devDependencies": {},
   "engines": {
     "node": ">=16"
   },
