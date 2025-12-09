@@ -3,6 +3,18 @@ const path = require("path");
 const pdfParse = require("pdf-parse");
 const readline = require("readline");
 const dryRun = process.argv.includes('--dry-run') || process.argv.includes('-n');
+// Simple CLI arg helper for --register / -r
+function getArgValue(names) {
+    for (let i = 2; i < process.argv.length; i++) {
+        const a = process.argv[i];
+        for (const name of names) {
+            if (a === name && process.argv[i + 1]) return process.argv[i + 1];
+            if (a.startsWith(name + "=")) return a.split("=")[1];
+        }
+    }
+    return null;
+}
+const registerArg = getArgValue(['--register', '-r']);
 
 // --------------------
 // 1️⃣ Find register PDF
@@ -69,6 +81,35 @@ function sanitizeFilename(name) {
 // --------------------
 async function renameFiles() {
     let registerPDF = findRegisterPDF();
+
+    // If user provided --register / -r use that before prompting
+    if (!registerPDF && registerArg) {
+        const resolved = path.resolve(registerArg);
+        if (!fs.existsSync(resolved)) {
+            console.error("❌ Provided --register path does not exist.");
+            return;
+        }
+        const stat = fs.statSync(resolved);
+        if (stat.isFile()) {
+            if (!resolved.toLowerCase().endsWith('.pdf')) {
+                console.error('❌ Provided file is not a PDF.');
+                return;
+            }
+            registerPDF = resolved;
+        } else if (stat.isDirectory()) {
+            const found = findRegisterPDF(resolved);
+            if (!found) {
+                console.error('❌ No register PDF found in that directory.');
+                return;
+            }
+            registerPDF = found;
+        } else {
+            console.error('❌ Unsupported path type for --register.');
+            return;
+        }
+    }
+
+    // If still not found, prompt interactively
     if (!registerPDF) {
         console.error("❌ No register PDF found in current folder.");
         const input = (await ask("Enter path to register PDF (file or directory) or press Enter to cancel: ")).trim();
