@@ -1,12 +1,18 @@
+#![cfg_attr(not(feature = "cli-only"), windows_subsystem = "windows")]
+
 use anyhow::Result;
-use clap::Parser;
 use regex::Regex;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
+use serde::{Serialize, Deserialize};
 
+#[cfg(feature = "cli-only")]
+use clap::Parser;
+
+#[cfg(feature = "cli-only")]
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
@@ -19,7 +25,7 @@ struct Args {
     dry_run: bool,
 }
 
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Serialize, Deserialize)]
 enum RenameError {
     #[error("Provided path does not exist: {0}")]
     PathNotFound(PathBuf),
@@ -33,6 +39,7 @@ enum RenameError {
     UserAborted,
 }
 
+#[cfg(feature = "cli-only")]
 fn main() -> Result<()> {
     let args = Args::parse();
 
@@ -102,7 +109,60 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+#[tauri::command]
+fn rename_drawings(register_path: PathBuf, drawings_dir: PathBuf, dry_run: bool) -> Result<Vec<String>, RenameError> {
+    let mut messages = Vec::new();
+
+    if dry_run {
+        messages.push("🔎 Running in dry-run mode — no files will be renamed.".to_string());
+    }
+
+    let token_map = parse_register_pdf(&register_path).map_err(|_| RenameError::NotAPdf(register_path.clone()))?;
+    messages.push(format!("📘 Loaded {} drawing entries from register.", token_map.len()));
+
+    let register_basename = register_path.file_name().unwrap_or_default();
+
+    for entry in fs::read_dir(drawings_dir).map_err(|_| RenameError::PathNotFound(drawings_dir.clone()))? {
+        let entry = entry.map_err(|_| RenameError::PathNotFound(drawings_dir.clone()))?;
+        let path = entry.path();
+        let file_name_os = path.file_name().unwrap_or_default();
+        let file_name = file_name_os.to_string_lossy();
+
+        if file_name_os == register_basename || !file_name.to_lowercase().ends_with(".pdf") {
+            continue;
+        }
+
+        let Some(token) = token_map.keys().find(|&token| file_name.contains(token)) else {
+            messages.push(format!("❔ No title found for file: {}", file_name));
+            continue;
+        };
+
+        let title = &token_map[token];
+        let safe_title = sanitize_filename(title);
+        let new_name = format!("{} - {}.pdf", token, safe_title);
+
+        if file_name == new_name {
+            continue;
+        }
+
+        let new_path = path.with_file_name(new_name.clone());
+
+        if dry_run {
+            messages.push(format!("ℹ️ Dry-run: would rename {} → {}", file_name, new_name));
+        } else {
+            match fs::rename(&path, &new_path) {
+                Ok(_) => messages.push(format!("✅ Renamed {} → {}", file_name, new_name)),
+                Err(e) => messages.push(format!("❌ Failed to rename {}: {}", file_name, e)),
+            }
+        }
+    }
+
+    Ok(messages)
+}
+
+
 /// Handles the logic of finding the register PDF, whether from an argument or by prompting the user.
+#[cfg(feature = "cli-only")]
 fn find_register_pdf_or_prompt(register_arg: Option<PathBuf>) -> Result<PathBuf, RenameError> {
     // First, try to use the --register argument if provided
     if let Some(path) = register_arg {
@@ -159,6 +219,7 @@ fn find_register_in_dir(dir: &Path) -> Option<PathBuf> {
 }
 
 /// Prompts the user with a question and returns their input.
+#[cfg(feature = "cli-only")]
 fn ask(question: &str) -> io::Result<String> {
     print!("{}", question);
     io::stdout().flush()?;
@@ -188,4 +249,12 @@ fn parse_register_pdf(path: &Path) -> Result<HashMap<String, String>> {
 /// Replaces characters that are invalid in Windows/macOS/Linux filenames.
 fn sanitize_filename(name: &str) -> String {
     name.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "-")
+}
+
+#[cfg(not(feature = "cli-only"))]
+fn main() {
+    tauri::Builder::default()
+        .invoke_handler(tauri::generate_handler![rename_drawings])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
 }
