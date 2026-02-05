@@ -23,7 +23,7 @@
     "node": ">=16"
   },
   "build": {
-    "appId": "com.yourcompany.drawingrenamer",
+    "appId": "com.drawingrenamer",
     "productName": "DrawingRenamer",
     "files": ["**/*"],
     "directories": { "output": "dist" },
