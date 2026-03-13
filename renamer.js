@@ -1,7 +1,7 @@
-const fs = require("fs");
-const path = require("path");
-const pdfParse = require("pdf-parse");
-const readline = require("readline");
+import fs from "fs";
+import path from "path";
+import pdfParse from "pdf-parse";
+import readline from "readline";
 const dryRun = process.argv.includes('--dry-run') || process.argv.includes('-n');
 // Simple CLI arg helper for --register / -r
 function getArgValue(names) {
