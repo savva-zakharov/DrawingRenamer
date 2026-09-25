@@ -402,8 +402,10 @@
   // register. edits: { titles: { code: newTitle }, numbers: { code: newCode }, scales: { code:
   // scale }, sizes: { code: size } } (codes as currently in the register). A code split one field
   // per cell is split the same way again, so a new number must have the same number of fields.
-  // Returns { path, sheet, xml (of that sheet), applied: { titles, numbers, scales, sizes }
-  // ({ code: { from, to } }), notFound: [code], errors: [message] }.
+  // edits.project: { label: value } changes the project fields above the drawings (labels as
+  // readXlsxProject gives them). Returns { path, sheet, xml (of that sheet), applied: { titles,
+  // numbers, scales, sizes, project } ({ code or label: { from, to } }), notFound: [code or label],
+  // errors: [message] }.
   function editXlsxRegister(parts, edits) {
     const reg = readXlsxRegister(parts);
     if (!reg.path) throw new Error('No drawings found in the workbook.');
@@ -412,7 +414,7 @@
     const rowCells = {};
     for (const r of readSheetRows(parts.sheets[reg.path], sharedStrings, zeroPad)) rowCells[r.row] = r.cells;
 
-    const applied = { titles: {}, numbers: {}, scales: {}, sizes: {} };
+    const applied = { titles: {}, numbers: {}, scales: {}, sizes: {}, project: {} };
     const notFound = [];
     const errors = [];
     const byRow = {}; // row => { column: text }
@@ -428,6 +430,20 @@
       if (to === reg.titles[code]) continue;
       set(place.row, place.titleCol, to);
       applied.titles[code] = { from: reg.titles[code], to };
+    }
+    if (edits.project && Object.keys(edits.project).length) {
+      const { fields } = readXlsxProject(parts);
+      for (const [label, value] of Object.entries(edits.project)) {
+        const field = fields.find(f => f.label === label);
+        if (!field) {
+          notFound.push(label);
+          continue;
+        }
+        const to = collapse(value);
+        if (to === field.value) continue;
+        set(field.ref.row, field.ref.col, to);
+        applied.project[label] = { from: field.value, to };
+      }
     }
     for (const [field, colKey, header] of [['scales', 'scaleCol', 'SCALE'], ['sizes', 'sizeCol', 'SIZE']]) {
       for (const [code, value] of Object.entries(edits[field] || {})) {
@@ -1098,65 +1114,106 @@
     'MODEL NO': 'modelNo', 'CLIENT': 'client'
   };
   const FIELD_LABEL_RE = /^[A-Za-z][A-Za-z .'\/]{0,30}:$/;
-  function projectField(label, value) {
+  function projectField(label, value, ref) {
     const name = label.replace(/:$/, '').replace(/\./g, '').trim();
-    return { key: PROJECT_FIELD_KEYS[name.toUpperCase().replace(/\s+/g, ' ')] || null, label: name, value: collapse(value) };
+    return { key: PROJECT_FIELD_KEYS[name.toUpperCase().replace(/\s+/g, ' ')] || null, label: name, value: collapse(value), ref };
   }
 
-  // Label/value pairs along rows of cells ("Project:" | "Park West" | "Job No:" | "24023"); a label
-  // takes the next cell to its right that isn't another label
-  function labelledPairs(cellTexts) {
+  // Label/value pairs along a row of cells ([{ text, ref }]): "Project:" | "Park West" | "Job No:" |
+  // "24023". In Word the value is the cell right after the label (possibly empty); in Excel, where
+  // merged cells leave gaps, it's the next cell with text that isn't another label.
+  function labelledPairs(cells, adjacent) {
     const fields = [];
-    cellTexts.forEach((text, i) => {
-      if (!FIELD_LABEL_RE.test(text)) return;
-      const next = cellTexts.slice(i + 1).find(t => t);
-      if (next !== undefined && !FIELD_LABEL_RE.test(next)) fields.push(projectField(text, next));
+    cells.forEach((cell, i) => {
+      if (!FIELD_LABEL_RE.test(cell.text)) return;
+      const next = adjacent ? cells[i + 1] : cells.slice(i + 1).find(c => c.text);
+      if (next && !FIELD_LABEL_RE.test(next.text)) fields.push(projectField(cell.text, next.text, next.ref));
     });
     return fields;
   }
 
-  // word/document.xml -> { heading, fields: [{ key, label, value }], description: [lines], client }.
-  // The fields come from the tables above the first drawing row. The description is the
-  // multi-line cell beside the issue dates ("Planning Application ... / For Greenseed Limited"),
-  // and the client its "For ..." line.
+  // A heading row (a single cell of text above the fields) becomes the "Heading" field
+  function headingField(cells) {
+    const withText = cells.filter(c => c.text);
+    return withText.length === 1 && !FIELD_LABEL_RE.test(withText[0].text)
+      ? { key: 'heading', label: 'Heading', value: withText[0].text, ref: withText[0].ref }
+      : null;
+  }
+
+  // word/document.xml -> { heading, fields: [{ key, label, value, ref }], description: [lines], client }.
+  // The fields (the heading first, when there is one) come from the tables above the first
+  // drawing row; ref is { tr, tc }, the value cell's row (among all w:tr) and cell index. The
+  // description is the multi-line cell beside the issue dates ("Planning Application ... / For
+  // Greenseed Limited"), and the client its "For ..." line.
   function readDocxProject(xml) {
     const firstDrawing = (registerRows(xml)[0] || { row: { start: xml.length } }).row.start;
     const out = { heading: '', fields: [], description: [], client: '' };
-    for (const tr of findElements(xml, 'w:tr').filter(r => r.start < firstDrawing)) {
-      const cells = findElements(xml, 'w:tc', tr.start, tr.end);
-      const texts = cells.map(c => cellText(c.xml));
-      const nonEmpty = texts.filter(Boolean);
-      if (!out.heading && !out.fields.length && nonEmpty.length === 1 && !FIELD_LABEL_RE.test(nonEmpty[0])) {
-        out.heading = nonEmpty[0];
-        continue;
+    findElements(xml, 'w:tr').forEach((tr, trIndex) => {
+      if (tr.start >= firstDrawing) return;
+      const tcs = findElements(xml, 'w:tc', tr.start, tr.end);
+      const cells = tcs.map((c, tc) => ({ text: cellText(c.xml), ref: { tr: trIndex, tc } }));
+      const heading = !out.fields.length && headingField(cells);
+      if (heading) {
+        out.heading = heading.value;
+        out.fields.push(heading);
+        return;
       }
-      out.fields.push(...labelledPairs(texts));
-      for (const c of cells) {
+      out.fields.push(...labelledPairs(cells, true));
+      for (const c of tcs) {
         const lines = paragraphsOf(c.xml).map(pp => collapse(paragraphText(pp.xml))).filter(Boolean);
         if (lines.length > 1 && !out.description.length) out.description = lines;
       }
-    }
+    });
     const forLine = out.description.find(l => /^for\s+\S/i.test(l));
     const clientField = out.fields.find(f => f.key === 'client');
     out.client = clientField ? clientField.value : forLine ? forLine.replace(/^for\s+/i, '') : '';
     return out;
   }
 
+  // Change project fields in word/document.xml: edits { label: value } (labels as readDocxProject
+  // gives them, "Heading" for the heading). opts as editDocxTitles.
+  // Returns { xml, applied: { label: { from, to } }, notFound: [label] }
+  function editDocxProject(xml, edits, opts = {}) {
+    const rev = makeRevisions(xml, opts.author || 'Drawing Renamer', opts.date || new Date().toISOString().replace(/\.\d+Z$/, 'Z'));
+    const { fields } = readDocxProject(xml);
+    const rows = findElements(xml, 'w:tr');
+    const applied = {};
+    const notFound = [];
+    const changes = [];
+    for (const [label, value] of Object.entries(edits)) {
+      const field = fields.find(f => f.label === label);
+      const tr = field && rows[field.ref.tr];
+      const cell = tr && findElements(xml, 'w:tc', tr.start, tr.end)[field.ref.tc];
+      if (!cell) {
+        notFound.push(label);
+        continue;
+      }
+      const to = collapse(value);
+      applied[label] = { from: field.value, to };
+      if (to !== field.value) changes.push({ start: cell.start, end: cell.end, xml: setCellTitle(cell.xml, to, opts, rev) });
+    }
+    let out = xml;
+    for (const c of changes.sort((a, b) => b.start - a.start)) out = out.slice(0, c.start) + c.xml + out.slice(c.end);
+    return { xml: out, applied, notFound };
+  }
+
   // The same for the current register sheet of an Excel register: label cells ("PROJECT:") in the
-  // rows above the first "DRAWING CODE" header, each with the value to its right
+  // rows above the first "DRAWING CODE" header, each with the value to its right; ref is { row, col }
   function readXlsxProject(parts) {
     const reg = readXlsxRegister(parts);
     const out = { heading: '', fields: [], description: [], client: '' };
     if (!reg.path) return out;
     const sharedStrings = parts.sharedStrings ? findElements(parts.sharedStrings, 'si').map(si => stringItemText(si.xml)) : [];
-    for (const { cells } of readSheetRows(parts.sheets[reg.path], sharedStrings, zeroPadStyles(parts.styles))) {
+    for (const { row, cells } of readSheetRows(parts.sheets[reg.path], sharedStrings, zeroPadStyles(parts.styles))) {
       if (headerColumns(cells)) break;
-      const texts = Object.keys(cells).map(Number).sort((a, b) => a - b).map(c => collapse(cells[c]));
-      if (!out.heading && !out.fields.length && texts.length === 1 && !FIELD_LABEL_RE.test(texts[0])) {
-        out.heading = texts[0];
+      const list = Object.keys(cells).map(Number).sort((a, b) => a - b).map(col => ({ text: collapse(cells[col]), ref: { row, col } }));
+      const heading = !out.fields.length && headingField(list);
+      if (heading) {
+        out.heading = heading.value;
+        out.fields.push(heading);
         continue;
       }
-      out.fields.push(...labelledPairs(texts));
+      out.fields.push(...labelledPairs(list, false));
     }
     const clientField = out.fields.find(f => f.key === 'client');
     if (clientField) out.client = clientField.value;
@@ -1200,6 +1257,7 @@
     readDocxTitles,
     readDocxDetails,
     readDocxProject,
+    editDocxProject,
     readXlsxProject,
     namesMatch,
     readRowMarks,

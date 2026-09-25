@@ -52,7 +52,8 @@ const state = {
   // foldersToRemove: folders from "Reset folders", dropped once their files have moved out
   // separator: what goes between the drawing number and the title in file names
   // detailEdits: drawing number => { scale, size } changes (either may be missing), keyed like titleEdits
-  layout: { folders: [], assignments: {}, titleEdits: {}, detailEdits: {}, numberEdits: {}, numberHistory: {}, newEntries: [], moves: [], foldersToRemove: [], separator: DEFAULT_SEPARATOR },
+  // projectEdits: register header field label => new value ("Heading" for the heading)
+  layout: { folders: [], assignments: {}, titleEdits: {}, detailEdits: {}, projectEdits: {}, numberEdits: {}, numberHistory: {}, newEntries: [], moves: [], foldersToRemove: [], separator: DEFAULT_SEPARATOR },
   drag: null,            // what's being dragged: { kind: 'drawing', token } or { kind: 'folder', folder }
   origOf: {},            // drawing number shown => number in the register (for renumbered drawings)
   movedTokens: new Set(), // register numbers of drawings with a pending move
@@ -333,7 +334,7 @@ function layoutPath() {
 }
 
 async function loadLayout() {
-  state.layout = { folders: [], assignments: {}, titleEdits: {}, detailEdits: {}, numberEdits: {}, numberHistory: {}, newEntries: [], moves: [], foldersToRemove: [], separator: DEFAULT_SEPARATOR };
+  state.layout = { folders: [], assignments: {}, titleEdits: {}, detailEdits: {}, projectEdits: {}, numberEdits: {}, numberHistory: {}, newEntries: [], moves: [], foldersToRemove: [], separator: DEFAULT_SEPARATOR };
   state.layoutBroken = false;
   if (!(await getStatsOrNull(layoutPath()))) return;
   try {
@@ -348,6 +349,10 @@ async function loadLayout() {
     const titleEdits = {};
     for (const [token, title] of Object.entries(data.titleEdits || {})) {
       if (typeof title === 'string' && title.trim()) titleEdits[token] = title;
+    }
+    const projectEdits = {};
+    for (const [label, value] of Object.entries(data.projectEdits || {})) {
+      if (typeof value === 'string') projectEdits[label] = value;
     }
     const detailEdits = {};
     for (const [token, edit] of Object.entries(data.detailEdits || {})) {
@@ -375,7 +380,7 @@ async function loadLayout() {
       .map(m => ({ token: m.token, after: m.after }));
     const foldersToRemove = (Array.isArray(data.foldersToRemove) ? data.foldersToRemove : []).filter(f => typeof f === 'string' && folders.includes(f));
     const separator = typeof data.separator === 'string' && !separatorProblem(data.separator) ? data.separator : DEFAULT_SEPARATOR;
-    state.layout = { folders: withAncestors(folders), assignments, titleEdits, detailEdits, numberEdits, numberHistory, newEntries, moves, foldersToRemove, separator };
+    state.layout = { folders: withAncestors(folders), assignments, titleEdits, detailEdits, projectEdits, numberEdits, numberHistory, newEntries, moves, foldersToRemove, separator };
     appendLog(`📁 Loaded folder layout from ${LAYOUT_FILE} (${folders.length} folders).`);
   } catch (err) {
     state.layoutBroken = true;
@@ -405,6 +410,7 @@ async function saveLayout() {
     // Changes made in the app that haven't been saved into the Word register yet
     titleEdits: state.layout.titleEdits,
     detailEdits: state.layout.detailEdits,
+    projectEdits: state.layout.projectEdits,
     numberEdits: state.layout.numberEdits,
     numberHistory: state.layout.numberHistory,
     moves: state.layout.moves,
@@ -670,8 +676,8 @@ function updateButtons() {
   entryBtn.hidden = !isDocx;
   entryBtn.disabled = state.busy;
   const changes = isDocx
-    ? pendingTitleEdits().length + pendingDetailEdits().length + pendingNumberEdits().length + pendingNewEntries().length + state.movedTokens.size
-    : editable ? pendingTitleEdits().length + pendingDetailEdits().length + pendingNumberEdits().length : 0;
+    ? pendingTitleEdits().length + pendingDetailEdits().length + pendingProjectEdits().length + pendingNumberEdits().length + pendingNewEntries().length + state.movedTokens.size
+    : editable ? pendingTitleEdits().length + pendingDetailEdits().length + pendingProjectEdits().length + pendingNumberEdits().length : 0;
   wordBtn.textContent = changes ? `${saveButtonLabel()} (${changes})` : saveButtonLabel();
   wordBtn.title = `Write edited titles and numbers into the ${registerAppName()} register`;
   wordBtn.disabled = state.busy || changes === 0;
@@ -1640,47 +1646,128 @@ function renderDrawingValues(parent, title, field, registerValue) {
   parent.appendChild(list);
 }
 
-function renderProjectData() {
+// Register header fields changed in the Project data tab and not saved yet: [{ label, from, to }]
+function pendingProjectEdits() {
+  const fields = (state.registerProject || { fields: [] }).fields;
+  return Object.entries(state.layout.projectEdits)
+    .map(([label, to]) => ({ label, to, field: fields.find(f => f.label === label) }))
+    .filter(e => e.field && e.to !== e.field.value)
+    .map(e => ({ label: e.label, from: e.field.value, to: e.to }));
+}
+
+function projectValue(field) {
+  const edit = state.layout.projectEdits[field.label];
+  return edit !== undefined ? edit : field.value;
+}
+
+async function setProjectEdit(field, value) {
+  const to = value === null ? field.value : value.replace(/\s+/g, ' ').trim();
+  if (to === field.value) delete state.layout.projectEdits[field.label];
+  else state.layout.projectEdits[field.label] = to;
+  appendLog(to === field.value
+    ? `🗂️ ${field.label}: back to the register's "${field.value}".`
+    : `🗂️ ${field.label}: "${field.value}" → "${to}" (press ${saveButtonLabel()} to write it to the register).`);
+  await saveLayout();
+  updateButtons();
+  renderProjectData(true);
+}
+
+// The register's header fields, each an input when the register can be written to
+function renderProjectFields(section) {
+  const project = state.registerProject;
+  section.appendChild(el('h4', `Register: ${baseName(state.registerPath)}${state.registerInfo ? ` (${state.registerInfo})` : ''}`));
+  if (!project || !project.fields.length) {
+    section.appendChild(el('p', state.registerKind === 'pdf'
+      ? 'Project details are only read from Word and Excel registers.'
+      : 'No project details found at the top of the register.', 'muted'));
+    return;
+  }
+  const editable = canEditRegister() && !state.busy;
+  const dl = el('dl');
+  for (const field of project.fields) {
+    const dd = el('dd');
+    const input = el('input', undefined, 'project-input');
+    input.value = projectValue(field);
+    input.disabled = !editable;
+    input.spellcheck = false;
+    input.title = editable ? `In the register: ${field.value || '(blank)'}` : 'Project details can only be changed in a Word or Excel register';
+    const edited = state.layout.projectEdits[field.label] !== undefined && state.layout.projectEdits[field.label] !== field.value;
+    if (edited) input.classList.add('edited');
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') input.blur();
+      if (e.key === 'Escape') {
+        input.value = projectValue(field);
+        input.blur();
+      }
+    });
+    input.addEventListener('change', () => setProjectEdit(field, input.value));
+    dd.appendChild(input);
+    if (edited) {
+      const undo = el('button', 'edited ✕', 'edit-badge');
+      undo.title = `Register: ${field.value || '(blank)'}\nClick to undo`;
+      undo.addEventListener('click', () => setProjectEdit(field, null));
+      dd.appendChild(undo);
+    }
+    dl.append(el('dt', field.label), dd);
+  }
+  if (project.description.length) {
+    const dd = el('dd', project.description.join('\n'), 'muted');
+    dd.style.whiteSpace = 'pre-line';
+    dd.title = 'Read only';
+    dl.append(el('dt', 'Description'), dd);
+  }
+  if (project.client && !project.fields.some(f => f.key === 'client')) {
+    const dd = el('dd', project.client, 'muted');
+    dd.title = "From the description's \"For ...\" line; read only";
+    dl.append(el('dt', 'Client'), dd);
+  }
+  section.appendChild(dl);
+}
+
+// What the drawings' title blocks say, marked against the register (including unsaved edits)
+function renderProjectDrawings(section) {
+  const project = state.registerProject;
+  const pdfs = new Set(state.rows.filter(r => r.rel && /\.pdf$/i.test(r.rel)).map(r => r.rel));
+  const read = [...pdfs].filter(rel => state.fileDetails.has(absPath(rel))).length;
+  const registerOf = key => {
+    if (!project) return '';
+    const field = project.fields.find(f => f.key === key);
+    return field ? projectValue(field) : key === 'client' ? project.client : '';
+  };
+  renderDrawingValues(section, 'Project', 'project', registerOf('project'));
+  renderDrawingValues(section, 'Client', 'client', registerOf('client'));
+  section.appendChild(el('p', read < pdfs.size
+    ? `Reading title blocks… ${read} of ${pdfs.size} drawings`
+    : `From the title blocks of ${pdfs.size} drawing${pdfs.size === 1 ? '' : 's'}. Hover a value to see which.`, 'muted'));
+}
+
+// Redraws the tab. The register fields are left alone while one is being typed in (the drawings'
+// side still updates as title blocks are read), unless `fields` asks for them too.
+function renderProjectData(fields = false) {
   if (state.activeTab !== 'project') return;
-  projectDataEl.textContent = '';
   if (!state.registerPath) {
     projectDataEl.className = 'muted';
     projectDataEl.textContent = 'No register loaded.';
     return;
   }
   projectDataEl.className = '';
-  const grid = el('div', undefined, 'project-grid');
-  const project = state.registerProject;
-
-  const left = el('section');
-  left.appendChild(el('h4', `Register: ${baseName(state.registerPath)}${state.registerInfo ? ` (${state.registerInfo})` : ''}`));
-  if (!project || (!project.fields.length && !project.heading)) {
-    left.appendChild(el('p', state.registerKind === 'pdf'
-      ? 'Project details are only read from Word and Excel registers.'
-      : 'No project details found at the top of the register.', 'muted'));
-  } else {
-    const dl = el('dl');
-    const add = (label, value) => dl.append(el('dt', label), el('dd', value || '—'));
-    if (project.heading) add('Heading', project.heading);
-    for (const f of project.fields) add(f.label, f.value);
-    if (project.description.length) add('Description', project.description.join('\n'));
-    if (project.client && !project.fields.some(f => f.key === 'client')) add('Client', project.client);
-    for (const dd of dl.querySelectorAll('dd')) dd.style.whiteSpace = 'pre-line';
-    left.appendChild(dl);
+  let grid = projectDataEl.querySelector('.project-grid');
+  if (!grid) {
+    projectDataEl.textContent = '';
+    grid = el('div', undefined, 'project-grid');
+    grid.append(el('section', undefined, 'project-fields'), el('section', undefined, 'project-drawings'));
+    projectDataEl.appendChild(grid);
+    fields = true;
   }
-
-  const right = el('section');
-  const pdfs = new Set(state.rows.filter(r => r.rel && /\.pdf$/i.test(r.rel)).map(r => r.rel));
-  const read = [...pdfs].filter(rel => state.fileDetails.has(absPath(rel))).length;
-  const registerOf = key => project && ((project.fields.find(f => f.key === key) || {}).value || (key === 'client' ? project.client : ''));
-  renderDrawingValues(right, 'Project', 'project', registerOf('project'));
-  renderDrawingValues(right, 'Client', 'client', registerOf('client'));
-  right.appendChild(el('p', read < pdfs.size
-    ? `Reading title blocks… ${read} of ${pdfs.size} drawings`
-    : `From the title blocks of ${pdfs.size} drawing${pdfs.size === 1 ? '' : 's'}. Hover a value to see which.`, 'muted'));
-
-  grid.append(left, right);
-  projectDataEl.appendChild(grid);
+  const left = grid.querySelector('.project-fields');
+  const typing = left.contains(document.activeElement) && document.activeElement.tagName === 'INPUT';
+  if (fields || !typing) {
+    left.textContent = '';
+    renderProjectFields(left);
+  }
+  const right = grid.querySelector('.project-drawings');
+  right.textContent = '';
+  renderProjectDrawings(right);
 }
 
 function render(newFiles) {
@@ -1897,7 +1984,10 @@ async function refresh() {
           if (!(t in state.tokenMap) || edit[field] === ((state.registerDetails[t] || {})[field] || '')) detailsDone.push([t, field]);
         }
       }
-      if (done.length || added.length || renumbered.length || detailsDone.length) {
+      const fieldValue = label => (((state.registerProject || { fields: [] }).fields.find(f => f.label === label)) || {}).value;
+      const projectDone = Object.keys(state.layout.projectEdits).filter(label => [undefined, state.layout.projectEdits[label]].includes(fieldValue(label)));
+      if (done.length || added.length || renumbered.length || detailsDone.length || projectDone.length) {
+        for (const label of projectDone) delete state.layout.projectEdits[label];
         for (const t of done) delete state.layout.titleEdits[t];
         for (const [t, field] of detailsDone) {
           delete state.layout.detailEdits[t][field];
@@ -2265,14 +2355,14 @@ try {
 const wordDialog = document.getElementById('word-dialog');
 
 // Resolves to { tracked, exportPdf } or null if cancelled
-async function askWordOptions(edits, additions, numbers, movedCount, details = []) {
+async function askWordOptions(edits, additions, numbers, movedCount, details = [], project = []) {
   const excel = state.registerKind === 'xlsx';
   const wordOk = excel ? await checkExcelAvailable() : await checkWordAvailable();
   const pdfTarget = excel ? await excelPdfPath() : registerPdfPath();
   // Excel has no tracked changes
   document.getElementById('word-tracked').closest('label').hidden = excel;
   document.getElementById('word-export-label').textContent = `Also update the register PDF using ${registerAppName()}`;
-  const total = edits.length + additions.length + numbers.length + movedCount + details.length;
+  const total = edits.length + additions.length + numbers.length + movedCount + details.length + project.length;
   document.getElementById('word-dialog-title').textContent =
     `Save ${total === 1 ? '1 change' : total + ' changes'} to ${baseName(state.registerPath)}`;
   const list = document.getElementById('word-changes');
@@ -2315,6 +2405,17 @@ async function askWordOptions(edits, additions, numbers, movedCount, details = [
     const to = document.createElement('ins');
     to.textContent = e.to;
     li.append(num, ' ', from, ' → ', to);
+    list.appendChild(li);
+  }
+  for (const e of project) {
+    const li = document.createElement('li');
+    const label = document.createElement('b');
+    label.textContent = e.label;
+    const from = document.createElement('del');
+    from.textContent = e.from || '(blank)';
+    const to = document.createElement('ins');
+    to.textContent = e.to || '(blank)';
+    li.append('🗂️ ', label, ' ', from, ' → ', to);
     list.appendChild(li);
   }
   for (const e of details) {
@@ -2394,8 +2495,9 @@ async function saveToWord() {
   const additions = pendingNewEntries();
   const numbers = pendingNumberEdits();
   const moves = pendingMoves();
-  if ((!edits.length && !details.length && !additions.length && !numbers.length && !moves.length) || state.registerKind !== 'docx') return;
-  const options = await askWordOptions(edits, additions, numbers, state.movedTokens.size, details);
+  const project = pendingProjectEdits();
+  if ((!edits.length && !details.length && !project.length && !additions.length && !numbers.length && !moves.length) || state.registerKind !== 'docx') return;
+  const options = await askWordOptions(edits, additions, numbers, state.movedTokens.size, details, project);
   const wantOrder = Object.keys(state.titles);
   if (!options) return;
 
@@ -2421,7 +2523,8 @@ async function saveToWord() {
     const detailsOf = field => Object.fromEntries(details.filter(e => e.field === field).map(e => [e.token, e.to]));
     const scales = RegisterCore.editDocxScales(result.xml, detailsOf('scale'), revOpts);
     const sizes = RegisterCore.editDocxSizes(scales.xml, detailsOf('size'), revOpts);
-    const renumber = RegisterCore.editDocxNumbers(sizes.xml, Object.fromEntries(numbers.map(e => [e.token, e.to])), revOpts);
+    const header = RegisterCore.editDocxProject(sizes.xml, Object.fromEntries(project.map(e => [e.label, e.to])), revOpts);
+    const renumber = RegisterCore.editDocxNumbers(header.xml, Object.fromEntries(numbers.map(e => [e.token, e.to])), revOpts);
     const newNumber = t => (renumber.applied[t] ? renumber.applied[t].to : t);
     const move = RegisterCore.moveDocxRows(renumber.xml, moves.map(m => ({ token: newNumber(m.token), after: m.after && newNumber(m.after) })), revOpts);
     const insert = RegisterCore.insertDocxRows(move.xml, additions.map(e => ({ ...e, after: e.after && newNumber(e.after) })), revOpts);
@@ -2451,6 +2554,13 @@ async function saveToWord() {
       return !got || got.scale !== want.scale || got.size !== want.size;
     });
     if (wrongDetails.length) throw new Error(`the scale or size didn't read back as expected for ${wrongDetails.join(', ')}; nothing was saved.`);
+    // ...and the project details
+    const headerAfter = RegisterCore.readDocxProject(insert.xml).fields;
+    const wrongHeader = RegisterCore.readDocxProject(xml).fields.filter(f => {
+      const got = headerAfter.find(g => g.label === f.label);
+      return !got || got.value !== (header.applied[f.label] ? header.applied[f.label].to : f.value);
+    }).map(f => f.label);
+    if (wrongHeader.length) throw new Error(`the project details didn't read back as expected (${wrongHeader.join(', ')}); nothing was saved.`);
 
     await backupToSS(docx);
     zip.file('word/document.xml', insert.xml);
@@ -2466,6 +2576,10 @@ async function saveToWord() {
         if (from !== to) appendLog(`📝 ${token} ${DETAIL_NAMES[field]}: "${from}" → "${to}" (${how})`);
       }
     }
+    for (const [label, { from, to }] of Object.entries(header.applied)) {
+      if (from !== to) appendLog(`🗂️ ${label}: "${from}" → "${to}" (${how})`);
+    }
+    for (const label of header.notFound) appendLog(`⚠️ The "${label}" field wasn't found in ${baseName(docx)}; its edit was kept.`);
     for (const e of additions.filter(a => insert.inserted.includes(a.token))) {
       appendLog(`➕ ${e.token}: added "${e.title}" ${describePlace(e.after)} (${how})`);
     }
@@ -2477,6 +2591,7 @@ async function saveToWord() {
     }
     for (const token of Object.keys(result.applied)) delete state.layout.titleEdits[token];
     clearSavedDetails(scales.applied, sizes.applied);
+    for (const label of Object.keys(header.applied)) delete state.layout.projectEdits[label];
     recordRenumbers(renumber.applied);
     // Saved moves are done; any later ones (made after this save started) stay
     state.layout.moves = state.layout.moves.filter(m => !moves.includes(m));
@@ -2485,6 +2600,7 @@ async function saveToWord() {
     const saved = [
       `${Object.keys(result.applied).length} title change(s)`,
       `${Object.keys(scales.applied).length + Object.keys(sizes.applied).length} scale/size change(s)`,
+      `${Object.keys(header.applied).length} project detail change(s)`,
       `${Object.keys(renumber.applied).length} new number(s)`,
       `${new Set(move.moved).size} move(s)`,
       `${insert.inserted.length} new entr${insert.inserted.length === 1 ? 'y' : 'ies'}`
@@ -2571,8 +2687,9 @@ async function saveToExcel() {
   const edits = pendingTitleEdits();
   const details = pendingDetailEdits();
   const numbers = pendingNumberEdits();
-  if (!edits.length && !details.length && !numbers.length) return;
-  const options = await askWordOptions(edits, [], numbers, 0, details);
+  const project = pendingProjectEdits();
+  if (!edits.length && !details.length && !project.length && !numbers.length) return;
+  const options = await askWordOptions(edits, [], numbers, 0, details, project);
   if (!options) return;
 
   const xlsx = state.registerPath;
@@ -2589,7 +2706,8 @@ async function saveToExcel() {
       titles: Object.fromEntries(edits.map(e => [e.token, e.to])),
       numbers: Object.fromEntries(numbers.map(e => [e.token, e.to])),
       scales: Object.fromEntries(details.filter(e => e.field === 'scale').map(e => [e.token, e.to])),
-      sizes: Object.fromEntries(details.filter(e => e.field === 'size').map(e => [e.token, e.to]))
+      sizes: Object.fromEntries(details.filter(e => e.field === 'size').map(e => [e.token, e.to])),
+      project: Object.fromEntries(project.map(e => [e.label, e.to]))
     });
     if (result.errors.length) throw new Error(result.errors.join('; ') + '; nothing was saved.');
 
@@ -2609,6 +2727,11 @@ async function saveToExcel() {
       const got = after.details[newNumber(code)];
       if ((!got || got.scale !== want.scale || got.size !== want.size) && !wrong.includes(code)) wrong.push(code);
     }
+    const headerAfter = RegisterCore.readXlsxProject({ ...parts, sheets: { ...parts.sheets, [result.path]: result.xml } }).fields;
+    for (const f of RegisterCore.readXlsxProject(parts).fields) {
+      const got = headerAfter.find(g => g.label === f.label);
+      if (!got || got.value !== (result.applied.project[f.label] ? result.applied.project[f.label].to : f.value)) wrong.push(f.label);
+    }
     if (wrong.length || after.sheet !== before.sheet) {
       throw new Error(`the edited sheet didn't read back as expected${wrong.length ? ' for ' + wrong.join(', ') : ''}; nothing was saved.`);
     }
@@ -2626,10 +2749,14 @@ async function saveToExcel() {
     for (const code of result.notFound) appendLog(`⚠️ ${code} wasn't found on sheet "${result.sheet}"; its edit was kept.`);
     for (const code of Object.keys(result.applied.titles)) delete state.layout.titleEdits[code];
     clearSavedDetails(result.applied.scales, result.applied.sizes);
+    for (const [label, { from, to }] of Object.entries(result.applied.project)) {
+      appendLog(`🗂️ ${label}: "${from}" → "${to}"`);
+      delete state.layout.projectEdits[label];
+    }
     recordRenumbers(result.applied.numbers);
     await saveLayout();
     const detailCount = Object.keys(result.applied.scales).length + Object.keys(result.applied.sizes).length;
-    appendLog(`✅ Saved ${Object.keys(result.applied.titles).length} title change(s), ${detailCount} scale/size change(s) and ${Object.keys(result.applied.numbers).length} new number(s) to sheet "${result.sheet}" of ${baseName(xlsx)}.`);
+    appendLog(`✅ Saved ${Object.keys(result.applied.titles).length} title change(s), ${detailCount} scale/size change(s), ${Object.keys(result.applied.project).length} project detail change(s) and ${Object.keys(result.applied.numbers).length} new number(s) to sheet "${result.sheet}" of ${baseName(xlsx)}.`);
 
     if (options.exportPdf) {
       const pdf = options.pdf;
@@ -2895,6 +3022,7 @@ function unsavedRegisterChanges() {
   const counts = {
     titles: pendingTitleEdits().length,
     details: pendingDetailEdits().length,
+    project: pendingProjectEdits().length,
     numbers: pendingNumberEdits().length,
     entries: pendingNewEntries().length,
     moves: state.movedTokens.size
@@ -2902,10 +3030,11 @@ function unsavedRegisterChanges() {
   const parts = [];
   if (counts.titles) parts.push(`${counts.titles} title change(s)`);
   if (counts.details) parts.push(`${counts.details} scale/size change(s)`);
+  if (counts.project) parts.push(`${counts.project} project detail change(s)`);
   if (counts.numbers) parts.push(`${counts.numbers} new number(s)`);
   if (counts.entries) parts.push(`${counts.entries} new entr${counts.entries === 1 ? 'y' : 'ies'}`);
   if (counts.moves) parts.push(`${counts.moves} moved drawing(s)`);
-  return { ...counts, total: counts.titles + counts.details + counts.numbers + counts.entries + counts.moves, summary: parts.join(', ') };
+  return { ...counts, total: counts.titles + counts.details + counts.project + counts.numbers + counts.entries + counts.moves, summary: parts.join(', ') };
 }
 
 // Forget title and number edits, new entries and moves that haven't been saved to the register.
@@ -2938,6 +3067,7 @@ async function discardRegisterChanges() {
   }
   state.layout.titleEdits = {};
   state.layout.detailEdits = {};
+  state.layout.projectEdits = {};
   state.layout.numberEdits = {};
   state.layout.newEntries = [];
   state.layout.moves = [];

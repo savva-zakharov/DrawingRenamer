@@ -137,7 +137,10 @@ nav.tabs button:hover{ color:var(--fg) }
 .project-grid h4{ margin:0 0 6px; font-size:13px }
 .project-grid dl{ display:grid; grid-template-columns:max-content 1fr; gap:3px 12px; margin:0 }
 .project-grid dt{ color:var(--muted) }
-.project-grid dd{ margin:0 }
+.project-grid dd{ margin:0; display:flex; align-items:center; gap:6px }
+.project-grid dt{ align-self:center }
+input.project-input{ flex:1; min-width:0; max-width:420px; padding:3px 6px; font:inherit }
+input.project-input.edited{ color:var(--edit-fg); border-color:var(--edit-badge-border) }
 .project-values{ margin:0 0 8px; padding:0; list-style:none }
 .project-values li{ margin:2px 0 }
 .project-values .ok{ color:var(--ok) }
