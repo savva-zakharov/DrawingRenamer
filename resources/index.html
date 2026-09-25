@@ -39,6 +39,8 @@
         <span id="summary" class="muted">No register loaded.</span>
         <label class="inline"><input type="checkbox" id="hide-empty" /> Hide missing drawings</label>
         <label class="inline" title="Read the title printed in each drawing's title block"><input type="checkbox" id="show-file-titles" /> Show in-file titles</label>
+        <label class="inline" title="Read the revision from each drawing's title block"><input type="checkbox" id="show-file-rev" /> Revision</label>
+        <label class="inline" title="Read the scale and sheet size from each drawing's title block"><input type="checkbox" id="show-file-scale" /> Scale &amp; size</label>
         <span id="watching" class="muted"></span>
         <span class="actions">
           <button id="rename" class="primary" disabled>RENAME</button>
@@ -47,7 +49,7 @@
     </header>
 
     <main id="table-wrap">
-      <table id="drawings" class="hide-file-titles">
+      <table id="drawings" class="hide-file-titles hide-file-rev hide-file-scale">
         <thead>
           <tr>
             <th class="col-drag"></th>
@@ -55,6 +57,9 @@
             <th class="col-number">Drawing No.</th>
             <th>Register title<button id="titles-from-register" class="col-file-title title-copy right">&gt;</button></th>
             <th class="col-file-title"><button id="titles-from-files" class="title-copy">&lt;</button>In-File Title</th>
+            <th class="col-file-rev">Rev</th>
+            <th class="col-file-scale">Scale</th>
+            <th class="col-file-scale">Size</th>
             <th>Current file</th>
             <th>New name</th>
             <th class="col-status">Status</th>

@@ -11,6 +11,10 @@ const entryBtn = document.getElementById('new-entry');
 const hideEmptyCheckbox = document.getElementById('hide-empty');
 const checkAllCheckbox = document.getElementById('check-all');
 const fileTitlesCheckbox = document.getElementById('show-file-titles');
+const fileRevCheckbox = document.getElementById('show-file-rev');
+const fileScaleCheckbox = document.getElementById('show-file-scale');
+// Each shows columns read from the drawings' title blocks (all fields are read in one pass)
+const fileDetailCheckboxes = [[fileTitlesCheckbox, 'hide-file-titles'], [fileRevCheckbox, 'hide-file-rev'], [fileScaleCheckbox, 'hide-file-scale']];
 const tableEl = document.getElementById('drawings');
 const titlesFromFilesBtn = document.getElementById('titles-from-files');
 const titlesFromRegisterBtn = document.getElementById('titles-from-register');
@@ -59,7 +63,8 @@ const state = {
   displayKeys: [],       // keys of the selectable rows in the order shown
   knownFiles: null,      // rels seen on the previous refresh, to highlight new arrivals
   watchers: new Map(),   // rel dir => watcher id
-  fileTitles: new Map(), // full path => { stamp, title } read from a drawing's title block (title null if unreadable)
+  fileDetails: new Map(), // full path => { stamp, details } read from a drawing's title block:
+                          // details { title, rev, scale, size }, or null if the file couldn't be read
   pollTimer: null,
   busy: false
 };
@@ -194,17 +199,35 @@ async function extractPdfText(buffer) {
   return text;
 }
 
-// The title printed in a drawing's title block ('' if there isn't one), from its first page.
+// Multiplies two PDF transform matrices [a b c d e f]
+function transformMatrix(m, n) {
+  return [
+    m[0] * n[0] + m[2] * n[1], m[1] * n[0] + m[3] * n[1],
+    m[0] * n[2] + m[2] * n[3], m[1] * n[2] + m[3] * n[3],
+    m[0] * n[4] + m[2] * n[5] + m[4], m[1] * n[4] + m[3] * n[5] + m[5]
+  ];
+}
+
+// Title, revision, scale and sheet size from a drawing's title block ('' for any not found), from
+// its first page. Text positions are taken as the sheet is displayed, so rotated sheets (common
+// with ISO 19650 title blocks) read the same as upright ones.
 // Pass a PDFJS.PDFWorker to reuse it (starting a worker per file is most of the cost).
-async function readFileTitle(filePath, worker) {
+async function readFileDetails(filePath, worker) {
   const data = new Uint8Array(await Neutralino.filesystem.readBinaryFile(filePath));
   const doc = await PDFJS.getDocument(worker ? { data, worker } : { data });
   try {
     const page = await doc.getPage(1);
+    const viewport = page.getViewport(1);
     const content = await page.getTextContent({ normalizeWhitespace: false, disableCombineTextItems: false });
-    return RegisterCore.readTitleBlock(content.items.map(i => ({
-      str: i.str, x: i.transform[4], y: i.transform[5], h: Math.hypot(i.transform[2], i.transform[3]) || 1
-    })));
+    const items = content.items.map(i => {
+      const m = transformMatrix(viewport.transform, i.transform);
+      // The viewport has y downwards; title block parsing wants y upwards
+      return {
+        str: i.str, x: m[4], y: viewport.height - m[5], h: Math.hypot(m[2], m[3]) || 1,
+        rotated: Math.abs(m[1]) > Math.abs(m[0]) * 0.05
+      };
+    });
+    return RegisterCore.readTitleBlock(items, { width: viewport.width, height: viewport.height });
   } finally {
     doc.destroy();
   }
@@ -724,7 +747,7 @@ function renderSectionHeader(section, visible, inside) {
   }
 
   const td = cell(tr, '');
-  td.colSpan = 6; // includes In-File Title, which may be hidden
+  td.colSpan = 9; // includes the in-file detail columns, which may be hidden
   const name = document.createElement('span');
   name.className = 'section-name';
   if (section.unmatched) name.textContent = 'Files not in the register';
@@ -1032,11 +1055,11 @@ function renderRow(row, newFiles, alt, depth) {
   if (depth) numberTd.style.paddingLeft = `${8 + depth * 22}px`;
   const titleTd = cell(tr, '', 'title');
   if (showDrawing) renderTitle(titleTd, row);
-  const fileTitleTd = cell(tr, '');
-  renderFileTitle(fileTitleTd, row);
+  const detailTds = { title: cell(tr, ''), rev: cell(tr, ''), scale: cell(tr, ''), size: cell(tr, '') };
+  renderFileDetails(detailTds, row);
   if (row.rel) {
-    if (!fileTitleCells.has(row.rel)) fileTitleCells.set(row.rel, []);
-    fileTitleCells.get(row.rel).push({ td: fileTitleTd, row });
+    if (!fileDetailCells.has(row.rel)) fileDetailCells.set(row.rel, []);
+    fileDetailCells.get(row.rel).push({ tds: detailTds, row });
   }
 
   const current = row.rel ? displayPath(row.rel) : 'No matching file';
@@ -1281,45 +1304,62 @@ async function setTitleEdit(shown, title) {
 }
 
 // --------------------
-// In-file titles (read from each drawing's title block while "Show in-file titles" is ticked)
+// In-file details: title, revision, scale and sheet size read from each drawing's title block
+// while any of their checkboxes is ticked
 // --------------------
-const fileTitleCells = new Map(); // rel => [{ td, row }] in the current table
-let fileTitleRun = 0;
+const fileDetailCells = new Map(); // rel => [{ tds: { title, rev, scale, size }, row }] in the current table
+let fileDetailRun = 0;
 
 const sameTitle = (a, b) => a.replace(/\s+/g, ' ').trim().toLowerCase() === b.replace(/\s+/g, ' ').trim().toLowerCase();
+const DETAIL_COLUMNS = { title: 'col-file-title', rev: 'col-file-rev', scale: 'col-file-scale', size: 'col-file-scale' };
 
-function renderFileTitle(td, row) {
-  td.className = 'col-file-title file-title';
-  td.textContent = '';
-  td.removeAttribute('title');
+function fileDetailsShown() {
+  return fileDetailCheckboxes.some(([cb]) => cb.checked);
+}
+
+function renderFileDetails(tds, row) {
+  for (const [field, td] of Object.entries(tds)) {
+    td.className = `${DETAIL_COLUMNS[field]} file-detail file-${field}`;
+    td.textContent = '';
+    td.removeAttribute('title');
+  }
   if (!row.rel || !/\.pdf$/i.test(row.rel)) return;
-  const entry = state.fileTitles.get(absPath(row.rel));
+  const entry = state.fileDetails.get(absPath(row.rel));
   if (!entry) {
-    td.textContent = 'Reading…';
-    td.classList.add('pending');
-  } else if (entry.title === null) {
-    td.textContent = "Couldn't read file";
-    td.classList.add('none');
-  } else if (!entry.title) {
-    td.title = 'No title block found in this file';
-  } else {
-    td.textContent = entry.title;
-    if (row.title && !sameTitle(entry.title, row.title)) {
-      td.classList.add('differs');
-      td.title = `Differs from the register title: ${row.title}`;
-    }
+    tds.title.textContent = 'Reading…';
+    tds.rev.textContent = tds.scale.textContent = tds.size.textContent = '…';
+    for (const td of Object.values(tds)) td.classList.add('pending');
+    return;
+  }
+  if (!entry.details) {
+    tds.title.textContent = "Couldn't read file";
+    tds.title.classList.add('none');
+    return;
+  }
+  const { title, rev, scale, size } = entry.details;
+  tds.rev.textContent = rev;
+  tds.scale.textContent = scale;
+  tds.size.textContent = size;
+  if (!title) {
+    tds.title.title = 'No title block found in this file';
+    return;
+  }
+  tds.title.textContent = title;
+  if (row.title && !sameTitle(title, row.title)) {
+    tds.title.classList.add('differs');
+    tds.title.title = `Differs from the register title: ${row.title}`;
   }
 }
 
-// Reads the titles of files not read yet or changed since; the table updates as each one arrives.
+// Reads the details of files not read yet or changed since; the table updates as each one arrives.
 // Several files are read at once, each lane with its own pdf.js worker.
-const FILE_TITLE_LANES = Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 4) - 1)); // more lanes gained nothing in testing
+const FILE_DETAIL_LANES = Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 4) - 1)); // more lanes gained nothing in testing
 
-async function loadFileTitles() {
-  if (!fileTitlesCheckbox.checked || !state.targetDir) return;
-  const run = ++fileTitleRun;
-  // Stop if unticked, superseded by a newer run, or files are being renamed
-  const stopped = () => run !== fileTitleRun || !fileTitlesCheckbox.checked || state.busy;
+async function loadFileDetails() {
+  if (!fileDetailsShown() || !state.targetDir) return;
+  const run = ++fileDetailRun;
+  // Stop if every checkbox is unticked, superseded by a newer run, or files are being renamed
+  const stopped = () => run !== fileDetailRun || !fileDetailsShown() || state.busy;
   const queue = [...new Set(state.rows.filter(r => r.rel && /\.pdf$/i.test(r.rel)).map(r => r.rel))];
   const started = Date.now();
   let read = 0;
@@ -1333,25 +1373,25 @@ async function loadFileTitles() {
         const stats = await getStatsOrNull(filePath);
         if (!stats) continue;
         const stamp = `${stats.size}:${stats.modifiedAt}`;
-        const cached = state.fileTitles.get(filePath);
+        const cached = state.fileDetails.get(filePath);
         if (cached && cached.stamp === stamp) continue;
         if (!worker) worker = new PDFJS.PDFWorker();
-        let title = null;
+        let details = null;
         try {
-          title = await readFileTitle(filePath, worker);
+          details = await readFileDetails(filePath, worker);
         } catch (e) {
           // shown as unreadable in the table
         }
-        state.fileTitles.set(filePath, { stamp, title });
+        state.fileDetails.set(filePath, { stamp, details });
         read++;
-        for (const { td, row } of fileTitleCells.get(rel) || []) renderFileTitle(td, row);
+        for (const { tds, row } of fileDetailCells.get(rel) || []) renderFileDetails(tds, row);
       }
     } finally {
       if (worker) worker.destroy();
     }
   };
-  await Promise.all(Array.from({ length: FILE_TITLE_LANES }, lane));
-  if (read > 1 && !stopped()) appendLog(`📄 Read ${read} in-file titles in ${((Date.now() - started) / 1000).toFixed(1)}s.`);
+  await Promise.all(Array.from({ length: FILE_DETAIL_LANES }, lane));
+  if (read > 1 && !stopped()) appendLog(`📄 Read the title blocks of ${read} drawings in ${((Date.now() - started) / 1000).toFixed(1)}s.`);
 }
 
 // < : the selected drawings take the title read from their file, as pending register edits
@@ -1370,8 +1410,8 @@ async function copyTitles(fromFiles) {
       }
       continue;
     }
-    const read = row.rel && state.fileTitles.get(absPath(row.rel));
-    const title = read && read.title;
+    const read = row.rel && state.fileDetails.get(absPath(row.rel));
+    const title = read && read.details && read.details.title;
     if (!title) {
       unread++;
       continue;
@@ -1391,7 +1431,7 @@ async function copyTitles(fromFiles) {
   } else {
     appendLog(fromFiles ? 'ℹ️ The selected drawings already use their in-file titles.' : 'ℹ️ The selected drawings already use the register title.');
   }
-  if (unread) appendLog(`ℹ️ ${plural(unread)} skipped: no in-file title${fileTitlesCheckbox.checked ? ' (yet)' : ''}.`);
+  if (unread) appendLog(`ℹ️ ${plural(unread)} skipped: no in-file title${fileDetailsShown() ? ' (yet)' : ''}.`);
   rebuild();
 }
 
@@ -1402,7 +1442,7 @@ function render(newFiles) {
     return;
   }
   rowsEl.textContent = '';
-  fileTitleCells.clear();
+  fileDetailCells.clear();
   const showHeaders = state.layout.folders.length > 0;
   state.displayKeys = [];
   let dataRows = 0;
@@ -1640,7 +1680,7 @@ async function refresh() {
       state.files = state.files.filter(f => !f.dir || state.layout.folders.includes(f.dir));
     }
     rebuild(newFiles);
-    loadFileTitles();
+    loadFileDetails();
     await syncWatchers();
   } catch (err) {
     appendLog('❌ Could not refresh folder: ' + (err.message || err));
@@ -2758,10 +2798,12 @@ hideEmptyCheckbox.addEventListener('change', () => render(new Set()));
 titlesFromFilesBtn.addEventListener('click', () => copyTitles(true));
 titlesFromRegisterBtn.addEventListener('click', () => copyTitles(false));
 
-fileTitlesCheckbox.addEventListener('change', () => {
-  tableEl.classList.toggle('hide-file-titles', !fileTitlesCheckbox.checked);
-  if (fileTitlesCheckbox.checked) loadFileTitles();
-});
+for (const [cb, hideClass] of fileDetailCheckboxes) {
+  cb.addEventListener('change', () => {
+    tableEl.classList.toggle(hideClass, !cb.checked);
+    if (cb.checked) loadFileDetails();
+  });
+}
 
 checkAllCheckbox.addEventListener('change', () => {
   for (const row of visibleRows()) {

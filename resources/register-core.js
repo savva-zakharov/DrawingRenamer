@@ -36,13 +36,27 @@
   // Drawing title blocks
   // --------------------
 
-  // The title printed in a drawing's title block, from the text items on its sheet
-  // ({ str, x, y, h } in PDF units, y upwards). The title sits to the right of a "Title." label,
-  // from the label's top down to the next label under it (e.g. "Client."), possibly over
-  // several lines, which are joined with spaces. '' when there's no title block.
+  // Details printed in a drawing's title block, from the text items on its first page:
+  // { title, rev, scale, size } ('' where not found). Items are { str, x, y, h, rotated } in PDF units
+  // as the sheet is displayed (rotation applied), y upwards; page is { width, height }.
+  function readTitleBlock(items, page) {
+    // Only horizontal text; rotated notes and dimensions aren't title block fields
+    const text = items.filter(i => i.str.trim() && !i.rotated);
+    const scaleField = readField(text, SCALE_LABEL_RE);
+    const sizeField = readField(text, SIZE_LABEL_RE);
+    const parsed = splitScale(scaleField);
+    return {
+      title: readTitle(text),
+      rev: readRevision(text),
+      scale: parsed.scale,
+      size: (sizeField.match(SHEET_SIZE_RE) || [])[0] || parsed.size || (page ? sheetSizeOf(page.width, page.height) : '')
+    };
+  }
+
+  // The title sits to the right of a "Title." label, from the label's top down to the next label
+  // under it (e.g. "Client."), possibly over several lines, which are joined with spaces
   const TITLE_LABEL_RE = /^\s*(?:drawing\s+|dwg\.?\s+)?title\s*[.:]?\s*$/i;
-  function readTitleBlock(items) {
-    const text = items.filter(i => i.str.trim());
+  function readTitle(text) {
     let best = '';
     for (const label of text.filter(i => TITLE_LABEL_RE.test(i.str))) {
       const sameColumn = i => Math.abs(i.x - label.x) < 2;
@@ -50,19 +64,87 @@
       const floor = below.length ? Math.max(...below.map(i => i.y)) : label.y - label.h * 8;
       const top = label.y + label.h;
       const parts = text.filter(i => i.x > label.x + 1 && !sameColumn(i) && i.y < top && i.y > floor);
-      // Group into lines by baseline, top to bottom
-      const lines = [];
-      for (const p of parts) {
-        const line = lines.find(l => Math.abs(l.y - p.y) < p.h * 0.4);
-        if (line) line.parts.push(p);
-        else lines.push({ y: p.y, parts: [p] });
-      }
-      const title = lines.sort((a, b) => b.y - a.y)
-        .map(l => l.parts.sort((a, b) => a.x - b.x).map(p => p.str).join(''))
-        .join(' ').replace(/\s+/g, ' ').trim();
+      const title = joinLines(parts, ' ');
       if (title.length > best.length) best = title;
     }
     return best;
+  }
+
+  // Items grouped into lines by baseline, top to bottom, each line read left to right
+  function joinLines(parts, separator) {
+    const lines = [];
+    for (const p of parts) {
+      const line = lines.find(l => Math.abs(l.y - p.y) < p.h * 0.4);
+      if (line) line.parts.push(p);
+      else lines.push({ y: p.y, parts: [p] });
+    }
+    return lines.sort((a, b) => b.y - a.y)
+      .map(l => l.parts.sort((a, b) => a.x - b.x).map(p => p.str).join(''))
+      .join(separator).replace(/\s+/g, ' ').trim();
+  }
+
+  // Title strip fields have the label at the top of the cell and the value under it. The value
+  // is the first line below the label, from the label's left edge up to the next label along.
+  function fieldValue(text, label) {
+    const h = label.h;
+    const labelRow = text.filter(i => i !== label && Math.abs(i.y - label.y) < h * 0.5 && i.x > label.x + 1);
+    const right = labelRow.length ? Math.min(...labelRow.map(i => i.x)) - 1 : label.x + h * 20;
+    const inCell = text.filter(i => i.y < label.y - h * 0.5 && i.y > label.y - h * 4 &&
+      i.x > label.x - h * 1.5 && i.x < right);
+    if (!inCell.length) return '';
+    const top = Math.max(...inCell.map(i => i.y));
+    return joinLines(inCell.filter(i => Math.abs(i.y - top) < i.h * 0.4), ' ');
+  }
+
+  // The lowest matching label on the sheet: the title strip is along the bottom, and tables
+  // with the same headings (the revision history) sit above it
+  function lowestLabels(text, labelRe) {
+    return text.filter(i => labelRe.test(i.str)).sort((a, b) => a.y - b.y);
+  }
+
+  function readField(text, labelRe) {
+    for (const label of lowestLabels(text, labelRe)) {
+      const value = fieldValue(text, label);
+      if (value) return value;
+    }
+    return '';
+  }
+
+  // "Rev. No.", "Rev.", "Revision" - but not the Rev column of a revision history table, which
+  // has a description column beside it
+  const REV_LABEL_RE = /^\s*rev(?:ision|\.)?\s*(?:no\.?|number)?\s*[.:]?\s*$/i;
+  const HISTORY_HEADING_RE = /^\s*(?:description|amendments?|details|initials|remarks|comments?)\b/i;
+  function readRevision(text) {
+    const labels = lowestLabels(text, REV_LABEL_RE).filter(label =>
+      !text.some(i => HISTORY_HEADING_RE.test(i.str) && Math.abs(i.y - label.y) < label.h * 0.5 && Math.abs(i.x - label.x) < label.h * 60));
+    // A revision is a short code (C07, P1, A, 03); anything longer isn't one
+    for (const label of labels) {
+      const value = fieldValue(text, label);
+      if (value && value.length <= 8) return value;
+    }
+    return '';
+  }
+
+  const SCALE_LABEL_RE = /^\s*scales?\s*[.:]?\s*$/i;
+  const SIZE_LABEL_RE = /^\s*(?:sheet|paper|drawing)?\s*size\s*[.:]?\s*$/i;
+  const SHEET_SIZE_RE = /\bA[0-4]\b/i;
+
+  // "1:200 @ A1" -> { scale: '1:200', size: 'A1' }; "1:50@A0", "As indicated @ A1", "NTS" etc.
+  function splitScale(value) {
+    const at = value.lastIndexOf('@');
+    const sizePart = at >= 0 ? value.slice(at + 1) : value;
+    const sizeMatch = sizePart.match(SHEET_SIZE_RE);
+    let scale = at >= 0 ? value.slice(0, at) : sizeMatch ? value.replace(SHEET_SIZE_RE, '') : value;
+    scale = scale.replace(/\s*([:@])\s*/g, '$1').replace(/^[\s,;-]+|[\s,;-]+$/g, '');
+    return { scale, size: sizeMatch ? sizeMatch[0].toUpperCase() : '' };
+  }
+
+  // ISO A sheet from the page size in points, allowing a few percent for plotter margins
+  const SHEET_SIZES_MM = [['A0', 841, 1189], ['A1', 594, 841], ['A2', 420, 594], ['A3', 297, 420], ['A4', 210, 297]];
+  function sheetSizeOf(width, height) {
+    const [short, long] = [width, height].map(v => v * 25.4 / 72).sort((a, b) => a - b);
+    const found = SHEET_SIZES_MM.find(([, s, l]) => Math.abs(short - s) / s < 0.03 && Math.abs(long - l) / l < 0.03);
+    return found ? found[0] : '';
   }
 
   // --------------------
@@ -949,6 +1031,8 @@
     DRAWING_NUMBER,
     parsePdfText,
     readTitleBlock,
+    splitScale,
+    sheetSizeOf,
     isLooseCode,
     readXlsxRegister,
     editXlsxRegister,
