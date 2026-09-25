@@ -194,9 +194,11 @@ async function extractPdfText(buffer) {
   return text;
 }
 
-// The title printed in a drawing's title block ('' if there isn't one), from its first page
-async function readFileTitle(filePath) {
-  const doc = await PDFJS.getDocument({ data: new Uint8Array(await Neutralino.filesystem.readBinaryFile(filePath)) });
+// The title printed in a drawing's title block ('' if there isn't one), from its first page.
+// Pass a PDFJS.PDFWorker to reuse it (starting a worker per file is most of the cost).
+async function readFileTitle(filePath, worker) {
+  const data = new Uint8Array(await Neutralino.filesystem.readBinaryFile(filePath));
+  const doc = await PDFJS.getDocument(worker ? { data, worker } : { data });
   try {
     const page = await doc.getPage(1);
     const content = await page.getTextContent({ normalizeWhitespace: false, disableCombineTextItems: false });
@@ -1309,29 +1311,47 @@ function renderFileTitle(td, row) {
   }
 }
 
-// Reads the titles of files not read yet or changed since; the table updates as each one arrives
+// Reads the titles of files not read yet or changed since; the table updates as each one arrives.
+// Several files are read at once, each lane with its own pdf.js worker.
+const FILE_TITLE_LANES = Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 4) - 1)); // more lanes gained nothing in testing
+
 async function loadFileTitles() {
   if (!fileTitlesCheckbox.checked || !state.targetDir) return;
   const run = ++fileTitleRun;
-  const rels = [...new Set(state.rows.filter(r => r.rel && /\.pdf$/i.test(r.rel)).map(r => r.rel))];
-  for (const rel of rels) {
-    // Stop if unticked, superseded by a newer run, or files are being renamed
-    if (run !== fileTitleRun || !fileTitlesCheckbox.checked || state.busy) return;
-    const filePath = absPath(rel);
-    const stats = await getStatsOrNull(filePath);
-    if (!stats) continue;
-    const stamp = `${stats.size}:${stats.modifiedAt}`;
-    const cached = state.fileTitles.get(filePath);
-    if (cached && cached.stamp === stamp) continue;
-    let title = null;
+  // Stop if unticked, superseded by a newer run, or files are being renamed
+  const stopped = () => run !== fileTitleRun || !fileTitlesCheckbox.checked || state.busy;
+  const queue = [...new Set(state.rows.filter(r => r.rel && /\.pdf$/i.test(r.rel)).map(r => r.rel))];
+  const started = Date.now();
+  let read = 0;
+
+  const lane = async () => {
+    let worker = null;
     try {
-      title = await readFileTitle(filePath);
-    } catch (e) {
-      // shown as unreadable in the table
+      while (queue.length && !stopped()) {
+        const rel = queue.shift();
+        const filePath = absPath(rel);
+        const stats = await getStatsOrNull(filePath);
+        if (!stats) continue;
+        const stamp = `${stats.size}:${stats.modifiedAt}`;
+        const cached = state.fileTitles.get(filePath);
+        if (cached && cached.stamp === stamp) continue;
+        if (!worker) worker = new PDFJS.PDFWorker();
+        let title = null;
+        try {
+          title = await readFileTitle(filePath, worker);
+        } catch (e) {
+          // shown as unreadable in the table
+        }
+        state.fileTitles.set(filePath, { stamp, title });
+        read++;
+        for (const { td, row } of fileTitleCells.get(rel) || []) renderFileTitle(td, row);
+      }
+    } finally {
+      if (worker) worker.destroy();
     }
-    state.fileTitles.set(filePath, { stamp, title });
-    for (const { td, row } of fileTitleCells.get(rel) || []) renderFileTitle(td, row);
-  }
+  };
+  await Promise.all(Array.from({ length: FILE_TITLE_LANES }, lane));
+  if (read > 1 && !stopped()) appendLog(`📄 Read ${read} in-file titles in ${((Date.now() - started) / 1000).toFixed(1)}s.`);
 }
 
 // < : the selected drawings take the title read from their file, as pending register edits
