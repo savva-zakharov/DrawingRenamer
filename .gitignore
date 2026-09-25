@@ -30,6 +30,19 @@ build/
 # PDF files
 *.pdf
 
+# Test Directory
+
+test/
+
 # Optional: npm package lock files (if you don't want to track them)
 package-lock.json
 yarn.lock
+
+# Neutralino
+bin/
+resources/js/neutralino.js
+resources/js/neutralino.d.ts
+.tmp/
+neutralinojs.log
+resources/js/pdfjs/
+target/

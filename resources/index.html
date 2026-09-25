@@ -3,13 +3,15 @@
   <head>
     <meta charset="utf-8" />
     <title>Drawing Renamer</title>
+    <link rel="icon" href="data:," />
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
     <h2>Drawing Renamer</h2>
     <label>Register path (file or directory):</label>
-  <input id="register" class="wide" placeholder="Optional: path to register PDF or folder" />
+  <input id="register" class="wide" placeholder="Path to register PDF or the folder containing it" />
     <button id="choose">Choose folder...</button>
+    <button id="choose-file">Choose PDF...</button>
     <label><input type="checkbox" id="dry" /> Dry run (don't rename files)</label>
     <div class="mt">
       <button id="start">Start</button>
@@ -18,14 +20,8 @@
     <h3>Log</h3>
     <div id="log"></div>
 
-    <script>
-      // If running under Neutralino, the runtime provides /neutralino.js automatically
-      if (location.protocol === 'neutralino:') {
-        var s = document.createElement('script');
-        s.src = '/neutralino.js';
-        document.head.appendChild(s);
-      }
-    </script>
+    <script src="js/pdfjs/pdf.js"></script>
+    <script src="js/neutralino.js"></script>
     <script src="renderer.js"></script>
   </body>
 </html>
