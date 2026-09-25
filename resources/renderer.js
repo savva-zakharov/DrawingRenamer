@@ -1134,9 +1134,11 @@ function renderRow(row, newFiles, alt, depth) {
   if (showDrawing) renderTitle(titleTd, row);
   const detailTds = { title: cell(tr, ''), rev: cell(tr, ''), scale: cell(tr, ''), size: cell(tr, '') };
   renderFileDetails(detailTds, row);
+  // The status cell's revision warning is added below; it updates with the title block too
+  const detailEntry = { tds: detailTds, row, warn: null };
   if (row.rel) {
     if (!fileDetailCells.has(row.rel)) fileDetailCells.set(row.rel, []);
-    fileDetailCells.get(row.rel).push({ tds: detailTds, row });
+    fileDetailCells.get(row.rel).push(detailEntry);
   }
 
   const current = row.rel ? displayPath(row.rel) : 'No matching file';
@@ -1184,6 +1186,12 @@ function renderRow(row, newFiles, alt, depth) {
     warn.textContent = '⚠ code reordered';
     warn.title = `${row.reason}; tick it to rename the file with the register's code`;
     statusTd.appendChild(warn);
+  }
+  if (row.token && row.rel) {
+    detailEntry.warn = document.createElement('div');
+    detailEntry.warn.className = 'reordered';
+    statusTd.appendChild(detailEntry.warn);
+    renderRevisionWarning(detailEntry.warn, row);
   }
 
   rowsEl.appendChild(tr);
@@ -1575,7 +1583,10 @@ async function loadFileDetails() {
         }
         state.fileDetails.set(filePath, { stamp, details });
         read++;
-        for (const { tds, row } of fileDetailCells.get(rel) || []) renderFileDetails(tds, row);
+        for (const { tds, row, warn } of fileDetailCells.get(rel) || []) {
+          renderFileDetails(tds, row);
+          if (warn) renderRevisionWarning(warn, row);
+        }
         renderProjectData();
         renderRevisionData();
       }
@@ -1898,6 +1909,30 @@ function markProblems(row, mark, index) {
       : `Doesn't follow ${prev} (issued ${prevDate}); expected ${RegisterCore.nextRevision(prev)}`);
   }
   return problems;
+}
+
+// Revision problems to flag in the table's Status column: for a drawing in the staged issue, its
+// mark's problems; otherwise a title block revision that doesn't follow the last one issued (the
+// same one means it hasn't been revised since). Empty until the title block has been read.
+function revisionWarnings(row) {
+  const info = state.registerIssues;
+  if (!info || !info.columns.length || !row.token || !row.rel || row.isNew || !info.marks[row.origToken]) return [];
+  const staged = pendingIssue();
+  if (staged && staged.marks[row.origToken] !== undefined) {
+    return markProblems(row, staged.marks[row.origToken], staged.index).map(p => `In the staged issue: ${p}`);
+  }
+  if (registerUsesTicks()) return [];
+  const inFile = inFileRevision(row);
+  const { prev: last, prevDate } = previousMark(row.origToken, info.columns.length);
+  if (!inFile || !last || inFile.toUpperCase() === last.toUpperCase() || RegisterCore.revisionFollows(last, inFile)) return [];
+  return [`The title block says ${inFile}, which doesn't follow ${last} (last issued ${prevDate}); expected ${last} or ${RegisterCore.nextRevision(last)}`];
+}
+
+function renderRevisionWarning(div, row) {
+  const problems = revisionWarnings(row);
+  div.hidden = !problems.length;
+  div.textContent = problems.length ? '⚠ revision' : '';
+  div.title = problems.join('\n');
 }
 
 // Drawings in the issue: the selected rows that are in the register and have a file here
