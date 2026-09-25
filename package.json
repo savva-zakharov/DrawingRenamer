@@ -9,13 +9,14 @@
   },
   "scripts": {
     "start": "node renamer.js",
-    "copy-pdfjs": "node scripts/copy-pdfjs.js",
-    "start-gui": "npm run copy-pdfjs && neu run",
-    "build-gui": "npm run copy-pdfjs && neu build --release --embed-resources"
+    "copy-libs": "node scripts/copy-libs.js",
+    "start-gui": "npm run copy-libs && neu run",
+    "build-gui": "npm run copy-libs && neu build --release --embed-resources"
   },
   "author": "Your Name",
   "license": "MIT",
   "dependencies": {
+    "jszip": "^3.10.2",
     "pdf-parse": "^1.1.1"
   },
   "engines": {

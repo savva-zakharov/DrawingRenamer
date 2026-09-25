@@ -6,6 +6,7 @@ const summaryEl = document.getElementById('summary');
 const watchingEl = document.getElementById('watching');
 const renameBtn = document.getElementById('rename');
 const folderBtn = document.getElementById('make-folder');
+const wordBtn = document.getElementById('save-word');
 const hideEmptyCheckbox = document.getElementById('hide-empty');
 const checkAllCheckbox = document.getElementById('check-all');
 
@@ -17,11 +18,15 @@ const LAYOUT_FILE = 'drawing-renamer.json';
 
 // File paths inside targetDir are "relative paths" using '/', e.g. "Plans/PA-100 - Plan.pdf"
 const state = {
-  registerPDF: null,     // full path of the loaded register
+  registerPath: null,    // full path of the loaded register (.docx or .pdf)
+  registerKind: null,    // 'docx' or 'pdf'
   registerModified: null,
   targetDir: null,       // directory containing the register (the parent of any drawing folders)
-  tokenMap: {},          // drawing number => title
-  layout: { folders: [], assignments: {} }, // folder list and drawing number => folder
+  tokenMap: {},          // drawing number => title, as in the register
+  titles: {},            // drawing number => title used for renaming (register title or an edit)
+  layout: { folders: [], assignments: {}, titleEdits: {} }, // folders, drawing number => folder, title edits not yet in Word
+  editingToken: null,    // drawing whose title is being edited in the table
+  wordAvailable: null,   // whether Word can be driven to export PDFs (checked on first use)
   layoutBroken: false,   // the layout file couldn't be read, so don't overwrite it
   rows: [],
   files: [],             // { dir, name, rel } for the top folder and every drawing folder
@@ -77,11 +82,23 @@ async function listFiles(dir) {
 }
 
 // --------------------
-// 1️⃣ Find register PDF
+// 1️⃣ Find register (Word preferred over PDF)
 // --------------------
-async function findRegisterPDF(dir) {
-  const files = await listFiles(dir);
-  const found = files.find(f => f.toLowerCase().includes('register') && f.toLowerCase().endsWith('.pdf'));
+function registerKindOf(name) {
+  const lower = name.toLowerCase();
+  if (lower.startsWith('~$')) return null; // Word's lock file for an open document
+  if (lower.endsWith('.docx')) return 'docx';
+  if (lower.endsWith('.pdf')) return 'pdf';
+  return null;
+}
+
+// Files named "...register..." in dir; a Word register beats a PDF one, and the last by name
+// (registers are usually date-prefixed, so that's the latest) beats earlier ones
+async function findRegister(dir) {
+  const candidates = (await listFiles(dir))
+    .filter(f => f.toLowerCase().includes('register') && registerKindOf(f))
+    .sort((a, b) => a.localeCompare(b));
+  const found = candidates.filter(f => registerKindOf(f) === 'docx').pop() || candidates.pop();
   return found ? joinPath(dir, found) : null;
 }
 
@@ -89,15 +106,20 @@ async function resolveRegisterPath(input) {
   const stats = await getStatsOrNull(input);
   if (!stats) throw new Error('Provided register path does not exist.');
   if (stats.isFile) {
-    if (!input.toLowerCase().endsWith('.pdf')) throw new Error('Provided file is not a PDF.');
+    if (!registerKindOf(baseName(input))) throw new Error('Provided file is not a Word (.docx) or PDF register.');
     return input;
   }
   if (stats.isDirectory) {
-    const found = await findRegisterPDF(input);
-    if (!found) throw new Error('No register PDF found in that directory.');
+    const found = await findRegister(input);
+    if (!found) throw new Error('No register (.docx or .pdf with "register" in its name) found in that directory.');
     return found;
   }
   throw new Error('Unsupported path type.');
+}
+
+// The PDF next to a Word register with the same name (usually exported from it)
+function registerPdfPath() {
+  return state.registerPath.replace(/\.[^./\\]+$/, '') + '.pdf';
 }
 
 // --------------------
@@ -127,22 +149,21 @@ async function extractPdfText(buffer) {
 }
 
 // --------------------
-// 3️⃣ Parse register PDF into token map
+// 3️⃣ Parse register into token map
 // --------------------
-async function parseRegisterPDF(filePath) {
-  const buffer = await Neutralino.filesystem.readBinaryFile(filePath);
-  const text = (await extractPdfText(buffer)).replace(/\r?\n/g, ' ');
+async function readDocumentXml(docxPath) {
+  const zip = await JSZip.loadAsync(await Neutralino.filesystem.readBinaryFile(docxPath));
+  const part = zip.file('word/document.xml');
+  if (!part) throw new Error(`${baseName(docxPath)} doesn't look like a Word document.`);
+  return { zip, xml: await part.async('string') };
+}
 
-  const map = {};
-  // (1) Drawing number: [A-Z]+(?:-[A-Z0-9]+)*-\d+
-  // (2) Title: non-greedy match up to first scale 1:\d+
-  const entryRegex = /([A-Z]+(?:-[A-Z0-9]+)*-\d+)\s+(.+?)\s+1:\d+/gi;
-  let match;
-  while ((match = entryRegex.exec(text)) !== null) {
-    const drawingNumber = match[1].toUpperCase();
-    map[drawingNumber] = match[2].trim().replace(/\s+/g, ' ');
+async function parseRegister(filePath) {
+  if (registerKindOf(baseName(filePath)) === 'docx') {
+    return RegisterCore.readDocxTitles((await readDocumentXml(filePath)).xml);
   }
-  return map;
+  const buffer = await Neutralino.filesystem.readBinaryFile(filePath);
+  return RegisterCore.parsePdfText(await extractPdfText(buffer));
 }
 
 function sanitizeFilename(name) {
@@ -197,7 +218,7 @@ function layoutPath() {
 }
 
 async function loadLayout() {
-  state.layout = { folders: [], assignments: {} };
+  state.layout = { folders: [], assignments: {}, titleEdits: {} };
   state.layoutBroken = false;
   if (!(await getStatsOrNull(layoutPath()))) return;
   try {
@@ -209,7 +230,11 @@ async function loadLayout() {
       assignments[token] = folder;
       if (!folders.includes(folder)) folders.push(folder);
     }
-    state.layout = { folders: withAncestors(folders), assignments };
+    const titleEdits = {};
+    for (const [token, title] of Object.entries(data.titleEdits || {})) {
+      if (typeof title === 'string' && title.trim()) titleEdits[token] = title;
+    }
+    state.layout = { folders: withAncestors(folders), assignments, titleEdits };
     appendLog(`📁 Loaded folder layout from ${LAYOUT_FILE} (${folders.length} folders).`);
   } catch (err) {
     state.layoutBroken = true;
@@ -232,9 +257,11 @@ async function saveLayout() {
   }
   const data = {
     version: 1,
-    register: baseName(state.registerPDF),
+    register: baseName(state.registerPath),
     folders: state.layout.folders,
-    assignments
+    assignments,
+    // Title changes made in the app that haven't been saved into the Word register yet
+    titleEdits: state.layout.titleEdits
   };
   try {
     await Neutralino.filesystem.writeFile(layoutPath(), JSON.stringify(data, null, 2) + '\n');
@@ -314,16 +341,17 @@ function newNameFor(token, tokenMap) {
   return `${token} - ${sanitizeFilename(tokenMap[token])}.pdf`;
 }
 
-function matchFiles(tokenMap, files, registerRel) {
-  const tokens = Object.keys(tokenMap);
+// registerRels: the register and its PDF, which aren't drawings
+function matchFiles(tokenMap, files, registerRels) {
+  const matchToken = RegisterCore.makeMatcher(Object.keys(tokenMap));
   const pdfs = files
-    .filter(f => f.name.toLowerCase().endsWith('.pdf') && f.rel !== registerRel)
+    .filter(f => f.name.toLowerCase().endsWith('.pdf') && !registerRels.includes(f.rel))
     .sort((a, b) => a.rel.localeCompare(b.rel));
 
   const byToken = {};
   const unmatched = [];
   for (const file of pdfs) {
-    const token = tokens.find(t => file.name.includes(t));
+    const token = matchToken(file.name);
     if (!token) unmatched.push(file);
     else (byToken[token] = byToken[token] || []).push(file);
   }
@@ -347,14 +375,16 @@ function computeRows(tokenMap, match, files, addedTimes, choices) {
 
   const rows = [];
   for (const token of Object.keys(tokenMap)) {
-    const title = tokenMap[token];
+    const title = state.titles[token];
+    const edited = title !== tokenMap[token];
+    const registerTitle = tokenMap[token];
     const folder = folderOf(token);
     const matches = match.byToken[token];
     if (!matches) {
-      rows.push({ key: '#' + token, token, title, folder, status: 'none' });
+      rows.push({ key: '#' + token, token, title, edited, registerTitle, folder, status: 'none' });
       continue;
     }
-    const newName = newNameFor(token, tokenMap);
+    const newName = newNameFor(token, state.titles);
     const targetRel = relJoin(folder, newName);
     // The file already sitting at the target path, if any
     const occupant = matches.find(f => f.rel === targetRel) ||
@@ -366,7 +396,7 @@ function computeRows(tokenMap, match, files, addedTimes, choices) {
     const ordered = matches.slice().sort((a, b) => (addedTimes[b.rel] || 0) - (addedTimes[a.rel] || 0) || a.rel.localeCompare(b.rel));
     ordered.forEach((f, i) => {
       const row = {
-        key: f.rel, token, title, folder, file: f.name, dir: f.dir, rel: f.rel, newName, targetRel,
+        key: f.rel, token, title, edited, registerTitle, folder, file: f.name, dir: f.dir, rel: f.rel, newName, targetRel,
         group, chosen: f === chosen, first: i === 0, last: i === ordered.length - 1
       };
       if (f === chosen) {
@@ -441,6 +471,11 @@ function updateButtons() {
   const selected = selectedRows().length;
   folderBtn.textContent = selected ? `MAKE FOLDER (${selected})` : 'MAKE FOLDER';
   folderBtn.disabled = state.busy || selected === 0;
+
+  wordBtn.hidden = state.registerKind !== 'docx';
+  const edits = state.registerKind === 'docx' ? pendingTitleEdits().length : 0;
+  wordBtn.textContent = edits ? `SAVE TO WORD (${edits})` : 'SAVE TO WORD';
+  wordBtn.disabled = state.busy || edits === 0;
 
   const selectable = visibleRows().filter(isSelectable);
   const on = selectable.filter(isSelected).length;
@@ -598,7 +633,8 @@ function renderRow(row, newFiles, alt, depth) {
   const showDrawing = !row.group || row.first;
   const numberTd = cell(tr, showDrawing ? row.token : '', 'number');
   if (depth) numberTd.style.paddingLeft = `${8 + depth * 22}px`;
-  cell(tr, showDrawing ? row.title : '');
+  const titleTd = cell(tr, '', 'title');
+  if (showDrawing) renderTitle(titleTd, row);
 
   const current = row.rel ? displayPath(row.rel) : 'No matching file';
   const fileTd = cell(tr, row.group ? '' : current, row.rel ? 'file' : 'file missing');
@@ -635,7 +671,83 @@ function renderRow(row, newFiles, alt, depth) {
   rowsEl.appendChild(tr);
 }
 
+// --------------------
+// Title editing
+// --------------------
+function renderTitle(td, row) {
+  td.textContent = row.title;
+  if (row.edited) {
+    td.classList.add('edited');
+    const badge = document.createElement('button');
+    badge.className = 'edit-badge';
+    badge.textContent = 'edited ✕';
+    badge.title = `Register: ${row.registerTitle}\nClick to undo this change`;
+    badge.addEventListener('click', (e) => {
+      e.stopPropagation();
+      setTitleEdit(row.token, null);
+    });
+    td.append(' ', badge);
+  }
+  if (state.registerKind === 'docx') {
+    td.classList.add('editable');
+    td.title = row.edited ? `Register: ${row.registerTitle}\nDouble-click to edit` : 'Double-click to edit the title';
+    td.addEventListener('dblclick', () => startTitleEdit(td, row));
+  } else if (state.registerKind === 'pdf') {
+    td.title = 'Load the Word (.docx) register to edit titles';
+  }
+}
+
+function startTitleEdit(td, row) {
+  if (state.busy || state.editingToken) return;
+  state.editingToken = row.token;
+  const input = document.createElement('input');
+  input.className = 'title-input';
+  input.value = row.title;
+  td.textContent = '';
+  td.appendChild(input);
+  input.focus();
+  input.select();
+
+  let finished = false;
+  const finish = (save) => {
+    if (finished) return;
+    finished = true;
+    state.editingToken = null;
+    const value = input.value.replace(/\s+/g, ' ').trim();
+    if (save && value && value !== row.title) setTitleEdit(row.token, value);
+    else renderAfterEdit();
+  };
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') finish(true);
+    if (e.key === 'Escape') finish(false);
+  });
+  input.addEventListener('blur', () => finish(true));
+}
+
+function renderAfterEdit() {
+  state.renderPending = false;
+  rebuild();
+}
+
+// title: new title, or null to go back to the register's title
+async function setTitleEdit(token, title) {
+  if (title === null || title === state.tokenMap[token]) {
+    delete state.layout.titleEdits[token];
+    appendLog(`✏️ ${token}: back to the register title "${state.tokenMap[token]}".`);
+  } else {
+    state.layout.titleEdits[token] = title;
+    appendLog(`✏️ ${token}: title changed to "${title}" (press SAVE TO WORD to write it to the register).`);
+  }
+  await saveLayout();
+  renderAfterEdit();
+}
+
 function render(newFiles) {
+  // Don't throw away a title the user is typing; renderAfterEdit() catches up
+  if (state.editingToken) {
+    state.renderPending = true;
+    return;
+  }
   rowsEl.textContent = '';
   const showHeaders = state.layout.folders.length > 0;
   state.displayKeys = [];
@@ -676,7 +788,7 @@ function render(newFiles) {
 
   emptyEl.style.display = dataRows ? 'none' : '';
   if (!dataRows) {
-    emptyEl.textContent = state.registerPDF ? 'No drawings found in this folder yet.' : 'Choose a register PDF or the folder containing it.';
+    emptyEl.textContent = state.registerPath ? 'No drawings found in this folder yet.' : 'Choose a drawing register or the folder containing it.';
   }
   updateButtons();
 }
@@ -696,8 +808,26 @@ function registerStamp(stats) {
   return `${stats.modifiedAt}:${stats.size}`;
 }
 
+// Register titles with any edits made in the app applied
+function effectiveTitles() {
+  const titles = {};
+  for (const [token, title] of Object.entries(state.tokenMap)) {
+    const edit = state.layout.titleEdits[token];
+    titles[token] = edit && edit !== title ? edit : title;
+  }
+  return titles;
+}
+
+// Title edits for drawings in the register that differ from it
+function pendingTitleEdits() {
+  return Object.keys(state.tokenMap)
+    .filter(t => state.layout.titleEdits[t] && state.layout.titleEdits[t] !== state.tokenMap[t])
+    .map(t => ({ token: t, from: state.tokenMap[t], to: state.layout.titleEdits[t] }));
+}
+
 function rebuild(newFiles = new Set()) {
   if (!state.match) return;
+  state.titles = effectiveTitles();
   state.rows = computeRows(state.tokenMap, state.match, state.files, state.addedTimes, state.choices);
   render(newFiles);
 }
@@ -720,14 +850,20 @@ async function refresh() {
   refreshRunning = true;
   try {
     // Re-parse the register if it has been replaced or edited
-    const regStats = await getStatsOrNull(state.registerPDF);
+    const regStats = await getStatsOrNull(state.registerPath);
     if (!regStats) {
-      appendLog(`⚠️ Register PDF is no longer in the folder: ${baseName(state.registerPDF)}`);
+      appendLog(`⚠️ Register is no longer in the folder: ${baseName(state.registerPath)}`);
     } else if (registerStamp(regStats) !== state.registerModified) {
       if (state.registerModified !== null) appendLog('📚 Register changed, re-reading it...');
-      state.tokenMap = await parseRegisterPDF(state.registerPDF);
+      state.tokenMap = await parseRegister(state.registerPath);
       state.registerModified = registerStamp(regStats);
       appendLog(`📘 Loaded ${Object.keys(state.tokenMap).length} drawing entries from register.`);
+      // Edits the register now contains are done with
+      const done = Object.keys(state.layout.titleEdits).filter(t => state.tokenMap[t] === state.layout.titleEdits[t]);
+      if (done.length) {
+        for (const t of done) delete state.layout.titleEdits[t];
+        await saveLayout();
+      }
     }
 
     const files = await scanFiles();
@@ -743,7 +879,7 @@ async function refresh() {
     state.knownFiles = new Set(files.map(f => f.rel));
 
     state.files = files;
-    state.match = matchFiles(state.tokenMap, files, baseName(state.registerPDF));
+    state.match = matchFiles(state.tokenMap, files, [baseName(state.registerPath), baseName(registerPdfPath())]);
     // Arrival times are only needed to pick a default when several files match one drawing
     state.addedTimes = {};
     for (const group of Object.values(state.match.byToken)) {
@@ -817,29 +953,35 @@ Neutralino.events.on('watchFile', (evt) => {
 async function load() {
   const input = registerInput.value.trim();
   if (!input) {
-    appendLog('❌ Choose a register PDF or the folder containing it first.');
+    appendLog('❌ Choose a drawing register or the folder containing it first.');
     return;
   }
   try {
-    const registerPDF = await resolveRegisterPath(input);
+    const registerPath = await resolveRegisterPath(input);
     await stopWatching();
     Object.assign(state, {
-      registerPDF,
+      registerPath,
+      registerKind: registerKindOf(baseName(registerPath)),
       registerModified: null,
-      targetDir: dirName(registerPDF),
+      targetDir: dirName(registerPath),
       tokenMap: {},
+      titles: {},
       rows: [],
       files: [],
       match: null,
       addedTimes: {},
       knownFiles: null,
-      anchorKey: null
+      anchorKey: null,
+      editingToken: null
     });
     state.unchecked.clear();
     state.picked.clear();
     state.choices.clear();
     await loadLayout();
-    appendLog(`📚 Parsing PDF register: ${registerPDF} ...`);
+    appendLog(`📚 Reading ${state.registerKind === 'docx' ? 'Word' : 'PDF'} register: ${registerPath} ...`);
+    if (state.registerKind === 'pdf' && await findWordTwin()) {
+      appendLog(`ℹ️ A Word version of this register is next to it; load it (or the folder) to edit titles.`);
+    }
     summaryEl.textContent = 'Reading register...';
     await refresh();
   } catch (err) {
@@ -981,6 +1123,205 @@ async function renameSelected() {
 }
 
 // --------------------
+// 6️⃣ Save title edits into the Word register
+// --------------------
+
+// For a PDF register: the Word register with the same name next to it, if any
+async function findWordTwin() {
+  const twin = state.registerPath.replace(/\.[^./\\]+$/, '') + '.docx';
+  return (await getStatsOrNull(twin)) ? twin : null;
+}
+
+// Word keeps "~$" + the name (minus its first two characters, for longer names) next to an open document
+async function isOpenInWord(docxPath) {
+  const name = baseName(docxPath);
+  const files = await listFiles(dirName(docxPath));
+  return files.some(f => f.startsWith('~$') && f.length >= name.length && name.endsWith(f.slice(2)));
+}
+
+// Copy a file into the top folder's SS folder with today's date in front, before it's overwritten
+async function backupToSS(filePath) {
+  await ensureDir(SUPERSEDED_DIR);
+  const name = baseName(filePath);
+  const dot = name.lastIndexOf('.');
+  const stem = supersededName(name.slice(0, dot));
+  const ext = name.slice(dot);
+  let dest = stem + ext;
+  for (let n = 2; await getStatsOrNull(absPath(relJoin(SUPERSEDED_DIR, dest))); n++) dest = `${stem} (${n})${ext}`;
+  await Neutralino.filesystem.copy(filePath, absPath(relJoin(SUPERSEDED_DIR, dest)));
+  appendLog(`📦 Backed up ${name} → ${SUPERSEDED_DIR}\\${dest}`);
+}
+
+// PowerShell -EncodedCommand takes base64 of UTF-16LE
+function encodePowerShell(script) {
+  let binary = '';
+  for (let i = 0; i < script.length; i++) {
+    const c = script.charCodeAt(i);
+    binary += String.fromCharCode(c & 0xff, c >> 8);
+  }
+  return btoa(binary);
+}
+
+function psString(s) {
+  return "'" + s.replace(/\//g, '\\').replace(/'/g, "''") + "'";
+}
+
+async function runPowerShell(script) {
+  return Neutralino.os.execCommand(`powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encodePowerShell(script)}`);
+}
+
+async function checkWordAvailable() {
+  if (state.wordAvailable !== null) return state.wordAvailable;
+  state.wordAvailable = false;
+  if (typeof NL_OS !== 'undefined' && NL_OS !== 'Windows') return false;
+  try {
+    const res = await runPowerShell(`if (Test-Path 'Registry::HKEY_CLASSES_ROOT\\Word.Application') { 'yes' } else { 'no' }`);
+    state.wordAvailable = (res.stdOut || '').trim() === 'yes';
+  } catch (e) {
+    // PowerShell not available
+  }
+  return state.wordAvailable;
+}
+
+// Have Word export the register to PDF, as the document looks with all tracked changes accepted.
+// Uses a hidden Word of its own; if Word is already open, it borrows it without hiding or closing it.
+async function exportPdfWithWord(docxPath, pdfPath) {
+  const script = `
+$ErrorActionPreference = 'Stop'
+try { $word = New-Object -ComObject Word.Application } catch { 'ERROR: Word could not be started'; exit 2 }
+$own = ($word.Documents.Count -eq 0)
+if ($own) { $word.Visible = $false }
+$word.DisplayAlerts = 0
+try {
+  $doc = $word.Documents.Open(${psString(docxPath)}, $false, $true, $false)
+  $doc.ActiveWindow.View.RevisionsFilter.Markup = 0
+  $doc.ActiveWindow.View.RevisionsFilter.View = 0
+  $doc.ExportAsFixedFormat(${psString(pdfPath)}, 17)
+  $doc.Close(0)
+  'OK'
+} catch {
+  'ERROR: ' + $_.Exception.Message
+  exit 1
+} finally {
+  if ($own) { $word.Quit() }
+  [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($word)
+}`;
+  const res = await runPowerShell(script);
+  const out = (res.stdOut || '').trim();
+  if (res.exitCode !== 0 || !out.endsWith('OK')) throw new Error(out.replace(/^ERROR:\s*/, '') || (res.stdErr || '').trim() || `PowerShell exited with ${res.exitCode}`);
+}
+
+const wordDialog = document.getElementById('word-dialog');
+
+// Resolves to { tracked, exportPdf } or null if cancelled
+async function askWordOptions(edits) {
+  const wordOk = await checkWordAvailable();
+  document.getElementById('word-dialog-title').textContent =
+    `Save ${edits.length === 1 ? '1 title change' : edits.length + ' title changes'} to ${baseName(state.registerPath)}`;
+  const list = document.getElementById('word-changes');
+  list.textContent = '';
+  for (const e of edits) {
+    const li = document.createElement('li');
+    const num = document.createElement('b');
+    num.textContent = e.token;
+    const from = document.createElement('del');
+    from.textContent = e.from;
+    const to = document.createElement('ins');
+    to.textContent = e.to;
+    li.append(num, ' ', from, ' → ', to);
+    list.appendChild(li);
+  }
+  const exportBox = document.getElementById('word-export');
+  exportBox.disabled = !wordOk;
+  exportBox.checked = wordOk;
+  document.getElementById('word-export-note').textContent = wordOk
+    ? `Overwrites ${baseName(registerPdfPath())} (a dated copy of the old one goes to ${SUPERSEDED_DIR}\\).`
+    : 'Microsoft Word isn\'t available, so export the PDF from Word yourself.';
+  wordDialog.showModal();
+
+  return new Promise(resolve => {
+    const form = wordDialog.querySelector('form');
+    const finish = (result) => {
+      form.removeEventListener('submit', onSubmit);
+      wordDialog.removeEventListener('cancel', onCancel);
+      wordDialog.close();
+      resolve(result);
+    };
+    const onSubmit = (e) => {
+      e.preventDefault();
+      if (e.submitter && e.submitter.value === 'cancel') return finish(null);
+      finish({ tracked: document.getElementById('word-tracked').checked, exportPdf: exportBox.checked && !exportBox.disabled });
+    };
+    const onCancel = (e) => {
+      e.preventDefault();
+      finish(null);
+    };
+    form.addEventListener('submit', onSubmit);
+    wordDialog.addEventListener('cancel', onCancel);
+  });
+}
+
+async function saveToWord() {
+  const edits = pendingTitleEdits();
+  if (!edits.length || state.registerKind !== 'docx') return;
+  const options = await askWordOptions(edits);
+  if (!options) return;
+
+  const docx = state.registerPath;
+  state.busy = true;
+  updateButtons();
+  try {
+    if (await isOpenInWord(docx)) {
+      throw new Error(`${baseName(docx)} is open in Word. Close it there first, then save again.`);
+    }
+    const { zip, xml } = await readDocumentXml(docx);
+    let author = 'Drawing Renamer';
+    try {
+      const user = await Neutralino.os.getEnv('USERNAME');
+      if (user) author = `${user} (Drawing Renamer)`;
+    } catch (e) {
+      // keep the default author
+    }
+    const result = RegisterCore.editDocxTitles(xml, Object.fromEntries(edits.map(e => [e.token, e.to])), { tracked: options.tracked, author });
+
+    // Check the edited document reads back as intended before touching the file
+    const check = RegisterCore.readDocxTitles(result.xml);
+    const wrong = Object.keys(result.applied).filter(t => check[t] !== result.applied[t].to);
+    if (wrong.length) throw new Error(`the edited document didn't read back correctly for ${wrong.join(', ')}; nothing was saved.`);
+    const original = RegisterCore.readDocxTitles(xml);
+    const changed = Object.keys(original).filter(t => !(t in result.applied) && check[t] !== original[t]);
+    if (changed.length) throw new Error(`other titles would have changed (${changed.join(', ')}); nothing was saved.`);
+
+    await backupToSS(docx);
+    zip.file('word/document.xml', result.xml);
+    const data = await zip.generateAsync({ type: 'arraybuffer', compression: 'DEFLATE', compressionOptions: { level: 6 } });
+    await Neutralino.filesystem.writeBinaryFile(docx, data);
+
+    const how = options.tracked ? 'as tracked changes' : 'directly';
+    for (const [token, { from, to }] of Object.entries(result.applied)) {
+      appendLog(`📝 ${token}: "${from}" → "${to}" (${how})`);
+    }
+    for (const token of result.notFound) appendLog(`⚠️ ${token} wasn't found in a table row of ${baseName(docx)}; its edit was kept.`);
+    for (const token of Object.keys(result.applied)) delete state.layout.titleEdits[token];
+    await saveLayout();
+    appendLog(`✅ Saved ${Object.keys(result.applied).length} title change(s) to ${baseName(docx)}.`);
+
+    if (options.exportPdf) {
+      const pdf = registerPdfPath();
+      appendLog(`🖨️ Exporting ${baseName(pdf)} with Word...`);
+      if (await getStatsOrNull(pdf)) await backupToSS(pdf);
+      await exportPdfWithWord(docx, pdf);
+      appendLog(`✅ Exported ${baseName(pdf)}.`);
+    }
+  } catch (err) {
+    appendLog('❌ Could not save to Word: ' + (err.message || err));
+  } finally {
+    state.busy = false;
+    await refresh();
+  }
+}
+
+// --------------------
 // UI wiring
 // --------------------
 document.getElementById('choose').addEventListener('click', async () => {
@@ -997,8 +1338,12 @@ document.getElementById('choose').addEventListener('click', async () => {
 
 document.getElementById('choose-file').addEventListener('click', async () => {
   try {
-    const files = await Neutralino.os.showOpenDialog('Select register PDF', {
-      filters: [{ name: 'PDF files', extensions: ['pdf'] }]
+    const files = await Neutralino.os.showOpenDialog('Select drawing register', {
+      filters: [
+        { name: 'Drawing registers', extensions: ['docx', 'pdf'] },
+        { name: 'Word documents', extensions: ['docx'] },
+        { name: 'PDF files', extensions: ['pdf'] }
+      ]
     });
     if (files && files.length) {
       registerInput.value = files[0];
@@ -1029,6 +1374,7 @@ rowsEl.addEventListener('mousedown', (e) => {
 });
 
 folderBtn.addEventListener('click', makeFolder);
+wordBtn.addEventListener('click', saveToWord);
 renameBtn.addEventListener('click', renameSelected);
 
 document.getElementById('clear-log').addEventListener('click', () => {

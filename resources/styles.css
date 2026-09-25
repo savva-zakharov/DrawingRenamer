@@ -108,8 +108,26 @@ dialog{ border:1px solid var(--border); border-radius:6px; padding:18px 20px; wi
 dialog::backdrop{ background:rgba(0,0,0,.25) }
 dialog h3{ margin:0 0 6px; font-size:16px }
 dialog p{ margin:0 0 12px; font-size:12px }
-dialog input{ width:100%; padding:6px 8px; font-size:14px }
+dialog input:not([type=checkbox]){ width:100%; padding:6px 8px; font-size:14px }
 #folder-error{ color:var(--bad); font-size:12px; min-height:18px; margin-top:4px }
 .dialog-buttons{ display:flex; flex-direction:row-reverse; gap:8px; margin-top:8px }
 .dialog-buttons button{ margin:0 }
 .dialog-buttons .left{ margin-right:auto }
+
+/* Editable titles (Word register) */
+td.editable{ cursor:text }
+td.editable:hover{ outline:1px dashed #b9c6d6; outline-offset:-3px }
+td.edited{ color:#7a4b00 }
+button.edit-badge{ margin:0 0 0 4px; padding:0 6px; border:1px solid #f0c36d; border-radius:9px; background:#fff4d6; color:#8a5a00; font-size:11px; cursor:pointer; white-space:nowrap }
+button.edit-badge:hover{ background:#ffe6a6 }
+input.title-input{ width:100%; padding:3px 5px; font:inherit }
+#save-word{ font-weight:600 }
+
+/* Save to Word dialog */
+#word-dialog{ width:560px }
+#word-changes{ max-height:220px; overflow:auto; margin:6px 0 10px; padding-left:18px; font-size:13px }
+#word-changes li{ margin-bottom:4px }
+#word-changes del{ color:var(--bad) }
+#word-changes ins{ color:var(--ok); text-decoration:none; font-weight:600 }
+label.option{ display:flex; align-items:center; gap:6px; margin:6px 0 2px; color:var(--fg) }
+p.indent{ margin:0 0 8px 22px }

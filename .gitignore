@@ -46,3 +46,4 @@ resources/js/neutralino.d.ts
 neutralinojs.log
 resources/js/pdfjs/
 target/
+resources/js/jszip/

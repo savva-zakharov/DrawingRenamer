@@ -1,7 +1,9 @@
 const fs = require("fs");
 const path = require("path");
 const pdfParse = require("pdf-parse");
+const JSZip = require("jszip");
 const readline = require("readline");
+const core = require("./resources/register-core");
 const dryRun = process.argv.includes('--dry-run') || process.argv.includes('-n');
 // Simple CLI arg helper for --register / -r
 function getArgValue(names) {
@@ -17,11 +19,20 @@ function getArgValue(names) {
 const registerArg = getArgValue(['--register', '-r']);
 
 // --------------------
-// 1️⃣ Find register PDF
+// 1️⃣ Find register (Word preferred over PDF)
 // --------------------
-function findRegisterPDF(dir = ".") {
-    const files = fs.readdirSync(dir);
-    const found = files.find(f => f.toLowerCase().includes("register") && f.toLowerCase().endsWith(".pdf"));
+function isRegisterFile(name) {
+    const lower = name.toLowerCase();
+    return !lower.startsWith("~$") && (lower.endsWith(".docx") || lower.endsWith(".pdf"));
+}
+
+// Files named "...register..." in dir; a Word register beats a PDF one, and the last by name
+// (registers are usually date-prefixed, so that's the latest) beats earlier ones
+function findRegister(dir = ".") {
+    const candidates = fs.readdirSync(dir)
+        .filter(f => f.toLowerCase().includes("register") && isRegisterFile(f))
+        .sort();
+    const found = candidates.filter(f => f.toLowerCase().endsWith(".docx")).pop() || candidates.pop();
     return found ? path.resolve(dir, found) : null;
 }
 
@@ -36,37 +47,17 @@ function ask(question) {
 }
 
 // --------------------
-// 2️⃣ Parse register PDF into token map
+// 2️⃣ Parse register into token map
 // --------------------
-async function parseRegisterPDF(filePath) {
+async function parseRegister(filePath) {
     const buffer = fs.readFileSync(filePath);
-    const data = await pdfParse(buffer);
-    const text = data.text.replace(/\r?\n/g, " "); // flatten all newlines
-
-    const map = {};
-    
-    // Regex explanation:
-    // (1) Drawing number: [A-Z]+(?:-[A-Z0-9]+)*-\d+
-    // (2) Title: non-greedy match up to first scale 1:\d+
-    const entryRegex = /([A-Z]+(?:-[A-Z0-9]+)*-\d+)\s+(.+?)\s+1:\d+/gi;
-
-    let match;
-    while ((match = entryRegex.exec(text)) !== null) {
-        const drawingNumber = match[1].toUpperCase();
-        const title = match[2].trim().replace(/\s+/g, " "); // collapse any spaces
-        map[drawingNumber] = title;
+    if (filePath.toLowerCase().endsWith(".docx")) {
+        const zip = await JSZip.loadAsync(buffer);
+        return core.readDocxTitles(await zip.file("word/document.xml").async("string"));
     }
-
-    return map;
+    const data = await pdfParse(buffer);
+    return core.parsePdfText(data.text);
 }
-
-
-
-
-
-
-
-
 
 // --------------------
 // 3️⃣ Sanitize filenames
@@ -75,78 +66,57 @@ function sanitizeFilename(name) {
     return name.replace(/[\/\\:*?"<>|]/g, "-");
 }
 
+// Path given on the command line or typed in -> register file, or null with an error printed
+function resolveRegister(input) {
+    const resolved = path.resolve(input);
+    if (!fs.existsSync(resolved)) {
+        console.error("❌ Provided path does not exist.");
+        return null;
+    }
+    const stat = fs.statSync(resolved);
+    if (stat.isFile()) {
+        if (!isRegisterFile(path.basename(resolved))) {
+            console.error('❌ Provided file is not a Word (.docx) or PDF register.');
+            return null;
+        }
+        return resolved;
+    }
+    if (stat.isDirectory()) {
+        const found = findRegister(resolved);
+        if (!found) console.error('❌ No register found in that directory.');
+        return found;
+    }
+    console.error('❌ Unsupported path type.');
+    return null;
+}
 
 // --------------------
-// 4️⃣ Rename files based on exact token match
+// 4️⃣ Rename files based on drawing number match
 // --------------------
 async function renameFiles() {
-    let registerPDF = findRegisterPDF();
+    let register = findRegister();
 
     // If user provided --register / -r use that before prompting
-    if (!registerPDF && registerArg) {
-        const resolved = path.resolve(registerArg);
-        if (!fs.existsSync(resolved)) {
-            console.error("❌ Provided --register path does not exist.");
-            return;
-        }
-        const stat = fs.statSync(resolved);
-        if (stat.isFile()) {
-            if (!resolved.toLowerCase().endsWith('.pdf')) {
-                console.error('❌ Provided file is not a PDF.');
-                return;
-            }
-            registerPDF = resolved;
-        } else if (stat.isDirectory()) {
-            const found = findRegisterPDF(resolved);
-            if (!found) {
-                console.error('❌ No register PDF found in that directory.');
-                return;
-            }
-            registerPDF = found;
-        } else {
-            console.error('❌ Unsupported path type for --register.');
-            return;
-        }
+    if (!register && registerArg) {
+        register = resolveRegister(registerArg);
+        if (!register) return;
     }
 
     // If still not found, prompt interactively
-    if (!registerPDF) {
-        console.error("❌ No register PDF found in current folder.");
-        const input = (await ask("Enter path to register PDF (file or directory) or press Enter to cancel: ")).trim();
+    if (!register) {
+        console.error("❌ No register found in current folder.");
+        const input = (await ask("Enter path to register (.docx or .pdf, file or directory) or press Enter to cancel: ")).trim();
         if (!input) {
             console.log("Aborted by user.");
             return;
         }
-
-        const resolved = path.resolve(input);
-        if (!fs.existsSync(resolved)) {
-            console.error("❌ Provided path does not exist.");
-            return;
-        }
-
-        const stat = fs.statSync(resolved);
-        if (stat.isFile()) {
-            if (!resolved.toLowerCase().endsWith('.pdf')) {
-                console.error('❌ Provided file is not a PDF.');
-                return;
-            }
-            registerPDF = resolved;
-        } else if (stat.isDirectory()) {
-            const found = findRegisterPDF(resolved);
-            if (!found) {
-                console.error('❌ No register PDF found in that directory.');
-                return;
-            }
-            registerPDF = found;
-        } else {
-            console.error('❌ Unsupported path type.');
-            return;
-        }
+        register = resolveRegister(input);
+        if (!register) return;
     }
 
     if (dryRun) console.log('🔎 Running in dry-run mode — no files will be renamed.');
-    console.log(`📚 Parsing PDF register: ${registerPDF} ...`);
-    const tokenMap = await parseRegisterPDF(registerPDF);
+    console.log(`📚 Parsing register: ${register} ...`);
+    const tokenMap = await parseRegister(register);
 
     console.log(`📘 Loaded ${Object.keys(tokenMap).length} drawing entries from register.`);
 
@@ -159,15 +129,17 @@ async function renameFiles() {
     }
     console.log("\n");
 
-    const registerBasename = path.basename(registerPDF);
-    // Use the directory containing the register PDF as the target directory
-    const targetDir = path.dirname(registerPDF);
+    const registerBasename = path.basename(register);
+    // The register's own PDF (e.g. exported from the Word register) isn't a drawing
+    const registerPdf = registerBasename.replace(/\.[^.]+$/, "") + ".pdf";
+    // Use the directory containing the register as the target directory
+    const targetDir = path.dirname(register);
+    const matchToken = core.makeMatcher(Object.keys(tokenMap));
     const files = fs.readdirSync(targetDir);
     for (let file of files) {
-        if (!file.toLowerCase().endsWith(".pdf") || file === registerBasename) continue;
+        if (!file.toLowerCase().endsWith(".pdf") || file === registerBasename || file === registerPdf) continue;
 
-        // Find exact match in filename
-        const match = Object.keys(tokenMap).find(token => file.includes(token));
+        const match = matchToken(file);
         if (!match) {
             console.warn(`❔ No title found for file: ${file}`);
             continue;
