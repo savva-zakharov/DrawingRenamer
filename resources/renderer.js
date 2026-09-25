@@ -1982,7 +1982,7 @@ function renderRevisionData(force = false) {
   // Stage / cancel
   const actions = el('div', undefined, 'revision-actions');
   const rows = target ? issueRows() : [];
-  const stage = el('button', staged ? 'Replace the staged issue' : 'Add to register edits', 'primary');
+  const stage = el('button', staged ? 'Replace the staged issue' : 'Add to register edits', 'secondary');
   stage.disabled = !editable || !target;
   stage.title = `Stage this issue; press ${saveButtonLabel()} to write it to the register`;
   stage.addEventListener('click', () => stageIssue(target, rows));

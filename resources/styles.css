@@ -23,6 +23,8 @@
   --accent-soft: #e3f0ff;
   --primary-fg: #fff;
   --primary-disabled: #a9cdf5;
+  --secondary: #22b573;
+  --secondary-disabled: #a7dfc3;
   --ok: #1e8e3e;
   --ok-soft: #e6f4ea;
   --warn: #b26a00;
@@ -75,6 +77,8 @@
     --accent-soft: #00c9bb;
     --primary-fg: #fff;
     --primary-disabled: #2b4466;
+    --secondary: #22b573;
+    --secondary-disabled: #1d4a35;
     --ok: #57c27a;
     --ok-soft: #1c3a26;
     --warn: #e0a040;
@@ -187,6 +191,9 @@ button{ padding:6px 10px; font-size:14px; cursor:pointer }
 button:disabled{ cursor:default }
 button.primary{ background:var(--accent); color:var(--primary-fg); border:1px solid var(--accent); border-radius:3px; font-weight:600; padding:6px 18px }
 button.primary:disabled{ background:var(--primary-disabled); border-color:var(--primary-disabled) }
+/* Secondary actions that stage or save register edits */
+button.secondary{ background:var(--secondary); color:var(--primary-fg); border:1px solid var(--secondary); border-radius:3px; font-weight:600; padding:6px 18px }
+button.secondary:disabled{ background:var(--secondary-disabled); border-color:var(--secondary-disabled) }
 
 table{ width:100%; border-collapse:collapse }
 thead th{ position:sticky; top:0; background:var(--header-bg); text-align:left; font-weight:600; padding:6px 8px; border-bottom:1px solid var(--border); z-index:1 }
