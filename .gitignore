@@ -33,6 +33,7 @@ build/
 # Test Directory
 
 test/
+test 2/
 
 # Optional: npm package lock files (if you don't want to track them)
 package-lock.json

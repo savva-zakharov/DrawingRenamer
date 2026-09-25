@@ -17,10 +17,13 @@
 
   // Text extracted from a PDF register -> { drawingNumber: title }.
   // A title runs from the drawing number to the scale (1:100), or to "NTS" or the sheet
-  // size (A0-A4) for drawings without a scale.
+  // size (A0-A4) for drawings without a scale, or for a row with neither, to where the next
+  // drawing number starts.
   function parsePdfText(text) {
     const flat = text.replace(/\r?\n/g, ' ');
-    const entryRe = new RegExp('(' + DRAWING_NUMBER + ')\\s+(.+?)\\s+(?:1:\\d+|N\\.?T\\.?S\\.?(?=\\s)|A[0-4](?=\\s))', 'g');
+    const end = '\\s+(?:1:\\d+|N\\.?T\\.?S\\.?(?=\\s)|A[0-4](?=\\s))';
+    const nextEntry = '(?=\\s+' + DRAWING_NUMBER + '\\s)';
+    const entryRe = new RegExp('(' + DRAWING_NUMBER + ')\\s+(.+?)(?:' + end + '|' + nextEntry + ')', 'g');
     const map = {};
     let m;
     while ((m = entryRe.exec(flat)) !== null) {
@@ -156,7 +159,7 @@
       const cells = findElements(xml, 'w:tc', tr.start, tr.end);
       if (cells.length < 2) continue;
       const token = cellText(cells[0].xml);
-      if (DRAWING_NUMBER_RE.test(token)) rows.push({ token, row: tr, titleCell: cells[1] });
+      if (DRAWING_NUMBER_RE.test(token)) rows.push({ token, row: tr, cells, titleCell: cells[1] });
     }
     return rows;
   }
@@ -189,13 +192,18 @@
     };
   }
 
-  // Formatting of the first run in the paragraph, without any recorded formatting change
+  // Formatting of the first run in the paragraph, without any recorded formatting change.
+  // An empty paragraph falls back to its paragraph mark's formatting.
   function firstRunProps(inner) {
     const run = findElements(inner, 'w:r')[0];
-    if (!run) return '';
-    const { inner: runInner } = splitElement(run.xml);
-    const rPr = childElements(runInner).find(c => tagName(c) === 'w:rPr');
-    return rPr ? rPr.replace(/<w:rPrChange[\s>][\s\S]*?<\/w:rPrChange>/g, '') : '';
+    let rPr = '';
+    if (run) {
+      rPr = childElements(splitElement(run.xml).inner).find(c => tagName(c) === 'w:rPr') || '';
+    } else {
+      const pPr = childElements(inner).find(c => tagName(c) === 'w:pPr');
+      rPr = pPr ? childElements(splitElement(pPr).inner).find(c => tagName(c) === 'w:rPr') || '' : '';
+    }
+    return rPr.replace(/<w:rPrChange[\s>][\s\S]*?<\/w:rPrChange>/g, '').replace(/<w:(ins|del)\s[^>]*\/>/g, '');
   }
 
   function newRun(rPr, text) {
@@ -321,16 +329,27 @@
   // opts: { tracked: bool, author: string, date: ISO string }
   // Returns { xml, applied: { token: { from, to } }, notFound: [token] }
   function editDocxTitles(xml, edits, opts = {}) {
+    return editDocxCells(xml, edits, 1, opts);
+  }
+
+  // Apply { drawingNumber: newNumber } to word/document.xml (renumbering drawings); as editDocxTitles.
+  function editDocxNumbers(xml, edits, opts = {}) {
+    return editDocxCells(xml, edits, 0, opts);
+  }
+
+  // Replace the text of one column (0 = number, 1 = title) in the rows of the given drawings
+  function editDocxCells(xml, edits, column, opts) {
     const rev = makeRevisions(xml, opts.author || 'Drawing Renamer', opts.date || new Date().toISOString().replace(/\.\d+Z$/, 'Z'));
     const applied = {};
     const changes = [];
-    for (const { token, titleCell } of registerRows(xml)) {
+    for (const { token, cells } of registerRows(xml)) {
       if (!(token in edits) || token in applied) continue;
-      const from = cellText(titleCell.xml);
+      const target = cells[column];
+      const from = cellText(target.xml);
       const to = collapse(edits[token]);
       applied[token] = { from, to };
       if (from === to) continue;
-      changes.push({ start: titleCell.start, end: titleCell.end, xml: setCellTitle(titleCell.xml, to, opts, rev) });
+      changes.push({ start: target.start, end: target.end, xml: setCellTitle(target.xml, to, opts, rev) });
     }
     let out = xml;
     for (const c of changes.sort((a, b) => b.start - a.start)) {
@@ -339,12 +358,240 @@
     return { xml: out, applied, notFound: Object.keys(edits).filter(t => !(t in applied)) };
   }
 
+  // --------------------
+  // Adding rows to the Word register
+  // --------------------
+
+  // A copy of a row with all tracked changes accepted and ids that must be unique removed
+  function cleanRowCopy(rowXml) {
+    let xml = rowXml
+      .replace(/\sw14:(paraId|textId)="[^"]*"/g, '')
+      .replace(/<w:(bookmarkStart|bookmarkEnd|proofErr|vMerge)(\s[^>]*)?\/>/g, '')
+      .replace(/<w:(ins|del)\s[^>]*\/>/g, '');
+    for (const tag of ['w:del', 'w:rPrChange', 'w:pPrChange', 'w:trPrChange', 'w:tcPrChange', 'w:moveFrom']) {
+      for (const el of findElements(xml, tag).reverse()) xml = xml.slice(0, el.start) + xml.slice(el.end);
+    }
+    // Keep inserted text, drop the insertion wrapper
+    return xml.replace(/<w:(ins|moveTo)(\s[^>]*)?>/g, '').replace(/<\/w:(ins|moveTo)>/g, '');
+  }
+
+  // Mark a paragraph's runs and mark as inserted
+  function markParagraphInserted(p, rev) {
+    const { open, inner, close } = splitElement(p);
+    const children = childElements(inner);
+    let pPr = children.find(c => tagName(c) === 'w:pPr');
+    const mark = `<w:ins${rev.attrs()}/>`;
+    if (!pPr) pPr = `<w:pPr><w:rPr>${mark}</w:rPr></w:pPr>`;
+    else {
+      const parts = splitElement(pPr);
+      const pChildren = childElements(parts.inner);
+      const rPr = pChildren.find(c => tagName(c) === 'w:rPr');
+      if (rPr) {
+        const r = splitElement(rPr);
+        pPr = parts.open + parts.inner.replace(rPr, r.open + mark + r.inner + r.close) + parts.close;
+      } else {
+        const late = pChildren.findIndex(c => ['w:sectPr', 'w:pPrChange'].includes(tagName(c)));
+        pChildren.splice(late < 0 ? pChildren.length : late, 0, `<w:rPr>${mark}</w:rPr>`);
+        pPr = parts.open + pChildren.join('') + parts.close;
+      }
+    }
+    const body = children.filter(c => tagName(c) !== 'w:pPr')
+      .map(c => tagName(c) === 'w:r' ? `<w:ins${rev.attrs()}>${c}</w:ins>` : c).join('');
+    return open + pPr + body + close;
+  }
+
+  // Mark a row as inserted in its row properties
+  function markRowInserted(rowXml, rev) {
+    const { open, inner, close } = splitElement(rowXml);
+    const children = childElements(inner);
+    const trPr = children.find(c => tagName(c) === 'w:trPr');
+    const mark = `<w:ins${rev.attrs()}/>`;
+    if (trPr) {
+      const parts = splitElement(trPr);
+      return open + inner.replace(trPr, parts.open + parts.inner + mark + parts.close) + close;
+    }
+    // trPr goes after tblPrEx, before the first cell
+    const exIdx = children.findIndex(c => tagName(c) === 'w:tblPrEx');
+    children.splice(exIdx + 1, 0, `<w:trPr>${mark}</w:trPr>`);
+    return open + children.join('') + close;
+  }
+
+  // Build a new register row from a template row: number, title, scale and size in the first
+  // four cells; the issue columns are cleared unless copyMarks is set.
+  function buildRow(templateXml, entry, opts, rev) {
+    let row = cleanRowCopy(templateXml);
+    const values = [entry.token, entry.title, entry.scale || '', entry.size || ''];
+    const cells = findElements(row, 'w:tc');
+    for (let i = cells.length - 1; i >= 0; i--) {
+      const cell = cells[i].xml;
+      const paras = paragraphsOf(cell);
+      if (!paras.length) continue;
+      let newCell;
+      if (i >= values.length && entry.copyMarks) {
+        newCell = cell;
+      } else {
+        // One paragraph holding the new value
+        const text = i < values.length ? collapse(values[i]) : '';
+        const first = setParagraphText(paras[0].xml, text, { tracked: false });
+        newCell = cell.slice(0, paras[0].start) + first + cell.slice(paras[paras.length - 1].end);
+      }
+      if (opts.tracked) {
+        let marked = '';
+        let pos = 0;
+        for (const p of paragraphsOf(newCell)) {
+          marked += newCell.slice(pos, p.start) + markParagraphInserted(p.xml, rev);
+          pos = p.end;
+        }
+        newCell = marked + newCell.slice(pos);
+      }
+      row = row.slice(0, cells[i].start) + newCell + row.slice(cells[i].end);
+    }
+    return opts.tracked ? markRowInserted(row, rev) : row;
+  }
+
+  // Insert new register rows, each after the row of entry.after (or after the last register row
+  // when that isn't found), copying that row's formatting.
+  // entries: [{ token, title, scale, size, after, copyMarks }]; opts as for editDocxTitles.
+  // Returns { xml, inserted: [token], skipped: [token already in the register] }
+  function insertDocxRows(xml, entries, opts = {}) {
+    const rev = makeRevisions(xml, opts.author || 'Drawing Renamer', opts.date || new Date().toISOString().replace(/\.\d+Z$/, 'Z'));
+    const rows = registerRows(xml);
+    if (!rows.length) throw new Error('No drawing rows found in the document to copy formatting from.');
+    const existing = new Set(rows.map(r => r.token));
+    const firstRowOf = {};
+    for (const r of rows) if (!(r.token in firstRowOf)) firstRowOf[r.token] = r.row;
+    const last = rows[rows.length - 1].row;
+
+    const inserted = [];
+    const skipped = [];
+    const byAnchor = new Map(); // row start -> { row, html }
+    for (const entry of entries) {
+      if (existing.has(entry.token)) {
+        skipped.push(entry.token);
+        continue;
+      }
+      const atStart = entry.after === '';
+      const anchor = atStart ? rows[0].row : firstRowOf[entry.after] || last;
+      const key = (atStart ? 'before:' : 'after:') + anchor.start;
+      if (!byAnchor.has(key)) byAnchor.set(key, { row: anchor, atStart, add: '' });
+      byAnchor.get(key).add += buildRow(anchor.xml, entry, opts, rev);
+      existing.add(entry.token);
+      inserted.push(entry.token);
+    }
+    let out = xml;
+    // Insert from the end so earlier positions stay valid
+    const at = x => (x.atStart ? x.row.start : x.row.end);
+    for (const x of [...byAnchor.values()].sort((a, b) => at(b) - at(a))) {
+      out = out.slice(0, at(x)) + x.add + out.slice(at(x));
+    }
+    return { xml: out, inserted, skipped };
+  }
+
+  // Mark a whole row as deleted (for tracked changes)
+  function markRowDeleted(rowXml, rev) {
+    let row = rowXml;
+    const paras = findElements(row, 'w:p');
+    for (let i = paras.length - 1; i >= 0; i--) {
+      const p = paras[i].xml;
+      const { open, inner, close } = splitElement(p);
+      const children = childElements(inner);
+      const pPr = children.find(c => tagName(c) === 'w:pPr') || '';
+      const body = children.filter(c => c !== pPr).join('');
+      const deleted = deleteParagraphMark(open + pPr + deleteRuns(body, rev) + close, rev);
+      row = row.slice(0, paras[i].start) + deleted + row.slice(paras[i].end);
+    }
+    const { open, inner, close } = splitElement(row);
+    const children = childElements(inner);
+    const trPr = children.find(c => tagName(c) === 'w:trPr');
+    const mark = `<w:del${rev.attrs()}/>`;
+    if (trPr) {
+      const parts = splitElement(trPr);
+      return open + inner.replace(trPr, parts.open + parts.inner + mark + parts.close) + close;
+    }
+    const exIdx = children.findIndex(c => tagName(c) === 'w:tblPrEx');
+    children.splice(exIdx + 1, 0, `<w:trPr>${mark}</w:trPr>`);
+    return open + children.join('') + close;
+  }
+
+  // Move drawing rows, one after another: [{ token, after }] where after is the drawing to follow
+  // ('' = before the first drawing row). With opts.tracked the old row is marked deleted and a
+  // copy is inserted at the new place (Word can't track moves of table rows).
+  // Returns { xml, moved: [token], notFound: [token] }
+  function moveDocxRows(xml, moves, opts = {}) {
+    const rev = makeRevisions(xml, opts.author || 'Drawing Renamer', opts.date || new Date().toISOString().replace(/\.\d+Z$/, 'Z'));
+    const moved = [];
+    const notFound = [];
+    let out = xml;
+    for (const { token, after } of moves) {
+      const rows = registerRows(out);
+      const source = rows.find(r => r.token === token);
+      if (!source || token === after) {
+        notFound.push(token);
+        continue;
+      }
+      const rowXml = source.row.xml;
+      let withoutRow;
+      let copy;
+      if (opts.tracked) {
+        withoutRow = out.slice(0, source.row.start) + markRowDeleted(rowXml, rev) + out.slice(source.row.end);
+        copy = markRowInserted(cleanRowCopy(rowXml), rev);
+        let marked = '';
+        let pos = 0;
+        for (const p of findElements(copy, 'w:p')) {
+          marked += copy.slice(pos, p.start) + markParagraphInserted(p.xml, rev);
+          pos = p.end;
+        }
+        copy = marked + copy.slice(pos);
+      } else {
+        withoutRow = out.slice(0, source.row.start) + out.slice(source.row.end);
+        copy = rowXml;
+      }
+      const remaining = registerRows(withoutRow);
+      if (!remaining.length) {
+        notFound.push(token);
+        continue;
+      }
+      if (after === '') {
+        const first = remaining[0].row;
+        out = withoutRow.slice(0, first.start) + copy + withoutRow.slice(first.start);
+      } else {
+        const anchor = (remaining.find(r => r.token === after) || remaining[remaining.length - 1]).row;
+        out = withoutRow.slice(0, anchor.end) + copy + withoutRow.slice(anchor.end);
+      }
+      moved.push(token);
+    }
+    return { xml: out, moved, notFound };
+  }
+
+  // Text of the cells after number/title/scale/size in a drawing's row (its revision marks)
+  function readRowMarks(xml, token) {
+    const r = registerRows(xml).find(x => x.token === token);
+    if (!r) return [];
+    return findElements(xml, 'w:tc', r.row.start, r.row.end).slice(4).map(c => cellText(c.xml));
+  }
+
+  // Scale and size cells of each drawing row: { token: { scale, size } }
+  function readDocxDetails(xml) {
+    const details = {};
+    for (const { token, row } of registerRows(xml)) {
+      if (token in details) continue;
+      const cells = findElements(xml, 'w:tc', row.start, row.end);
+      details[token] = { scale: cells[2] ? cellText(cells[2].xml) : '', size: cells[3] ? cellText(cells[3].xml) : '' };
+    }
+    return details;
+  }
+
   return {
     DRAWING_NUMBER,
     parsePdfText,
     makeMatcher,
     readDocxTitles,
+    readDocxDetails,
+    readRowMarks,
     editDocxTitles,
+    editDocxNumbers,
+    insertDocxRows,
+    moveDocxRows,
     decodeXml
   };
 });

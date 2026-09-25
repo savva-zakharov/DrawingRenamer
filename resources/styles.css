@@ -131,3 +131,37 @@ input.title-input{ width:100%; padding:3px 5px; font:inherit }
 #word-changes ins{ color:var(--ok); text-decoration:none; font-weight:600 }
 label.option{ display:flex; align-items:center; gap:6px; margin:6px 0 2px; color:var(--fg) }
 p.indent{ margin:0 0 8px 22px }
+
+/* New register entries */
+button.edit-badge.new{ border-color:#9bd3a9; background:#e6f4ea; color:var(--ok) }
+button.edit-badge.new:hover{ background:#cdebd5 }
+#new-entry{ font-weight:600 }
+#entry-dialog{ width:560px }
+.entry-grid{ display:grid; grid-template-columns:100px 1fr; gap:8px 10px; align-items:center; margin:10px 0 6px }
+.entry-grid > label{ margin:0; color:var(--fg) }
+.entry-row{ display:flex; align-items:center; gap:8px }
+.entry-row input{ flex:1 }
+.entry-row .inline-label{ margin:0; color:var(--fg) }
+#entry-dialog select{ padding:5px 6px; font-size:14px; max-width:100% }
+#entry-after{ width:100% }
+#entry-error{ color:var(--bad); font-size:12px; min-height:18px; margin-top:4px }
+
+/* Renumbered drawings */
+td.number.edited{ color:#7a4b00 }
+button.edit-badge.number{ margin:2px 0 0; font-family:Segoe UI, Roboto, Arial, sans-serif }
+input.number-input{ font-family:Consolas, monospace }
+
+/* Reordering the register by dragging rows */
+.col-drag{ width:18px; padding-left:2px !important; padding-right:0 !important }
+td.drag{ padding:5px 0 5px 4px; width:18px }
+.drag-handle{ display:inline-block; cursor:grab; color:#a0a0a0; font-size:13px; line-height:1; letter-spacing:-1px; user-select:none; padding:2px 2px }
+tr:hover .drag-handle{ color:#6b6b6b }
+.drag-handle:active{ cursor:grabbing }
+tr.dragging{ opacity:.45 }
+tr.drop-above td{ box-shadow:inset 0 2px 0 var(--accent) }
+tr.drop-below td{ box-shadow:inset 0 -2px 0 var(--accent) }
+tr.moved .drag-handle{ color:#b26a00 }
+button.edit-badge.moved{ border-color:#c9b6ef; background:#f1eafc; color:#6a3fb5 }
+button.edit-badge.moved:hover{ background:#e4d8fa }
+tr.drop-into td{ background:#e3f0ff !important; box-shadow:inset 0 0 0 1px var(--accent) }
+tr.section .drag-handle{ color:#8c9bb0 }

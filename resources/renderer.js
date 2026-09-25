@@ -7,6 +7,7 @@ const watchingEl = document.getElementById('watching');
 const renameBtn = document.getElementById('rename');
 const folderBtn = document.getElementById('make-folder');
 const wordBtn = document.getElementById('save-word');
+const entryBtn = document.getElementById('new-entry');
 const hideEmptyCheckbox = document.getElementById('hide-empty');
 const checkAllCheckbox = document.getElementById('check-all');
 
@@ -24,7 +25,16 @@ const state = {
   targetDir: null,       // directory containing the register (the parent of any drawing folders)
   tokenMap: {},          // drawing number => title, as in the register
   titles: {},            // drawing number => title used for renaming (register title or an edit)
-  layout: { folders: [], assignments: {}, titleEdits: {} }, // folders, drawing number => folder, title edits not yet in Word
+  // folders, drawing number => folder, and register changes not yet saved to Word
+  // titleEdits and numberEdits are keyed by the drawing number currently in the Word register
+  // numberHistory: old number => new number for renumberings already saved to Word, so files
+  // still named with an old number keep matching their drawing
+  // moves: [{ token, after }] row moves in the register, applied in order ('' = to the top)
+  layout: { folders: [], assignments: {}, titleEdits: {}, numberEdits: {}, numberHistory: {}, newEntries: [], moves: [] },
+  drag: null,            // what's being dragged: { kind: 'drawing', token } or { kind: 'folder', folder }
+  origOf: {},            // drawing number shown => number in the register (for renumbered drawings)
+  movedTokens: new Set(), // register numbers of drawings with a pending move
+  registerXml: null,     // word/document.xml of a Word register, for previews
   editingToken: null,    // drawing whose title is being edited in the table
   wordAvailable: null,   // whether Word can be driven to export PDFs (checked on first use)
   layoutBroken: false,   // the layout file couldn't be read, so don't overwrite it
@@ -160,8 +170,10 @@ async function readDocumentXml(docxPath) {
 
 async function parseRegister(filePath) {
   if (registerKindOf(baseName(filePath)) === 'docx') {
-    return RegisterCore.readDocxTitles((await readDocumentXml(filePath)).xml);
+    state.registerXml = (await readDocumentXml(filePath)).xml;
+    return RegisterCore.readDocxTitles(state.registerXml);
   }
+  state.registerXml = null;
   const buffer = await Neutralino.filesystem.readBinaryFile(filePath);
   return RegisterCore.parsePdfText(await extractPdfText(buffer));
 }
@@ -218,7 +230,7 @@ function layoutPath() {
 }
 
 async function loadLayout() {
-  state.layout = { folders: [], assignments: {}, titleEdits: {} };
+  state.layout = { folders: [], assignments: {}, titleEdits: {}, numberEdits: {}, numberHistory: {}, newEntries: [], moves: [] };
   state.layoutBroken = false;
   if (!(await getStatsOrNull(layoutPath()))) return;
   try {
@@ -234,7 +246,25 @@ async function loadLayout() {
     for (const [token, title] of Object.entries(data.titleEdits || {})) {
       if (typeof title === 'string' && title.trim()) titleEdits[token] = title;
     }
-    state.layout = { folders: withAncestors(folders), assignments, titleEdits };
+    const numberRe = new RegExp('^' + RegisterCore.DRAWING_NUMBER + '$');
+    const newEntries = (Array.isArray(data.newEntries) ? data.newEntries : [])
+      .filter(e => e && typeof e.token === 'string' && numberRe.test(e.token) && typeof e.title === 'string' && e.title.trim())
+      .map(e => ({
+        token: e.token, title: e.title, scale: String(e.scale || ''), size: String(e.size || ''),
+        after: typeof e.after === 'string' ? e.after : null, copyMarks: !!e.copyMarks
+      }));
+    const numberEdits = {};
+    for (const [token, number] of Object.entries(data.numberEdits || {})) {
+      if (typeof number === 'string' && numberRe.test(number) && number !== token) numberEdits[token] = number;
+    }
+    const numberHistory = {};
+    for (const [token, number] of Object.entries(data.numberHistory || {})) {
+      if (typeof number === 'string' && numberRe.test(number) && number !== token) numberHistory[token] = number;
+    }
+    const moves = (Array.isArray(data.moves) ? data.moves : [])
+      .filter(m => m && numberRe.test(m.token) && (m.after === '' || numberRe.test(m.after)))
+      .map(m => ({ token: m.token, after: m.after }));
+    state.layout = { folders: withAncestors(folders), assignments, titleEdits, numberEdits, numberHistory, newEntries, moves };
     appendLog(`📁 Loaded folder layout from ${LAYOUT_FILE} (${folders.length} folders).`);
   } catch (err) {
     state.layoutBroken = true;
@@ -260,8 +290,12 @@ async function saveLayout() {
     register: baseName(state.registerPath),
     folders: state.layout.folders,
     assignments,
-    // Title changes made in the app that haven't been saved into the Word register yet
-    titleEdits: state.layout.titleEdits
+    // Changes made in the app that haven't been saved into the Word register yet
+    titleEdits: state.layout.titleEdits,
+    numberEdits: state.layout.numberEdits,
+    numberHistory: state.layout.numberHistory,
+    moves: state.layout.moves,
+    newEntries: state.layout.newEntries
   };
   try {
     await Neutralino.filesystem.writeFile(layoutPath(), JSON.stringify(data, null, 2) + '\n');
@@ -343,7 +377,28 @@ function newNameFor(token, tokenMap) {
 
 // registerRels: the register and its PDF, which aren't drawings
 function matchFiles(tokenMap, files, registerRels) {
-  const matchToken = RegisterCore.makeMatcher(Object.keys(tokenMap));
+  const matchCurrent = RegisterCore.makeMatcher(Object.keys(tokenMap));
+  // A file still named with a renumbered drawing's old number belongs to that drawing, for
+  // pending renumberings and ones already saved to Word (until no file uses the old number)
+  const aliases = {};
+  for (const [old, number] of Object.entries(state.layout.numberHistory)) {
+    const shown = state.layout.numberEdits[number] || number;
+    if (shown in tokenMap) aliases[old] = shown;
+  }
+  for (const [shown, orig] of Object.entries(state.origOf)) {
+    if (shown !== orig) aliases[orig] = shown;
+  }
+  const matchOld = RegisterCore.makeMatcher(Object.keys(aliases));
+  const matchToken = name => {
+    const current = matchCurrent(name);
+    const old = matchOld(name);
+    if (!old) return current;
+    if (!current || old.length > current.length) return aliases[old];
+    if (current.length > old.length) return current;
+    // The number was given to another drawing: files made before the change keep their old
+    // drawing, apart from one already renamed to the new drawing's name
+    return name.toLowerCase() === newNameFor(current, tokenMap).toLowerCase() ? current : aliases[old];
+  };
   const pdfs = files
     .filter(f => f.name.toLowerCase().endsWith('.pdf') && !registerRels.includes(f.rel))
     .sort((a, b) => a.rel.localeCompare(b.rel));
@@ -374,14 +429,18 @@ function computeRows(tokenMap, match, files, addedTimes, choices) {
   const existing = new Set(files.map(f => f.rel.toLowerCase()));
 
   const rows = [];
-  for (const token of Object.keys(tokenMap)) {
+  for (const token of Object.keys(state.titles)) {
     const title = state.titles[token];
-    const edited = title !== tokenMap[token];
-    const registerTitle = tokenMap[token];
+    const origToken = state.origOf[token];
+    const isNew = origToken === undefined;
+    const registerTitle = isNew ? undefined : tokenMap[origToken];
+    const edited = !isNew && title !== registerTitle;
+    const renumbered = !isNew && origToken !== token;
+    const moved = !isNew && state.movedTokens.has(origToken);
     const folder = folderOf(token);
     const matches = match.byToken[token];
     if (!matches) {
-      rows.push({ key: '#' + token, token, title, edited, registerTitle, folder, status: 'none' });
+      rows.push({ key: '#' + token, token, origToken, title, edited, renumbered, moved, isNew, registerTitle, folder, status: 'none' });
       continue;
     }
     const newName = newNameFor(token, state.titles);
@@ -396,7 +455,7 @@ function computeRows(tokenMap, match, files, addedTimes, choices) {
     const ordered = matches.slice().sort((a, b) => (addedTimes[b.rel] || 0) - (addedTimes[a.rel] || 0) || a.rel.localeCompare(b.rel));
     ordered.forEach((f, i) => {
       const row = {
-        key: f.rel, token, title, edited, registerTitle, folder, file: f.name, dir: f.dir, rel: f.rel, newName, targetRel,
+        key: f.rel, token, origToken, title, edited, renumbered, moved, isNew, registerTitle, folder, file: f.name, dir: f.dir, rel: f.rel, newName, targetRel,
         group, chosen: f === chosen, first: i === 0, last: i === ordered.length - 1
       };
       if (f === chosen) {
@@ -472,10 +531,15 @@ function updateButtons() {
   folderBtn.textContent = selected ? `MAKE FOLDER (${selected})` : 'MAKE FOLDER';
   folderBtn.disabled = state.busy || selected === 0;
 
-  wordBtn.hidden = state.registerKind !== 'docx';
-  const edits = state.registerKind === 'docx' ? pendingTitleEdits().length : 0;
-  wordBtn.textContent = edits ? `SAVE TO WORD (${edits})` : 'SAVE TO WORD';
-  wordBtn.disabled = state.busy || edits === 0;
+  const isDocx = state.registerKind === 'docx';
+  wordBtn.hidden = !isDocx;
+  entryBtn.hidden = !isDocx;
+  entryBtn.disabled = state.busy;
+  const changes = isDocx
+    ? pendingTitleEdits().length + pendingNumberEdits().length + pendingNewEntries().length + state.movedTokens.size
+    : 0;
+  wordBtn.textContent = changes ? `SAVE TO WORD (${changes})` : 'SAVE TO WORD';
+  wordBtn.disabled = state.busy || changes === 0;
 
   const selectable = visibleRows().filter(isSelectable);
   const on = selectable.filter(isSelected).length;
@@ -547,6 +611,11 @@ function sections(rows) {
 function renderSectionHeader(section, visible, inside) {
   const tr = document.createElement('tr');
   tr.className = 'section';
+  const dragTd = cell(tr, '', 'drag');
+  if (!section.unmatched) {
+    if (section.folder) addFolderHandle(dragTd, tr, section.folder);
+    makeFolderDropTarget(tr, section.folder);
+  }
   const selectable = inside.filter(isSelectable);
   const depth = folderDepth(section.folder);
 
@@ -604,6 +673,234 @@ function renderSectionHeader(section, visible, inside) {
   rowsEl.appendChild(tr);
 }
 
+// --------------------
+// Dragging: drawings to reorder the register or change folder, folders to nest them
+// --------------------
+
+// Reordering needs a Word register; folder changes work with any register
+function canReorder() {
+  return state.registerKind === 'docx';
+}
+
+function canDragDrawings() {
+  return !!state.registerKind && (canReorder() || state.layout.folders.length > 0);
+}
+
+function clearDropMarks() {
+  for (const el of rowsEl.querySelectorAll('.drop-above, .drop-below, .drop-into, .dragging')) {
+    el.classList.remove('drop-above', 'drop-below', 'drop-into', 'dragging');
+  }
+}
+
+function markDrop(tr, cls) {
+  if (tr.classList.contains(cls)) return;
+  for (const el of rowsEl.querySelectorAll('.drop-above, .drop-below, .drop-into')) el.classList.remove('drop-above', 'drop-below', 'drop-into');
+  tr.classList.add(cls);
+}
+
+function startDrag(e, tr, drag, label) {
+  if (state.busy || state.editingToken) return e.preventDefault();
+  state.drag = drag;
+  e.dataTransfer.effectAllowed = 'move';
+  e.dataTransfer.setData('text/plain', label);
+  // Show the whole row being dragged, not just the handle
+  e.dataTransfer.setDragImage(tr, 10, tr.offsetHeight / 2);
+  requestAnimationFrame(() => tr.classList.add('dragging'));
+}
+
+function makeHandle(title) {
+  const handle = document.createElement('span');
+  handle.className = 'drag-handle';
+  handle.textContent = '⋮⋮';
+  handle.title = title;
+  handle.draggable = true;
+  handle.addEventListener('dragend', () => {
+    state.drag = null;
+    clearDropMarks();
+  });
+  return handle;
+}
+
+function addDragHandle(td, tr, row) {
+  const handle = makeHandle(canReorder()
+    ? 'Drag to move this drawing in the register, or onto a folder to move it there'
+    : 'Drag onto a folder to move this drawing there');
+  handle.addEventListener('dragstart', (e) => startDrag(e, tr, { kind: 'drawing', token: row.token }, row.token));
+  td.appendChild(handle);
+}
+
+function addFolderHandle(td, tr, folder) {
+  const handle = makeHandle('Drag onto another folder to put this folder inside it, or onto the top folder to take it out');
+  handle.addEventListener('dragstart', (e) => startDrag(e, tr, { kind: 'folder', folder }, folder));
+  td.appendChild(handle);
+}
+
+// Any row of a drawing is a drop target for drawings: the top half drops before it, the bottom
+// half after it (without a Word register, only the folder changes)
+function makeDropTarget(tr, row) {
+  const above = (e) => e.clientY < tr.getBoundingClientRect().top + tr.offsetHeight / 2;
+  const accepts = () => state.drag && state.drag.kind === 'drawing' && state.drag.token !== row.token &&
+    (canReorder() || folderOf(state.drag.token) !== row.folder);
+  tr.addEventListener('dragover', (e) => {
+    if (!accepts()) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    markDrop(tr, canReorder() ? (above(e) ? 'drop-above' : 'drop-below') : 'drop-into');
+  });
+  tr.addEventListener('drop', (e) => {
+    if (!accepts()) return;
+    e.preventDefault();
+    const token = state.drag.token;
+    state.drag = null;
+    clearDropMarks();
+    moveDrawing(token, row.token, above(e), row.folder);
+  });
+}
+
+// A folder's header (or the top folder's) takes drawings into the folder and folders inside it
+function makeFolderDropTarget(tr, folder) {
+  const accepts = () => {
+    const d = state.drag;
+    if (!d) return false;
+    if (d.kind === 'drawing') return folderOf(d.token) !== folder;
+    // Not into itself, its own subfolders, or the folder it's already in
+    return d.folder !== folder && !(folder && isInside(folder, d.folder)) && parentFolder(d.folder) !== folder;
+  };
+  tr.addEventListener('dragover', (e) => {
+    if (!accepts()) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    markDrop(tr, 'drop-into');
+  });
+  tr.addEventListener('drop', async (e) => {
+    if (!accepts()) return;
+    e.preventDefault();
+    const drag = state.drag;
+    state.drag = null;
+    clearDropMarks();
+    if (drag.kind === 'drawing') {
+      setDrawingFolder(drag.token, folder);
+      await saveLayout();
+      rebuild();
+    } else {
+      await moveFolder(drag.folder, folder);
+    }
+  });
+}
+
+function parentFolder(folder) {
+  return folder.includes('/') ? folder.slice(0, folder.lastIndexOf('/')) : '';
+}
+
+// Put a drawing in a folder ('' = the top folder); its files move there on RENAME
+function setDrawingFolder(token, folder) {
+  if (folderOf(token) === folder) return false;
+  if (folder) state.layout.assignments[token] = folder;
+  else delete state.layout.assignments[token];
+  appendLog(`📁 ${token} will go ${folder ? 'into ' + displayPath(folder) : 'to the top folder'} when you press RENAME.`);
+  return true;
+}
+
+// Move the drawing shown as `token` just before or after the drawing shown as `target`, into
+// the target's folder
+async function moveDrawing(token, target, before, targetFolder) {
+  let reordered = false;
+  if (canReorder()) {
+    const order = Object.keys(state.titles).filter(t => t !== token);
+    const at = order.indexOf(target) + (before ? 0 : 1);
+    const prev = at > 0 ? order[at - 1] : null;
+    const entry = state.origOf[token] === undefined && state.layout.newEntries.find(e => e.token === token);
+    // Register rows are placed after register rows; a new entry goes in right after its anchor row
+    const prevEntry = prev && state.origOf[prev] === undefined && state.layout.newEntries.find(e => e.token === prev);
+    const anchor = !prev ? '' : prevEntry ? prevEntry.after || '' : state.origOf[prev];
+
+    if (entry) {
+      const list = state.layout.newEntries.filter(e => e !== entry);
+      entry.after = anchor;
+      // Keep new entries that share an anchor in the order they're shown
+      const i = prevEntry ? list.indexOf(prevEntry) + 1 : list.findIndex(e => e.after === anchor);
+      list.splice(i < 0 ? list.length : i, 0, entry);
+      state.layout.newEntries = list;
+    } else {
+      state.layout.moves.push({ token: state.origOf[token], after: anchor });
+      if (!pendingMoves().length) state.layout.moves = []; // back to the register's order
+    }
+    reordered = true;
+    appendLog(`↕️ ${token} moved ${prev ? 'after ' + prev : 'to the top of the register'}${entry ? '' : ' (press SAVE TO WORD to reorder the register)'}.`);
+  }
+  const refiled = targetFolder !== undefined && targetFolder !== null && setDrawingFolder(token, targetFolder);
+  if (!reordered && !refiled) return;
+  await saveLayout();
+  rebuild();
+}
+
+// Move a folder (with its subfolders and files) into `parent` ('' = the top folder). This moves
+// the folder on disk straight away, so the app keeps finding the files inside it.
+async function moveFolder(folder, parent) {
+  const dest = relJoin(parent, folderLeaf(folder));
+  if (dest === folder || state.busy) return;
+  if (parent && isInside(parent, folder)) {
+    appendLog(`❌ ${displayPath(folder)} can't go inside itself.`);
+    return;
+  }
+  if (state.layout.folders.some(f => f.toLowerCase() === dest.toLowerCase()) || await getStatsOrNull(absPath(dest))) {
+    appendLog(`❌ There's already a folder called ${displayPath(dest)}; ${displayPath(folder)} wasn't moved.`);
+    return;
+  }
+  state.busy = true;
+  updateButtons();
+  try {
+    const stats = await getStatsOrNull(absPath(folder));
+    if (stats && stats.isDirectory) {
+      // Let go of the watchers inside the folder so Windows allows the move
+      for (const [dir, id] of [...state.watchers]) {
+        if (dir && isInside(dir, folder)) {
+          try {
+            await Neutralino.filesystem.removeWatcher(id);
+          } catch (e) {
+            // watcher already gone
+          }
+          state.watchers.delete(dir);
+        }
+      }
+      if (parent) await ensureDir(parent);
+      await Neutralino.filesystem.move(absPath(folder), absPath(dest));
+    }
+    const remap = f => (f && isInside(f, folder) ? dest + f.slice(folder.length) : f);
+    const remapRel = rel => (rel.startsWith(folder + '/') ? dest + rel.slice(folder.length) : rel);
+    state.layout.folders = withAncestors(state.layout.folders.map(remap));
+    for (const token of Object.keys(state.layout.assignments)) {
+      state.layout.assignments[token] = remap(state.layout.assignments[token]);
+    }
+    // Keep choices and selections for the files that moved, and don't flash them as new
+    if (state.knownFiles) state.knownFiles = new Set([...state.knownFiles].map(remapRel));
+    for (const [token, rel] of state.choices) state.choices.set(token, remapRel(rel));
+    state.unchecked = new Set([...state.unchecked].map(remapRel));
+    state.picked = new Set([...state.picked].map(remapRel));
+    await saveLayout();
+    appendLog(`📁 Moved folder ${displayPath(folder)} → ${displayPath(dest)}${stats ? '' : ' (it had no files yet)'}.`);
+  } catch (err) {
+    appendLog(`❌ Could not move ${displayPath(folder)}: ${err.message || err}. Close any window showing files in it and try again.`);
+  } finally {
+    state.busy = false;
+    await refresh();
+  }
+}
+
+// Where a new row goes, for messages: after is a register number, '' for the top
+function describePlace(after) {
+  if (after === '') return 'at the top of the register';
+  return after && after in state.tokenMap ? `after ${after}` : 'after the last drawing';
+}
+
+async function undoMove(token) {
+  const orig = state.origOf[token];
+  state.layout.moves = state.layout.moves.filter(m => m.token !== orig);
+  appendLog(`↕️ ${token} is back in its register position.`);
+  await saveLayout();
+  rebuild();
+}
+
 function renderRow(row, newFiles, alt, depth) {
   const tr = document.createElement('tr');
   if (row.status === 'none') tr.className = 'no-file';
@@ -616,6 +913,13 @@ function renderRow(row, newFiles, alt, depth) {
     if (row.last) tr.classList.add('group-last');
     if (!row.chosen) tr.classList.add('not-chosen');
   }
+
+  const dragTd = cell(tr, '', 'drag');
+  if (row.token && canDragDrawings()) {
+    if (!row.group || row.first) addDragHandle(dragTd, tr, row);
+    makeDropTarget(tr, row);
+  }
+  if (row.moved) tr.classList.add('moved');
 
   const checkTd = cell(tr, '');
   if (isSelectable(row)) {
@@ -631,7 +935,8 @@ function renderRow(row, newFiles, alt, depth) {
 
   // Only label the drawing once per group
   const showDrawing = !row.group || row.first;
-  const numberTd = cell(tr, showDrawing ? row.token : '', 'number');
+  const numberTd = cell(tr, '', 'number');
+  if (showDrawing) renderNumber(numberTd, row);
   if (depth) numberTd.style.paddingLeft = `${8 + depth * 22}px`;
   const titleTd = cell(tr, '', 'title');
   if (showDrawing) renderTitle(titleTd, row);
@@ -658,7 +963,15 @@ function renderRow(row, newFiles, alt, depth) {
   if (row.status === 'ok') target = '(already named)';
   else if (row.status === 'superseded') target = displayPath(relJoin(relJoin(row.dir, SUPERSEDED_DIR), supersededName(row.file)));
   else if (row.status === 'skip' || row.status === 'none') target = '';
-  cell(tr, target);
+  const targetTd = cell(tr, target);
+  if (row.status === 'unmatched' && state.registerKind === 'docx') {
+    const add = document.createElement('button');
+    add.className = 'link';
+    add.textContent = 'Add to register…';
+    add.title = 'Add a register entry for this file';
+    add.addEventListener('click', () => openEntryDialog(row.file));
+    targetTd.appendChild(add);
+  }
 
   const statusTd = cell(tr, '');
   const badge = document.createElement('span');
@@ -676,7 +989,29 @@ function renderRow(row, newFiles, alt, depth) {
 // --------------------
 function renderTitle(td, row) {
   td.textContent = row.title;
-  if (row.edited) {
+  if (row.moved) {
+    const badge = document.createElement('button');
+    badge.className = 'edit-badge moved';
+    badge.textContent = 'moved ✕';
+    badge.title = 'Moved in the register; press SAVE TO WORD to reorder it.\nClick to put it back';
+    badge.addEventListener('click', (e) => {
+      e.stopPropagation();
+      undoMove(row.token);
+    });
+    td.append(' ', badge);
+  }
+  if (row.isNew) {
+    td.classList.add('edited');
+    const badge = document.createElement('button');
+    badge.className = 'edit-badge new';
+    badge.textContent = 'new ✕';
+    badge.title = 'Not in the register yet; press SAVE TO WORD to add it.\nClick to remove this entry';
+    badge.addEventListener('click', (e) => {
+      e.stopPropagation();
+      removeNewEntry(row.token);
+    });
+    td.append(' ', badge);
+  } else if (row.edited) {
     td.classList.add('edited');
     const badge = document.createElement('button');
     badge.className = 'edit-badge';
@@ -724,16 +1059,108 @@ function startTitleEdit(td, row) {
   input.addEventListener('blur', () => finish(true));
 }
 
+// --------------------
+// Drawing number editing
+// --------------------
+function renderNumber(td, row) {
+  td.textContent = row.token;
+  if (row.renumbered) {
+    td.classList.add('edited');
+    const badge = document.createElement('button');
+    badge.className = 'edit-badge number';
+    badge.textContent = `was ${row.origToken} ✕`;
+    badge.title = `Register: ${row.origToken}\nClick to go back to ${row.origToken}`;
+    badge.addEventListener('click', (e) => {
+      e.stopPropagation();
+      setNumberEdit(row.token, row.origToken);
+    });
+    td.append(document.createElement('br'), badge);
+  }
+  if (state.registerKind === 'docx') {
+    td.classList.add('editable');
+    td.title = row.renumbered ? `Register: ${row.origToken}\nDouble-click to change the number` : 'Double-click to change the drawing number';
+    td.addEventListener('dblclick', () => startNumberEdit(td, row));
+  }
+}
+
+function startNumberEdit(td, row) {
+  if (state.busy || state.editingToken) return;
+  state.editingToken = row.token;
+  const input = document.createElement('input');
+  input.className = 'title-input number-input';
+  input.value = row.token;
+  td.textContent = '';
+  td.appendChild(input);
+  input.focus();
+  input.select();
+
+  let finished = false;
+  const finish = (save) => {
+    if (finished) return;
+    finished = true;
+    state.editingToken = null;
+    const value = input.value.replace(/\s+/g, '').toUpperCase();
+    if (save && value && value !== row.token) setNumberEdit(row.token, value);
+    else renderAfterEdit();
+  };
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') finish(true);
+    if (e.key === 'Escape') finish(false);
+  });
+  input.addEventListener('blur', () => finish(true));
+}
+
+// Give the drawing shown as `shown` the number `number` (the register's own number undoes it)
+async function setNumberEdit(shown, number) {
+  const token = state.origOf[shown];
+  const entry = token === undefined && state.layout.newEntries.find(e => e.token === shown);
+  if (!new RegExp('^' + RegisterCore.DRAWING_NUMBER + '$').test(number)) {
+    appendLog(`❌ "${number}" isn't a drawing number like PA-002 or PA-A-100; ${shown} wasn't changed.`);
+    return renderAfterEdit();
+  }
+  if (number in state.titles) {
+    appendLog(`❌ ${number} is already used by another drawing; renumber that one first. ${shown} wasn't changed.`);
+    return renderAfterEdit();
+  }
+  if (entry) {
+    entry.token = number;
+    appendLog(`✏️ New entry ${shown} is now ${number}.`);
+  } else if (number === token) {
+    delete state.layout.numberEdits[token];
+    appendLog(`✏️ ${shown}: back to the register number ${token}.`);
+  } else {
+    state.layout.numberEdits[token] = number;
+    appendLog(`✏️ ${token} renumbered to ${number} (press SAVE TO WORD to write it to the register; RENAME updates the file names).`);
+  }
+  // The drawing's folder and file choice move with it
+  if (state.layout.assignments[shown]) {
+    state.layout.assignments[number] = state.layout.assignments[shown];
+    delete state.layout.assignments[shown];
+  }
+  if (state.choices.has(shown)) {
+    state.choices.set(number, state.choices.get(shown));
+    state.choices.delete(shown);
+  }
+  await saveLayout();
+  renderAfterEdit();
+}
+
 function renderAfterEdit() {
   state.renderPending = false;
   rebuild();
 }
 
 // title: new title, or null to go back to the register's title
-async function setTitleEdit(token, title) {
-  if (title === null || title === state.tokenMap[token]) {
+async function setTitleEdit(shown, title) {
+  const token = state.origOf[shown];
+  const entry = token === undefined && state.layout.newEntries.find(e => e.token === shown);
+  if (entry) {
+    if (title === null) return;
+    entry.title = title;
+    appendLog(`✏️ ${shown} (new entry): title changed to "${title}".`);
+  } else if (title === null || title === state.tokenMap[token]) {
     delete state.layout.titleEdits[token];
-    appendLog(`✏️ ${token}: back to the register title "${state.tokenMap[token]}".`);
+    appendLog(`✏️ ${shown}: back to the register title "${state.tokenMap[token]}".`);
   } else {
     state.layout.titleEdits[token] = title;
     appendLog(`✏️ ${token}: title changed to "${title}" (press SAVE TO WORD to write it to the register).`);
@@ -774,8 +1201,9 @@ function render(newFiles) {
 
   const count = s => state.rows.filter(r => r.status === s).length;
   const entries = Object.keys(state.tokenMap).length;
+  const added = pendingNewEntries().length;
   const parts = [
-    `${entries} register entries`,
+    `${entries} register entries` + (added ? ` + ${added} new` : ''),
     `${count('rename') + count('supersede')} to rename`,
     `${count('ok')} already named`,
     `${count('unmatched')} unmatched`
@@ -808,14 +1236,95 @@ function registerStamp(stats) {
   return `${stats.modifiedAt}:${stats.size}`;
 }
 
-// Register titles with any edits made in the app applied
+// Register numbers in order, with pending row moves applied
+function applyMoves(order, moves) {
+  const out = order.slice();
+  for (const { token, after } of moves) {
+    const from = out.indexOf(token);
+    if (from < 0 || token === after) continue;
+    out.splice(from, 1);
+    if (after === '') out.unshift(token);
+    else {
+      const i = out.indexOf(after);
+      out.splice(i < 0 ? out.length : i + 1, 0, token);
+    }
+  }
+  return out;
+}
+
+function registerOrder() {
+  return applyMoves(Object.keys(state.tokenMap), state.layout.moves);
+}
+
+// Row moves that change the register's order (none if the rows are back where they started)
+function pendingMoves() {
+  const moves = state.layout.moves.filter(m => m.token in state.tokenMap && (m.after === '' || m.after in state.tokenMap));
+  const original = Object.keys(state.tokenMap);
+  return applyMoves(original, moves).join('|') === original.join('|') ? [] : moves;
+}
+
+// Register titles with any edits made in the app applied, in the order rows will be in (moves
+// applied, new entries placed after the drawing they'll be inserted after)
 function effectiveTitles() {
   const titles = {};
-  for (const [token, title] of Object.entries(state.tokenMap)) {
+  const pending = pendingNewEntries();
+  const addAfter = (token) => {
+    for (const e of pending) if (e.after === token && !(e.token in titles)) titles[e.token] = e.title;
+  };
+  state.origOf = {};
+  addAfter('');
+  for (const token of registerOrder()) {
+    const title = state.tokenMap[token];
     const edit = state.layout.titleEdits[token];
-    titles[token] = edit && edit !== title ? edit : title;
+    const shown = state.layout.numberEdits[token] || token;
+    titles[shown] = edit && edit !== title ? edit : title;
+    state.origOf[shown] = token;
+    addAfter(token);
   }
+  for (const e of pending) if (!(e.token in titles)) titles[e.token] = e.title;
   return titles;
+}
+
+// Drop old numbers from the history once no PDF is named with them (apart from a file already
+// renamed for a drawing that now has that number). Returns whether anything was dropped.
+function expireNumberHistory(files) {
+  const history = state.layout.numberHistory;
+  const olds = Object.keys(history);
+  if (!olds.length) return false;
+  const longest = RegisterCore.makeMatcher([...new Set([...Object.keys(state.titles), ...olds])]);
+  let changed = false;
+  for (const old of olds) {
+    const renamed = old in state.titles ? newNameFor(old, state.titles).toLowerCase() : null;
+    const inUse = files.some(f => f.name.toLowerCase().endsWith('.pdf') && longest(f.name) === old && f.name.toLowerCase() !== renamed);
+    if (!inUse) {
+      delete history[old];
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+// Numbers the register's drawings will have once pending renumberings are saved
+function registerNumbers() {
+  return new Set(Object.keys(state.tokenMap).map(t => state.layout.numberEdits[t] || t));
+}
+
+// New entries that aren't in the register yet
+function pendingNewEntries() {
+  const numbers = registerNumbers();
+  return state.layout.newEntries.filter(e => !numbers.has(e.token));
+}
+
+// The register and its PDF, which aren't drawings
+function registerRels() {
+  return [baseName(state.registerPath), baseName(registerPdfPath())];
+}
+
+// Renumbered drawings: [{ token: number in the register, to: new number }]
+function pendingNumberEdits() {
+  return Object.keys(state.tokenMap)
+    .filter(t => state.layout.numberEdits[t] && state.layout.numberEdits[t] !== t)
+    .map(t => ({ token: t, to: state.layout.numberEdits[t] }));
 }
 
 // Title edits for drawings in the register that differ from it
@@ -828,6 +1337,8 @@ function pendingTitleEdits() {
 function rebuild(newFiles = new Set()) {
   if (!state.match) return;
   state.titles = effectiveTitles();
+  state.movedTokens = new Set(pendingMoves().map(m => m.token));
+  state.match = matchFiles(state.titles, state.files, registerRels());
   state.rows = computeRows(state.tokenMap, state.match, state.files, state.addedTimes, state.choices);
   render(newFiles);
 }
@@ -858,10 +1369,17 @@ async function refresh() {
       state.tokenMap = await parseRegister(state.registerPath);
       state.registerModified = registerStamp(regStats);
       appendLog(`📘 Loaded ${Object.keys(state.tokenMap).length} drawing entries from register.`);
-      // Edits the register now contains are done with
+      // Edits and new entries the register now contains are done with
       const done = Object.keys(state.layout.titleEdits).filter(t => state.tokenMap[t] === state.layout.titleEdits[t]);
-      if (done.length) {
+      const added = state.layout.newEntries.filter(e => e.token in state.tokenMap && !state.layout.numberEdits[e.token]);
+      // A renumbering can't apply once its old number is gone from the register (saved ones are
+      // cleared when they're saved)
+      const renumbered = Object.keys(state.layout.numberEdits).filter(t => !(t in state.tokenMap));
+      if (done.length || added.length || renumbered.length) {
         for (const t of done) delete state.layout.titleEdits[t];
+        for (const t of renumbered) delete state.layout.numberEdits[t];
+        state.layout.moves = state.layout.moves.filter(m => m.token in state.tokenMap);
+        state.layout.newEntries = state.layout.newEntries.filter(e => !added.includes(e));
         await saveLayout();
       }
     }
@@ -879,7 +1397,9 @@ async function refresh() {
     state.knownFiles = new Set(files.map(f => f.rel));
 
     state.files = files;
-    state.match = matchFiles(state.tokenMap, files, [baseName(state.registerPath), baseName(registerPdfPath())]);
+    state.titles = effectiveTitles();
+    if (expireNumberHistory(files)) await saveLayout();
+    state.match = matchFiles(state.titles, files, registerRels());
     // Arrival times are only needed to pick a default when several files match one drawing
     state.addedTimes = {};
     for (const group of Object.values(state.match.byToken)) {
@@ -1214,12 +1734,42 @@ try {
 const wordDialog = document.getElementById('word-dialog');
 
 // Resolves to { tracked, exportPdf } or null if cancelled
-async function askWordOptions(edits) {
+async function askWordOptions(edits, additions, numbers, movedCount) {
   const wordOk = await checkWordAvailable();
+  const total = edits.length + additions.length + numbers.length + movedCount;
   document.getElementById('word-dialog-title').textContent =
-    `Save ${edits.length === 1 ? '1 title change' : edits.length + ' title changes'} to ${baseName(state.registerPath)}`;
+    `Save ${total === 1 ? '1 change' : total + ' changes'} to ${baseName(state.registerPath)}`;
   const list = document.getElementById('word-changes');
   list.textContent = '';
+  for (const e of additions) {
+    const li = document.createElement('li');
+    const num = document.createElement('b');
+    num.textContent = e.token;
+    const title = document.createElement('ins');
+    title.textContent = e.title;
+    const where = document.createElement('span');
+    where.className = 'muted';
+    where.textContent = ` (new row ${describePlace(e.after)})`;
+    li.append('➕ ', num, ' ', title, where);
+    list.appendChild(li);
+  }
+  if (movedCount) {
+    const li = document.createElement('li');
+    li.textContent = `↕️ ${movedCount === 1 ? '1 drawing moves' : movedCount + ' drawings move'} to a new place in the register (${[...state.movedTokens].join(', ')})`;
+    list.appendChild(li);
+  }
+  for (const e of numbers) {
+    const li = document.createElement('li');
+    const from = document.createElement('del');
+    from.textContent = e.token;
+    const to = document.createElement('ins');
+    to.textContent = e.to;
+    const what = document.createElement('span');
+    what.className = 'muted';
+    what.textContent = ` (new number for "${state.titles[e.to] || state.tokenMap[e.token]}")`;
+    li.append('# ', from, ' → ', to, what);
+    list.appendChild(li);
+  }
   for (const e of edits) {
     const li = document.createElement('li');
     const num = document.createElement('b');
@@ -1263,8 +1813,12 @@ async function askWordOptions(edits) {
 
 async function saveToWord() {
   const edits = pendingTitleEdits();
-  if (!edits.length || state.registerKind !== 'docx') return;
-  const options = await askWordOptions(edits);
+  const additions = pendingNewEntries();
+  const numbers = pendingNumberEdits();
+  const moves = pendingMoves();
+  if ((!edits.length && !additions.length && !numbers.length && !moves.length) || state.registerKind !== 'docx') return;
+  const options = await askWordOptions(edits, additions, numbers, state.movedTokens.size);
+  const wantOrder = Object.keys(state.titles);
   if (!options) return;
 
   const docx = state.registerPath;
@@ -1282,18 +1836,31 @@ async function saveToWord() {
     } catch (e) {
       // keep the default author
     }
-    const result = RegisterCore.editDocxTitles(xml, Object.fromEntries(edits.map(e => [e.token, e.to])), { tracked: options.tracked, author });
+    const revOpts = { tracked: options.tracked, author, date: new Date().toISOString().replace(/\.\d+Z$/, 'Z') };
+    // Titles, then numbers (both found by the register's current numbers), then new rows, so a
+    // new entry can take a number another drawing has just given up
+    const result = RegisterCore.editDocxTitles(xml, Object.fromEntries(edits.map(e => [e.token, e.to])), revOpts);
+    const renumber = RegisterCore.editDocxNumbers(result.xml, Object.fromEntries(numbers.map(e => [e.token, e.to])), revOpts);
+    const newNumber = t => (renumber.applied[t] ? renumber.applied[t].to : t);
+    const move = RegisterCore.moveDocxRows(renumber.xml, moves.map(m => ({ token: newNumber(m.token), after: m.after && newNumber(m.after) })), revOpts);
+    const insert = RegisterCore.insertDocxRows(move.xml, additions.map(e => ({ ...e, after: e.after && newNumber(e.after) })), revOpts);
 
-    // Check the edited document reads back as intended before touching the file
-    const check = RegisterCore.readDocxTitles(result.xml);
-    const wrong = Object.keys(result.applied).filter(t => check[t] !== result.applied[t].to);
-    if (wrong.length) throw new Error(`the edited document didn't read back correctly for ${wrong.join(', ')}; nothing was saved.`);
-    const original = RegisterCore.readDocxTitles(xml);
-    const changed = Object.keys(original).filter(t => !(t in result.applied) && check[t] !== original[t]);
-    if (changed.length) throw new Error(`other titles would have changed (${changed.join(', ')}); nothing was saved.`);
+    // Check the edited document reads back exactly as intended before touching the file
+    const expected = {};
+    for (const [token, title] of Object.entries(RegisterCore.readDocxTitles(xml))) {
+      expected[newNumber(token)] = result.applied[token] ? result.applied[token].to : title;
+    }
+    for (const e of additions) if (insert.inserted.includes(e.token)) expected[e.token] = e.title.replace(/\s+/g, ' ').trim();
+    const check = RegisterCore.readDocxTitles(insert.xml);
+    const wrong = [...new Set([...Object.keys(expected), ...Object.keys(check)])].filter(t => check[t] !== expected[t]);
+    if (wrong.length) throw new Error(`the edited document didn't read back as expected for ${wrong.join(', ')}; nothing was saved.`);
+    // ...and in the order shown in the table
+    const want = wantOrder.filter(t => t in check);
+    const got = Object.keys(check).filter(t => want.includes(t));
+    if (want.join('|') !== got.join('|')) throw new Error('the rows came out in a different order from the table; nothing was saved.');
 
     await backupToSS(docx);
-    zip.file('word/document.xml', result.xml);
+    zip.file('word/document.xml', insert.xml);
     const data = await zip.generateAsync({ type: 'arraybuffer', compression: 'DEFLATE', compressionOptions: { level: 6 } });
     await Neutralino.filesystem.writeBinaryFile(docx, data);
 
@@ -1301,10 +1868,35 @@ async function saveToWord() {
     for (const [token, { from, to }] of Object.entries(result.applied)) {
       appendLog(`📝 ${token}: "${from}" → "${to}" (${how})`);
     }
-    for (const token of result.notFound) appendLog(`⚠️ ${token} wasn't found in a table row of ${baseName(docx)}; its edit was kept.`);
+    for (const e of additions.filter(a => insert.inserted.includes(a.token))) {
+      appendLog(`➕ ${e.token}: added "${e.title}" ${describePlace(e.after)} (${how})`);
+    }
+    for (const token of insert.skipped) appendLog(`⚠️ ${token} is already in ${baseName(docx)}, so it wasn't added again.`);
+    for (const [token, { to }] of Object.entries(renumber.applied)) appendLog(`# ${token} renumbered to ${to} (${how})`);
+    if (move.moved.length) appendLog(`↕️ Moved ${[...new Set(move.moved)].join(', ')} in the register (${how})`);
+    for (const token of [...result.notFound, ...renumber.notFound]) appendLog(`⚠️ ${token} wasn't found in a table row of ${baseName(docx)}; its edit was kept.`);
     for (const token of Object.keys(result.applied)) delete state.layout.titleEdits[token];
+    // Earlier renumberings follow this one (PA-001 -> PA-002 before, PA-002 -> PA-003 now:
+    // PA-001 -> PA-003); within this save, old numbers all refer to the register before it
+    const history = state.layout.numberHistory;
+    for (const old of Object.keys(history)) {
+      if (renumber.applied[history[old]]) history[old] = renumber.applied[history[old]].to;
+    }
+    for (const [token, { to }] of Object.entries(renumber.applied)) {
+      delete state.layout.numberEdits[token];
+      history[token] = to;
+    }
+    // Saved moves are done; any later ones (made after this save started) stay
+    state.layout.moves = state.layout.moves.filter(m => !moves.includes(m));
+    state.layout.newEntries = state.layout.newEntries.filter(e => !insert.inserted.includes(e.token) && !insert.skipped.includes(e.token));
     await saveLayout();
-    appendLog(`✅ Saved ${Object.keys(result.applied).length} title change(s) to ${baseName(docx)}.`);
+    const saved = [
+      `${Object.keys(result.applied).length} title change(s)`,
+      `${Object.keys(renumber.applied).length} new number(s)`,
+      `${new Set(move.moved).size} move(s)`,
+      `${insert.inserted.length} new entr${insert.inserted.length === 1 ? 'y' : 'ies'}`
+    ];
+    appendLog(`✅ Saved ${saved.join(', ')} to ${baseName(docx)}.`);
 
     if (options.exportPdf) {
       const pdf = registerPdfPath();
@@ -1319,6 +1911,159 @@ async function saveToWord() {
     state.busy = false;
     await refresh();
   }
+}
+
+// --------------------
+// 7️⃣ New register entries
+// --------------------
+const entryDialog = document.getElementById('entry-dialog');
+const entryFields = {
+  token: document.getElementById('entry-number'),
+  title: document.getElementById('entry-title'),
+  scale: document.getElementById('entry-scale'),
+  size: document.getElementById('entry-size'),
+  after: document.getElementById('entry-after'),
+  copyMarks: document.getElementById('entry-marks')
+};
+
+// Natural order of drawing numbers (PA-2 < PA-10)
+function compareNumbers(a, b) {
+  return a.localeCompare(b, undefined, { numeric: true });
+}
+
+// Everything before a drawing number's last run of digits ("PA-A-" for PA-A-107, "PA-" for PA-002-D)
+function numberSeries(token) {
+  return token.replace(/\d+[^\d]*$/, '');
+}
+
+// Where a new drawing number would sit: after the highest drawing in the same series that sorts
+// before it, else just before that series, else after the last drawing
+function suggestAfter(token) {
+  const tokens = Object.keys(state.tokenMap);
+  const series = tokens.filter(t => numberSeries(t) === numberSeries(token));
+  const lower = series.filter(t => compareNumbers(t, token) < 0);
+  if (lower.length) return lower.reduce((a, b) => (compareNumbers(a, b) >= 0 ? a : b));
+  if (series.length) {
+    const i = tokens.indexOf(series[0]);
+    return i > 0 ? tokens[i - 1] : series[0];
+  }
+  return tokens[tokens.length - 1] || null;
+}
+
+// Drawing number and title from a file name like "12345-PA-A-107_Plant Deck.pdf"
+function guessFromFileName(fileName) {
+  const stem = fileName.replace(/\.[^.]+$/, '');
+  const m = new RegExp(RegisterCore.DRAWING_NUMBER).exec(stem.toUpperCase());
+  if (!m) return { token: '', title: '' };
+  const rest = stem.slice(m.index + m[0].length).replace(/_/g, ' ').replace(/^[\s\-–]+/, '').replace(/\s+/g, ' ').trim();
+  return { token: m[0], title: rest };
+}
+
+function updateEntryPreview() {
+  const after = entryFields.after.value;
+  const details = state.registerXml && after ? RegisterCore.readDocxDetails(state.registerXml)[after] : null;
+  entryFields.scale.placeholder = details && details.scale ? `e.g. ${details.scale}` : 'e.g. 1:100';
+  const marks = state.registerXml && after ? RegisterCore.readRowMarks(state.registerXml, after).filter(Boolean) : [];
+  const label = document.getElementById('entry-marks-label');
+  label.textContent = after
+    ? `Copy the issue marks from ${after} (${marks.length ? marks.join(' ') : 'none'})`
+    : 'Copy the issue marks from the row above';
+}
+
+// Resolves once the dialog closes; adds the entry if confirmed
+function openEntryDialog(fromFile) {
+  if (state.registerKind !== 'docx' || state.busy) return;
+  const guess = fromFile ? guessFromFileName(fromFile) : { token: '', title: '' };
+  entryFields.token.value = guess.token;
+  entryFields.title.value = guess.title;
+  entryFields.scale.value = '';
+  entryFields.size.value = '';
+  entryFields.copyMarks.checked = false;
+
+  const afterSelect = entryFields.after;
+  afterSelect.textContent = '';
+  for (const token of Object.keys(state.tokenMap)) {
+    const opt = document.createElement('option');
+    opt.value = token;
+    opt.textContent = `${token} — ${state.tokenMap[token]}`;
+    afterSelect.appendChild(opt);
+  }
+  let afterTouched = false;
+  const suggest = () => {
+    if (afterTouched) return;
+    const token = entryFields.token.value.trim().toUpperCase();
+    const suggestion = token ? suggestAfter(token) : null;
+    if (suggestion) afterSelect.value = suggestion;
+    updateEntryPreview();
+  };
+  suggest();
+  document.getElementById('entry-dialog-title').textContent = fromFile ? `Add ${fromFile} to the register` : 'New register entry';
+  document.getElementById('entry-error').textContent = '';
+  entryDialog.showModal();
+  (guess.token ? entryFields.title : entryFields.token).focus();
+
+  return new Promise(resolve => {
+    const form = entryDialog.querySelector('form');
+    const onNumber = () => suggest();
+    const onAfter = () => {
+      afterTouched = true;
+      updateEntryPreview();
+    };
+    const finish = () => {
+      form.removeEventListener('submit', onSubmit);
+      entryDialog.removeEventListener('cancel', onCancel);
+      entryFields.token.removeEventListener('input', onNumber);
+      afterSelect.removeEventListener('change', onAfter);
+      entryDialog.close();
+      resolve();
+    };
+    const onSubmit = async (e) => {
+      e.preventDefault();
+      if (e.submitter && e.submitter.value === 'cancel') return finish();
+      const token = entryFields.token.value.trim().toUpperCase();
+      const title = entryFields.title.value.replace(/\s+/g, ' ').trim();
+      const error = document.getElementById('entry-error');
+      if (!new RegExp('^' + RegisterCore.DRAWING_NUMBER + '$').test(token)) {
+        error.textContent = 'Enter a drawing number like PA-A-107 or PA-002-D.';
+        return entryFields.token.focus();
+      }
+      if (token in state.titles) {
+        error.textContent = `${token} is already in the register.`;
+        return entryFields.token.focus();
+      }
+      if (!title) {
+        error.textContent = 'Enter a title.';
+        return entryFields.title.focus();
+      }
+      const entry = {
+        token, title,
+        scale: entryFields.scale.value.trim(),
+        size: entryFields.size.value,
+        after: afterSelect.value || null,
+        copyMarks: entryFields.copyMarks.checked
+      };
+      state.layout.newEntries.push(entry);
+      await saveLayout();
+      appendLog(`➕ ${token} "${title}" will be added ${describePlace(entry.after)} when you press SAVE TO WORD.`);
+      finish();
+      await refresh();
+    };
+    const onCancel = (e) => {
+      e.preventDefault();
+      finish();
+    };
+    form.addEventListener('submit', onSubmit);
+    entryDialog.addEventListener('cancel', onCancel);
+    entryFields.token.addEventListener('input', onNumber);
+    afterSelect.addEventListener('change', onAfter);
+  });
+}
+
+async function removeNewEntry(token) {
+  state.layout.newEntries = state.layout.newEntries.filter(e => e.token !== token);
+  await saveLayout();
+  appendLog(`➖ Removed new entry ${token}.`);
+  await refresh();
 }
 
 // --------------------
@@ -1375,6 +2120,7 @@ rowsEl.addEventListener('mousedown', (e) => {
 
 folderBtn.addEventListener('click', makeFolder);
 wordBtn.addEventListener('click', saveToWord);
+entryBtn.addEventListener('click', () => openEntryDialog(null));
 renameBtn.addEventListener('click', renameSelected);
 
 document.getElementById('clear-log').addEventListener('click', () => {
