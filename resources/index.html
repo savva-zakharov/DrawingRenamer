@@ -7,18 +7,46 @@
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-    <h2>Drawing Renamer</h2>
-    <label>Register path (file or directory):</label>
-  <input id="register" class="wide" placeholder="Path to register PDF or the folder containing it" />
-    <button id="choose">Choose folder...</button>
-    <button id="choose-file">Choose PDF...</button>
-    <label><input type="checkbox" id="dry" /> Dry run (don't rename files)</label>
-    <div class="mt">
-      <button id="start">Start</button>
-    </div>
+    <header>
+      <h2>Drawing Renamer</h2>
+      <div class="row">
+        <input id="register" class="wide" placeholder="Path to register PDF or the folder containing it" />
+        <button id="choose">Choose folder...</button>
+        <button id="choose-file">Choose PDF...</button>
+        <button id="load">Load</button>
+      </div>
+      <div class="row toolbar">
+        <span id="summary" class="muted">No register loaded.</span>
+        <label class="inline"><input type="checkbox" id="hide-empty" /> Hide missing drawings</label>
+        <span id="watching" class="muted"></span>
+        <button id="rename" class="primary" disabled>RENAME</button>
+      </div>
+    </header>
 
-    <h3>Log</h3>
-    <div id="log"></div>
+    <main id="table-wrap">
+      <table id="drawings">
+        <thead>
+          <tr>
+            <th class="col-check"><input type="checkbox" id="check-all" checked title="Select all" /></th>
+            <th class="col-number">Drawing No.</th>
+            <th>Register title</th>
+            <th>Current file</th>
+            <th>New name</th>
+            <th class="col-status">Status</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+      <div id="empty" class="muted">Choose a register PDF or the folder containing it.</div>
+    </main>
+
+    <footer>
+      <div class="log-header">
+        <h3>Log</h3>
+        <button id="clear-log">Clear</button>
+      </div>
+      <div id="log"></div>
+    </footer>
 
     <script src="js/pdfjs/pdf.js"></script>
     <script src="js/neutralino.js"></script>
