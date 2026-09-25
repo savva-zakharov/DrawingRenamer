@@ -20,7 +20,10 @@ const LAYOUT_FILE = 'drawing-renamer.json';
 // File paths inside targetDir are "relative paths" using '/', e.g. "Plans/PA-100 - Plan.pdf"
 const state = {
   registerPath: null,    // full path of the loaded register (.docx or .pdf)
-  registerKind: null,    // 'docx' or 'pdf'
+  registerKind: null,    // 'docx', 'xlsx' (Excel, incl. .xlsm) or 'pdf'
+  registerInfo: '',      // e.g. which Excel sheet the drawings came from
+  xlsxPlaces: {},        // Excel register: code => where its cells are (to check renumbering)
+  excelAvailable: null,  // whether Excel can be driven to export PDFs (checked on first use)
   registerModified: null,
   targetDir: null,       // directory containing the register (the parent of any drawing folders)
   tokenMap: {},          // drawing number => title, as in the register
@@ -98,17 +101,22 @@ function registerKindOf(name) {
   const lower = name.toLowerCase();
   if (lower.startsWith('~$')) return null; // Word's lock file for an open document
   if (lower.endsWith('.docx')) return 'docx';
+  if (lower.endsWith('.xlsx') || lower.endsWith('.xlsm')) return 'xlsx';
   if (lower.endsWith('.pdf')) return 'pdf';
   return null;
 }
 
-// Files named "...register..." in dir; a Word register beats a PDF one, and the last by name
-// (registers are usually date-prefixed, so that's the latest) beats earlier ones
+const REGISTER_KIND_NAMES = { docx: 'Word', xlsx: 'Excel', pdf: 'PDF' };
+
+// Files named "...register..." in dir; Word beats Excel beats PDF (the PDF is usually exported
+// from one of the others), and the last by name (registers are usually date-prefixed, so that's
+// the latest) beats earlier ones
 async function findRegister(dir) {
   const candidates = (await listFiles(dir))
     .filter(f => f.toLowerCase().includes('register') && registerKindOf(f))
     .sort((a, b) => a.localeCompare(b));
-  const found = candidates.filter(f => registerKindOf(f) === 'docx').pop() || candidates.pop();
+  const of = kind => candidates.filter(f => registerKindOf(f) === kind).pop();
+  const found = of('docx') || of('xlsx') || of('pdf');
   return found ? joinPath(dir, found) : null;
 }
 
@@ -116,15 +124,35 @@ async function resolveRegisterPath(input) {
   const stats = await getStatsOrNull(input);
   if (!stats) throw new Error('Provided register path does not exist.');
   if (stats.isFile) {
-    if (!registerKindOf(baseName(input))) throw new Error('Provided file is not a Word (.docx) or PDF register.');
+    if (!registerKindOf(baseName(input))) throw new Error('Provided file is not a Word (.docx), Excel (.xlsx, .xlsm) or PDF register.');
     return input;
   }
   if (stats.isDirectory) {
     const found = await findRegister(input);
-    if (!found) throw new Error('No register (.docx or .pdf with "register" in its name) found in that directory.');
+    if (!found) throw new Error('No register (.docx, .xlsx, .xlsm or .pdf with "register" in its name) found in that directory.');
     return found;
   }
   throw new Error('Unsupported path type.');
+}
+
+// Titles and numbers can be edited in Word and Excel registers; new entries and moving rows
+// need Word
+function canEditRegister() {
+  return state.registerKind === 'docx' || state.registerKind === 'xlsx';
+}
+
+function registerAppName() {
+  return state.registerKind === 'xlsx' ? 'Excel' : 'Word';
+}
+
+function saveButtonLabel() {
+  return `SAVE TO ${registerAppName().toUpperCase()}`;
+}
+
+// Drawing numbers as found in text (PA-A-100), or any hyphenated code with a letter and a digit
+// (ISO 19650 codes like PAWE-DA-BF-XX-DR-A-6011A)
+function isValidNumber(number) {
+  return new RegExp('^' + RegisterCore.DRAWING_NUMBER + '$').test(number) || RegisterCore.isLooseCode(number);
 }
 
 // The PDF next to a Word register with the same name (usually exported from it)
@@ -169,11 +197,20 @@ async function readDocumentXml(docxPath) {
 }
 
 async function parseRegister(filePath) {
+  state.registerInfo = '';
   if (registerKindOf(baseName(filePath)) === 'docx') {
     state.registerXml = (await readDocumentXml(filePath)).xml;
     return RegisterCore.readDocxTitles(state.registerXml);
   }
   state.registerXml = null;
+  if (registerKindOf(baseName(filePath)) === 'xlsx') {
+    const zip = await JSZip.loadAsync(await Neutralino.filesystem.readBinaryFile(filePath));
+    const found = RegisterCore.readXlsxRegister(await RegisterCore.loadXlsxParts(zip));
+    if (found.sheet) state.registerInfo = `sheet "${found.sheet}"` + (found.issue !== null ? `, issue ${found.issue}` : '');
+    state.xlsxSheet = found.sheet;
+    state.xlsxPlaces = found.places;
+    return found.titles;
+  }
   const buffer = await Neutralino.filesystem.readBinaryFile(filePath);
   return RegisterCore.parsePdfText(await extractPdfText(buffer));
 }
@@ -246,7 +283,7 @@ async function loadLayout() {
     for (const [token, title] of Object.entries(data.titleEdits || {})) {
       if (typeof title === 'string' && title.trim()) titleEdits[token] = title;
     }
-    const numberRe = new RegExp('^' + RegisterCore.DRAWING_NUMBER + '$');
+    const numberRe = { test: isValidNumber };
     const newEntries = (Array.isArray(data.newEntries) ? data.newEntries : [])
       .filter(e => e && typeof e.token === 'string' && numberRe.test(e.token) && typeof e.title === 'string' && e.title.trim())
       .map(e => ({
@@ -389,6 +426,7 @@ function matchFiles(tokenMap, files, registerRels) {
     if (shown !== orig) aliases[orig] = shown;
   }
   const matchOld = RegisterCore.makeMatcher(Object.keys(aliases));
+  const matchReordered = RegisterCore.makeReorderedMatcher(Object.keys(tokenMap));
   const matchToken = name => {
     const current = matchCurrent(name);
     const old = matchOld(name);
@@ -405,12 +443,18 @@ function matchFiles(tokenMap, files, registerRels) {
 
   const byToken = {};
   const unmatched = [];
+  const reordered = new Set(); // files whose code has the right fields in a different order
   for (const file of pdfs) {
-    const token = matchToken(file.name);
-    if (!token) unmatched.push(file);
-    else (byToken[token] = byToken[token] || []).push(file);
+    let token = matchToken(file.name);
+    if (!token) {
+      token = matchReordered(file.name);
+      if (token) reordered.add(file.rel);
+    }
+    if (token) (byToken[token] = byToken[token] || []).push(file);
+    // A register's own PDF (e.g. exported from the Excel register) isn't a drawing
+    else if (!/register/i.test(file.name)) unmatched.push(file);
   }
-  return { byToken, unmatched };
+  return { byToken, unmatched, reordered };
 }
 
 // When several files match one drawing, the user picks which to use.
@@ -458,6 +502,10 @@ function computeRows(tokenMap, match, files, addedTimes, choices) {
         key: f.rel, token, origToken, title, edited, renumbered, moved, isNew, registerTitle, folder, file: f.name, dir: f.dir, rel: f.rel, newName, targetRel,
         group, chosen: f === chosen, first: i === 0, last: i === ordered.length - 1
       };
+      if (match.reordered && match.reordered.has(f.rel)) {
+        row.reordered = true;
+        row.reason = `The code in this file name has the same parts as ${token} in a different order`;
+      }
       if (f === chosen) {
         if (f.rel === targetRel) {
           row.status = 'ok';
@@ -497,7 +545,8 @@ function isSelectable(row) {
 
 function isSelected(row) {
   if (!isSelectable(row)) return false;
-  return ACTION_STATUSES.includes(row.status) ? !state.unchecked.has(row.key) : state.picked.has(row.key);
+  // Rows needing a rename start ticked, except files matched by a reordered code
+  return ACTION_STATUSES.includes(row.status) && !row.reordered ? !state.unchecked.has(row.key) : state.picked.has(row.key);
 }
 
 function setSelected(key, on) {
@@ -532,13 +581,15 @@ function updateButtons() {
   folderBtn.disabled = state.busy || selected === 0;
 
   const isDocx = state.registerKind === 'docx';
-  wordBtn.hidden = !isDocx;
+  const editable = canEditRegister();
+  wordBtn.hidden = !editable;
   entryBtn.hidden = !isDocx;
   entryBtn.disabled = state.busy;
   const changes = isDocx
     ? pendingTitleEdits().length + pendingNumberEdits().length + pendingNewEntries().length + state.movedTokens.size
-    : 0;
-  wordBtn.textContent = changes ? `SAVE TO WORD (${changes})` : 'SAVE TO WORD';
+    : editable ? pendingTitleEdits().length + pendingNumberEdits().length : 0;
+  wordBtn.textContent = changes ? `${saveButtonLabel()} (${changes})` : saveButtonLabel();
+  wordBtn.title = `Write edited titles and numbers into the ${registerAppName()} register`;
   wordBtn.disabled = state.busy || changes === 0;
 
   const selectable = visibleRows().filter(isSelectable);
@@ -980,6 +1031,13 @@ function renderRow(row, newFiles, alt, depth) {
   const tip = row.reason || STATUS_TIPS[row.status];
   if (tip) badge.title = tip;
   statusTd.appendChild(badge);
+  if (row.reordered) {
+    const warn = document.createElement('div');
+    warn.className = 'reordered';
+    warn.textContent = '⚠ code reordered';
+    warn.title = `${row.reason}; tick it to rename the file with the register's code`;
+    statusTd.appendChild(warn);
+  }
 
   rowsEl.appendChild(tr);
 }
@@ -1023,12 +1081,12 @@ function renderTitle(td, row) {
     });
     td.append(' ', badge);
   }
-  if (state.registerKind === 'docx') {
+  if (canEditRegister()) {
     td.classList.add('editable');
     td.title = row.edited ? `Register: ${row.registerTitle}\nDouble-click to edit` : 'Double-click to edit the title';
     td.addEventListener('dblclick', () => startTitleEdit(td, row));
-  } else if (state.registerKind === 'pdf') {
-    td.title = 'Load the Word (.docx) register to edit titles';
+  } else if (state.registerKind) {
+    td.title = 'Titles can only be edited in a Word or Excel register';
   }
 }
 
@@ -1076,7 +1134,7 @@ function renderNumber(td, row) {
     });
     td.append(document.createElement('br'), badge);
   }
-  if (state.registerKind === 'docx') {
+  if (canEditRegister()) {
     td.classList.add('editable');
     td.title = row.renumbered ? `Register: ${row.origToken}\nDouble-click to change the number` : 'Double-click to change the drawing number';
     td.addEventListener('dblclick', () => startNumberEdit(td, row));
@@ -1114,8 +1172,14 @@ function startNumberEdit(td, row) {
 async function setNumberEdit(shown, number) {
   const token = state.origOf[shown];
   const entry = token === undefined && state.layout.newEntries.find(e => e.token === shown);
-  if (!new RegExp('^' + RegisterCore.DRAWING_NUMBER + '$').test(number)) {
-    appendLog(`❌ "${number}" isn't a drawing number like PA-002 or PA-A-100; ${shown} wasn't changed.`);
+  if (!isValidNumber(number)) {
+    appendLog(`❌ "${number}" isn't a drawing number like PA-002 or PAWE-DA-BF-00-DR-A-1010; ${shown} wasn't changed.`);
+    return renderAfterEdit();
+  }
+  // An Excel code split one field per cell needs the same number of fields
+  const place = state.registerKind === 'xlsx' && token !== undefined && state.xlsxPlaces[token];
+  if (place && place.codeCols.length > 1 && number.split('-').length !== place.codeCols.length) {
+    appendLog(`❌ ${shown} is split over ${place.codeCols.length} cells in the register, so a new number needs ${place.codeCols.length} parts; ${number} has ${number.split('-').length}.`);
     return renderAfterEdit();
   }
   if (number in state.titles) {
@@ -1130,7 +1194,7 @@ async function setNumberEdit(shown, number) {
     appendLog(`✏️ ${shown}: back to the register number ${token}.`);
   } else {
     state.layout.numberEdits[token] = number;
-    appendLog(`✏️ ${token} renumbered to ${number} (press SAVE TO WORD to write it to the register; RENAME updates the file names).`);
+    appendLog(`✏️ ${token} renumbered to ${number} (press ${saveButtonLabel()} to write it to the register; RENAME updates the file names).`);
   }
   // The drawing's folder and file choice move with it
   if (state.layout.assignments[shown]) {
@@ -1163,7 +1227,7 @@ async function setTitleEdit(shown, title) {
     appendLog(`✏️ ${shown}: back to the register title "${state.tokenMap[token]}".`);
   } else {
     state.layout.titleEdits[token] = title;
-    appendLog(`✏️ ${token}: title changed to "${title}" (press SAVE TO WORD to write it to the register).`);
+    appendLog(`✏️ ${token}: title changed to "${title}" (press ${saveButtonLabel()} to write it to the register).`);
   }
   await saveLayout();
   renderAfterEdit();
@@ -1368,7 +1432,7 @@ async function refresh() {
       if (state.registerModified !== null) appendLog('📚 Register changed, re-reading it...');
       state.tokenMap = await parseRegister(state.registerPath);
       state.registerModified = registerStamp(regStats);
-      appendLog(`📘 Loaded ${Object.keys(state.tokenMap).length} drawing entries from register.`);
+      appendLog(`📘 Loaded ${Object.keys(state.tokenMap).length} drawing entries from register${state.registerInfo ? ` (${state.registerInfo})` : ''}.`);
       // Edits and new entries the register now contains are done with
       const done = Object.keys(state.layout.titleEdits).filter(t => state.tokenMap[t] === state.layout.titleEdits[t]);
       const added = state.layout.newEntries.filter(e => e.token in state.tokenMap && !state.layout.numberEdits[e.token]);
@@ -1498,8 +1562,8 @@ async function load() {
     state.picked.clear();
     state.choices.clear();
     await loadLayout();
-    appendLog(`📚 Reading ${state.registerKind === 'docx' ? 'Word' : 'PDF'} register: ${registerPath} ...`);
-    if (state.registerKind === 'pdf' && await findWordTwin()) {
+    appendLog(`📚 Reading ${REGISTER_KIND_NAMES[state.registerKind]} register: ${registerPath} ...`);
+    if (state.registerKind !== 'docx' && await findWordTwin()) {
       appendLog(`ℹ️ A Word version of this register is next to it; load it (or the folder) to edit titles.`);
     }
     summaryEl.textContent = 'Reading register...';
@@ -1735,7 +1799,12 @@ const wordDialog = document.getElementById('word-dialog');
 
 // Resolves to { tracked, exportPdf } or null if cancelled
 async function askWordOptions(edits, additions, numbers, movedCount) {
-  const wordOk = await checkWordAvailable();
+  const excel = state.registerKind === 'xlsx';
+  const wordOk = excel ? await checkExcelAvailable() : await checkWordAvailable();
+  const pdfTarget = excel ? await excelPdfPath() : registerPdfPath();
+  // Excel has no tracked changes
+  document.getElementById('word-tracked').closest('label').hidden = excel;
+  document.getElementById('word-export-label').textContent = `Also update the register PDF using ${registerAppName()}`;
   const total = edits.length + additions.length + numbers.length + movedCount;
   document.getElementById('word-dialog-title').textContent =
     `Save ${total === 1 ? '1 change' : total + ' changes'} to ${baseName(state.registerPath)}`;
@@ -1785,8 +1854,11 @@ async function askWordOptions(edits, additions, numbers, movedCount) {
   exportBox.disabled = !wordOk;
   exportBox.checked = wordOk;
   document.getElementById('word-export-note').textContent = wordOk
-    ? `Overwrites ${baseName(registerPdfPath())} (a dated copy of the old one goes to ${SUPERSEDED_DIR}\\).`
-    : 'Microsoft Word isn\'t available, so export the PDF from Word yourself.';
+    ? ((await getStatsOrNull(pdfTarget)) ? `Overwrites ${baseName(pdfTarget)} (a dated copy of the old one goes to ${SUPERSEDED_DIR}\\).` : `Creates ${baseName(pdfTarget)}.`)
+      + (excel && state.xlsxSheet ? ` Only sheet "${state.xlsxSheet}" is exported.` : '')
+    : `Microsoft ${registerAppName()} isn't available, so export the PDF from ${registerAppName()} yourself.`;
+  document.getElementById('word-backup-note').textContent =
+    `A dated copy of the ${registerAppName()} file is saved in SS first. Close the register in ${registerAppName()} before saving.`;
   wordDialog.showModal();
 
   return new Promise(resolve => {
@@ -1800,7 +1872,7 @@ async function askWordOptions(edits, additions, numbers, movedCount) {
     const onSubmit = (e) => {
       e.preventDefault();
       if (e.submitter && e.submitter.value === 'cancel') return finish(null);
-      finish({ tracked: document.getElementById('word-tracked').checked, exportPdf: exportBox.checked && !exportBox.disabled });
+      finish({ tracked: !excel && document.getElementById('word-tracked').checked, exportPdf: exportBox.checked && !exportBox.disabled, pdf: pdfTarget });
     };
     const onCancel = (e) => {
       e.preventDefault();
@@ -1811,7 +1883,22 @@ async function askWordOptions(edits, additions, numbers, movedCount) {
   });
 }
 
+// Remember saved renumberings so files with the old numbers keep matching. Earlier ones follow
+// this one (PA-001 -> PA-002 before, PA-002 -> PA-003 now: PA-001 -> PA-003); within one save,
+// old numbers all refer to the register before it.
+function recordRenumbers(applied) {
+  const history = state.layout.numberHistory;
+  for (const old of Object.keys(history)) {
+    if (applied[history[old]]) history[old] = applied[history[old]].to;
+  }
+  for (const [token, { to }] of Object.entries(applied)) {
+    delete state.layout.numberEdits[token];
+    history[token] = to;
+  }
+}
+
 async function saveToWord() {
+  if (state.registerKind === 'xlsx') return saveToExcel();
   const edits = pendingTitleEdits();
   const additions = pendingNewEntries();
   const numbers = pendingNumberEdits();
@@ -1876,16 +1963,7 @@ async function saveToWord() {
     if (move.moved.length) appendLog(`↕️ Moved ${[...new Set(move.moved)].join(', ')} in the register (${how})`);
     for (const token of [...result.notFound, ...renumber.notFound]) appendLog(`⚠️ ${token} wasn't found in a table row of ${baseName(docx)}; its edit was kept.`);
     for (const token of Object.keys(result.applied)) delete state.layout.titleEdits[token];
-    // Earlier renumberings follow this one (PA-001 -> PA-002 before, PA-002 -> PA-003 now:
-    // PA-001 -> PA-003); within this save, old numbers all refer to the register before it
-    const history = state.layout.numberHistory;
-    for (const old of Object.keys(history)) {
-      if (renumber.applied[history[old]]) history[old] = renumber.applied[history[old]].to;
-    }
-    for (const [token, { to }] of Object.entries(renumber.applied)) {
-      delete state.layout.numberEdits[token];
-      history[token] = to;
-    }
+    recordRenumbers(renumber.applied);
     // Saved moves are done; any later ones (made after this save started) stay
     state.layout.moves = state.layout.moves.filter(m => !moves.includes(m));
     state.layout.newEntries = state.layout.newEntries.filter(e => !insert.inserted.includes(e.token) && !insert.skipped.includes(e.token));
@@ -1899,7 +1977,7 @@ async function saveToWord() {
     appendLog(`✅ Saved ${saved.join(', ')} to ${baseName(docx)}.`);
 
     if (options.exportPdf) {
-      const pdf = registerPdfPath();
+      const pdf = options.pdf;
       appendLog(`🖨️ Exporting ${baseName(pdf)} with Word...`);
       if (await getStatsOrNull(pdf)) await backupToSS(pdf);
       await exportPdfWithWord(docx, pdf);
@@ -1907,6 +1985,130 @@ async function saveToWord() {
     }
   } catch (err) {
     appendLog('❌ Could not save to Word: ' + (err.message || err));
+  } finally {
+    state.busy = false;
+    await refresh();
+  }
+}
+
+// --------------------
+// Saving titles and numbers into an Excel register
+// --------------------
+
+// The register PDF to update for an Excel register: one with the same name, else the latest
+// "...register..." PDF next to it (Excel exports are often named differently), else a new one
+async function excelPdfPath() {
+  const same = registerPdfPath();
+  if (await getStatsOrNull(same)) return same;
+  const pdfs = (await listFiles(state.targetDir))
+    .filter(f => /register/i.test(f) && f.toLowerCase().endsWith('.pdf'))
+    .sort((a, b) => a.localeCompare(b));
+  return pdfs.length ? joinPath(state.targetDir, pdfs[pdfs.length - 1]) : same;
+}
+
+async function checkExcelAvailable() {
+  if (state.excelAvailable !== null) return state.excelAvailable;
+  state.excelAvailable = false;
+  if (typeof NL_OS !== 'undefined' && NL_OS !== 'Windows') return false;
+  try {
+    const res = await runPowerShell(`if (Test-Path 'Registry::HKEY_CLASSES_ROOT\\Excel.Application') { 'yes' } else { 'no' }`);
+    state.excelAvailable = (res.stdOut || '').trim() === 'yes';
+  } catch (e) {
+    // PowerShell not available
+  }
+  return state.excelAvailable;
+}
+
+// Have Excel export one sheet of the workbook to PDF (its print area and page setup), with
+// macros switched off. Uses a hidden Excel of its own; if Excel is already open, it borrows it
+// without hiding or closing it and puts its settings back afterwards.
+async function exportPdfWithExcel(xlsxPath, sheetName, pdfPath) {
+  const script = `
+$ErrorActionPreference = 'Stop'
+try { $excel = New-Object -ComObject Excel.Application } catch { 'ERROR: Excel could not be started'; exit 2 }
+$own = ($excel.Workbooks.Count -eq 0)
+$alerts = $excel.DisplayAlerts
+$security = $excel.AutomationSecurity
+if ($own) { $excel.Visible = $false }
+$excel.DisplayAlerts = $false
+$excel.AutomationSecurity = 3
+$wb = $null
+try {
+  $wb = $excel.Workbooks.Open(${psString(xlsxPath)}, 0, $true)
+  $wb.Worksheets.Item(${psString(sheetName)}).ExportAsFixedFormat(0, ${psString(pdfPath)})
+  'OK'
+} catch {
+  'ERROR: ' + $_.Exception.Message
+  exit 1
+} finally {
+  if ($wb) { $wb.Close($false) }
+  $excel.AutomationSecurity = $security
+  $excel.DisplayAlerts = $alerts
+  if ($own) { $excel.Quit() }
+  [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($excel)
+}`;
+  const res = await runPowerShell(script);
+  const out = (res.stdOut || '').trim();
+  if (res.exitCode !== 0 || !out.endsWith('OK')) throw new Error(out.replace(/^ERROR:\s*/, '') || (res.stdErr || '').trim() || `PowerShell exited with ${res.exitCode}`);
+}
+
+async function saveToExcel() {
+  const edits = pendingTitleEdits();
+  const numbers = pendingNumberEdits();
+  if (!edits.length && !numbers.length) return;
+  const options = await askWordOptions(edits, [], numbers, 0);
+  if (!options) return;
+
+  const xlsx = state.registerPath;
+  state.busy = true;
+  updateButtons();
+  try {
+    if (await isOpenInWord(xlsx)) {
+      throw new Error(`${baseName(xlsx)} is open in Excel. Close it there first, then save again.`);
+    }
+    const zip = await JSZip.loadAsync(await Neutralino.filesystem.readBinaryFile(xlsx));
+    const parts = await RegisterCore.loadXlsxParts(zip);
+    const before = RegisterCore.readXlsxRegister(parts);
+    const result = RegisterCore.editXlsxRegister(parts, {
+      titles: Object.fromEntries(edits.map(e => [e.token, e.to])),
+      numbers: Object.fromEntries(numbers.map(e => [e.token, e.to]))
+    });
+    if (result.errors.length) throw new Error(result.errors.join('; ') + '; nothing was saved.');
+
+    // Check the edited sheet reads back exactly as intended before touching the file
+    const after = RegisterCore.readXlsxRegister({ ...parts, sheets: { ...parts.sheets, [result.path]: result.xml } });
+    const newNumber = t => (result.applied.numbers[t] ? result.applied.numbers[t].to : t);
+    const expected = {};
+    for (const [code, title] of Object.entries(before.titles)) {
+      expected[newNumber(code)] = result.applied.titles[code] ? result.applied.titles[code].to : title;
+    }
+    const wrong = [...new Set([...Object.keys(expected), ...Object.keys(after.titles)])].filter(t => after.titles[t] !== expected[t]);
+    if (wrong.length || after.sheet !== before.sheet) {
+      throw new Error(`the edited sheet didn't read back as expected${wrong.length ? ' for ' + wrong.join(', ') : ''}; nothing was saved.`);
+    }
+
+    await backupToSS(xlsx);
+    zip.file(result.path, result.xml);
+    const data = await zip.generateAsync({ type: 'arraybuffer', compression: 'DEFLATE', compressionOptions: { level: 6 } });
+    await Neutralino.filesystem.writeBinaryFile(xlsx, data);
+
+    for (const [code, { from, to }] of Object.entries(result.applied.titles)) appendLog(`📝 ${code}: "${from}" → "${to}"`);
+    for (const [code, { to }] of Object.entries(result.applied.numbers)) appendLog(`# ${code} renumbered to ${to}`);
+    for (const code of result.notFound) appendLog(`⚠️ ${code} wasn't found on sheet "${result.sheet}"; its edit was kept.`);
+    for (const code of Object.keys(result.applied.titles)) delete state.layout.titleEdits[code];
+    recordRenumbers(result.applied.numbers);
+    await saveLayout();
+    appendLog(`✅ Saved ${Object.keys(result.applied.titles).length} title change(s) and ${Object.keys(result.applied.numbers).length} new number(s) to sheet "${result.sheet}" of ${baseName(xlsx)}.`);
+
+    if (options.exportPdf) {
+      const pdf = options.pdf;
+      appendLog(`🖨️ Exporting ${baseName(pdf)} (sheet "${result.sheet}") with Excel...`);
+      if (await getStatsOrNull(pdf)) await backupToSS(pdf);
+      await exportPdfWithExcel(xlsx, result.sheet, pdf);
+      appendLog(`✅ Exported ${baseName(pdf)}.`);
+    }
+  } catch (err) {
+    appendLog('❌ Could not save to Excel: ' + (err.message || err));
   } finally {
     state.busy = false;
     await refresh();
@@ -2085,8 +2287,9 @@ document.getElementById('choose-file').addEventListener('click', async () => {
   try {
     const files = await Neutralino.os.showOpenDialog('Select drawing register', {
       filters: [
-        { name: 'Drawing registers', extensions: ['docx', 'pdf'] },
+        { name: 'Drawing registers', extensions: ['docx', 'xlsx', 'xlsm', 'pdf'] },
         { name: 'Word documents', extensions: ['docx'] },
+        { name: 'Excel workbooks', extensions: ['xlsx', 'xlsm'] },
         { name: 'PDF files', extensions: ['pdf'] }
       ]
     });

@@ -21,7 +21,7 @@
         <span id="watching" class="muted"></span>
         <span class="actions">
           <button id="new-entry" hidden title="Add a drawing to the Word register">+ NEW ENTRY</button>
-          <button id="save-word" hidden title="Write edited titles into the Word register">SAVE TO WORD</button>
+          <button id="save-word" hidden>SAVE TO WORD</button>
           <button id="make-folder" disabled title="Put the selected drawings in a folder">MAKE FOLDER</button>
           <button id="rename" class="primary" disabled>RENAME</button>
         </span>
@@ -105,9 +105,9 @@
         <h3 id="word-dialog-title">Save title changes to Word</h3>
         <ul id="word-changes"></ul>
         <label class="option"><input type="checkbox" id="word-tracked" checked /> Record as tracked changes, so they can be reviewed in Word</label>
-        <label class="option"><input type="checkbox" id="word-export" checked /> Also update the register PDF using Word</label>
+        <label class="option"><input type="checkbox" id="word-export" checked /> <span id="word-export-label">Also update the register PDF using Word</span></label>
         <p id="word-export-note" class="muted indent"></p>
-        <p class="muted">A dated copy of the Word file is saved in SS first. Close the register in Word before saving.</p>
+        <p id="word-backup-note" class="muted">A dated copy of the Word file is saved in SS first. Close the register in Word before saving.</p>
         <div class="dialog-buttons">
           <button type="submit" value="ok" class="primary">Save</button>
           <button type="submit" value="cancel">Cancel</button>

@@ -19,20 +19,29 @@ function getArgValue(names) {
 const registerArg = getArgValue(['--register', '-r']);
 
 // --------------------
-// 1️⃣ Find register (Word preferred over PDF)
+// 1️⃣ Find register (Word preferred over Excel over PDF)
 // --------------------
-function isRegisterFile(name) {
+function registerKind(name) {
     const lower = name.toLowerCase();
-    return !lower.startsWith("~$") && (lower.endsWith(".docx") || lower.endsWith(".pdf"));
+    if (lower.startsWith("~$")) return null; // Word/Excel lock file
+    if (lower.endsWith(".docx")) return "docx";
+    if (lower.endsWith(".xlsx") || lower.endsWith(".xlsm")) return "xlsx";
+    if (lower.endsWith(".pdf")) return "pdf";
+    return null;
 }
 
-// Files named "...register..." in dir; a Word register beats a PDF one, and the last by name
+function isRegisterFile(name) {
+    return registerKind(name) !== null;
+}
+
+// Files named "...register..." in dir; Word beats Excel beats PDF, and the last by name
 // (registers are usually date-prefixed, so that's the latest) beats earlier ones
 function findRegister(dir = ".") {
     const candidates = fs.readdirSync(dir)
         .filter(f => f.toLowerCase().includes("register") && isRegisterFile(f))
         .sort();
-    const found = candidates.filter(f => f.toLowerCase().endsWith(".docx")).pop() || candidates.pop();
+    const of = kind => candidates.filter(f => registerKind(f) === kind).pop();
+    const found = of("docx") || of("xlsx") || of("pdf");
     return found ? path.resolve(dir, found) : null;
 }
 
@@ -51,9 +60,15 @@ function ask(question) {
 // --------------------
 async function parseRegister(filePath) {
     const buffer = fs.readFileSync(filePath);
-    if (filePath.toLowerCase().endsWith(".docx")) {
+    const kind = registerKind(path.basename(filePath));
+    if (kind === "docx") {
         const zip = await JSZip.loadAsync(buffer);
         return core.readDocxTitles(await zip.file("word/document.xml").async("string"));
+    }
+    if (kind === "xlsx") {
+        const found = core.readXlsxRegister(await core.loadXlsxParts(await JSZip.loadAsync(buffer)));
+        if (found.sheet) console.log(`📄 Using sheet "${found.sheet}"${found.issue !== null ? ` (issue ${found.issue})` : ""}.`);
+        return found.titles;
     }
     const data = await pdfParse(buffer);
     return core.parsePdfText(data.text);
@@ -76,7 +91,7 @@ function resolveRegister(input) {
     const stat = fs.statSync(resolved);
     if (stat.isFile()) {
         if (!isRegisterFile(path.basename(resolved))) {
-            console.error('❌ Provided file is not a Word (.docx) or PDF register.');
+            console.error('❌ Provided file is not a Word (.docx), Excel (.xlsx, .xlsm) or PDF register.');
             return null;
         }
         return resolved;
@@ -105,7 +120,7 @@ async function renameFiles() {
     // If still not found, prompt interactively
     if (!register) {
         console.error("❌ No register found in current folder.");
-        const input = (await ask("Enter path to register (.docx or .pdf, file or directory) or press Enter to cancel: ")).trim();
+        const input = (await ask("Enter path to register (.docx, .xlsx, .xlsm or .pdf, file or directory) or press Enter to cancel: ")).trim();
         if (!input) {
             console.log("Aborted by user.");
             return;
@@ -135,13 +150,17 @@ async function renameFiles() {
     // Use the directory containing the register as the target directory
     const targetDir = path.dirname(register);
     const matchToken = core.makeMatcher(Object.keys(tokenMap));
+    const matchReordered = core.makeReorderedMatcher(Object.keys(tokenMap));
     const files = fs.readdirSync(targetDir);
     for (let file of files) {
         if (!file.toLowerCase().endsWith(".pdf") || file === registerBasename || file === registerPdf) continue;
 
         const match = matchToken(file);
         if (!match) {
-            console.warn(`❔ No title found for file: ${file}`);
+            // Not renamed without asking: use the app to check and tick these
+            const reordered = matchReordered(file);
+            if (reordered) console.warn(`⚠️ ${file} looks like ${reordered} with its code fields in a different order; not renamed.`);
+            else if (!/register/i.test(file)) console.warn(`❔ No title found for file: ${file}`);
             continue;
         }
 

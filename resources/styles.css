@@ -165,3 +165,6 @@ button.edit-badge.moved{ border-color:#c9b6ef; background:#f1eafc; color:#6a3fb5
 button.edit-badge.moved:hover{ background:#e4d8fa }
 tr.drop-into td{ background:#e3f0ff !important; box-shadow:inset 0 0 0 1px var(--accent) }
 tr.section .drag-handle{ color:#8c9bb0 }
+
+/* Files matched by an ISO code with its fields in a different order */
+.reordered{ margin-top:3px; font-size:11px; color:var(--warn); white-space:nowrap; cursor:help }
