@@ -38,6 +38,7 @@
         </span>
         <span id="summary" class="muted">No register loaded.</span>
         <label class="inline"><input type="checkbox" id="hide-empty" /> Hide missing drawings</label>
+        <label class="inline" title="Read the title printed in each drawing's title block"><input type="checkbox" id="show-file-titles" /> Show in-file titles</label>
         <span id="watching" class="muted"></span>
         <span class="actions">
           <button id="rename" class="primary" disabled>RENAME</button>
@@ -46,13 +47,14 @@
     </header>
 
     <main id="table-wrap">
-      <table id="drawings">
+      <table id="drawings" class="hide-file-titles">
         <thead>
           <tr>
             <th class="col-drag"></th>
             <th class="col-check"><input type="checkbox" id="check-all" checked title="Select all" /></th>
             <th class="col-number">Drawing No.</th>
             <th>Register title</th>
+            <th class="col-file-title">In-File Title</th>
             <th>Current file</th>
             <th>New name</th>
             <th class="col-status">Status</th>

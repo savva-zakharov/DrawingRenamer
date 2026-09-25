@@ -33,6 +33,39 @@
   }
 
   // --------------------
+  // Drawing title blocks
+  // --------------------
+
+  // The title printed in a drawing's title block, from the text items on its sheet
+  // ({ str, x, y, h } in PDF units, y upwards). The title sits to the right of a "Title." label,
+  // from the label's top down to the next label under it (e.g. "Client."), possibly over
+  // several lines, which are joined with spaces. '' when there's no title block.
+  const TITLE_LABEL_RE = /^\s*(?:drawing\s+|dwg\.?\s+)?title\s*[.:]?\s*$/i;
+  function readTitleBlock(items) {
+    const text = items.filter(i => i.str.trim());
+    let best = '';
+    for (const label of text.filter(i => TITLE_LABEL_RE.test(i.str))) {
+      const sameColumn = i => Math.abs(i.x - label.x) < 2;
+      const below = text.filter(i => i !== label && sameColumn(i) && i.y < label.y - 1);
+      const floor = below.length ? Math.max(...below.map(i => i.y)) : label.y - label.h * 8;
+      const top = label.y + label.h;
+      const parts = text.filter(i => i.x > label.x + 1 && !sameColumn(i) && i.y < top && i.y > floor);
+      // Group into lines by baseline, top to bottom
+      const lines = [];
+      for (const p of parts) {
+        const line = lines.find(l => Math.abs(l.y - p.y) < p.h * 0.4);
+        if (line) line.parts.push(p);
+        else lines.push({ y: p.y, parts: [p] });
+      }
+      const title = lines.sort((a, b) => b.y - a.y)
+        .map(l => l.parts.sort((a, b) => a.x - b.x).map(p => p.str).join(''))
+        .join(' ').replace(/\s+/g, ' ').trim();
+      if (title.length > best.length) best = title;
+    }
+    return best;
+  }
+
+  // --------------------
   // Excel registers (.xlsx / .xlsm)
   // --------------------
 
@@ -915,6 +948,7 @@
   return {
     DRAWING_NUMBER,
     parsePdfText,
+    readTitleBlock,
     isLooseCode,
     readXlsxRegister,
     editXlsxRegister,

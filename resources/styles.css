@@ -151,6 +151,11 @@ tbody tr.alt{ background:var(--row-alt) }
 .col-status{ width:100px }
 td.number{ font-family:Consolas, monospace; white-space:nowrap }
 
+/* Title read from each drawing's title block, shown with "Show in-file titles" */
+table.hide-file-titles .col-file-title{ display:none }
+td.file-title.differs{ color:var(--warn) }
+td.file-title.pending, td.file-title.none{ color:var(--muted); font-style:italic }
+
 /* Tinted rows keep the same light/dark alternation as the plain rows */
 tbody tr.named{ background:var(--named-bg) }
 tbody tr.named.alt{ background:var(--named-alt) }
