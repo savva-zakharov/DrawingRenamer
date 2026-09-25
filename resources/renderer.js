@@ -14,6 +14,7 @@ const checkAllCheckbox = document.getElementById('check-all');
 PDFJS.workerSrc = 'js/pdfjs/pdf.worker.js';
 
 const SUPERSEDED_DIR = 'SS';
+const DEFAULT_SEPARATOR = ' - ';
 // Saved next to the register: which folder each drawing belongs in, for later runs
 const LAYOUT_FILE = 'drawing-renamer.json';
 
@@ -33,7 +34,9 @@ const state = {
   // numberHistory: old number => new number for renumberings already saved to Word, so files
   // still named with an old number keep matching their drawing
   // moves: [{ token, after }] row moves in the register, applied in order ('' = to the top)
-  layout: { folders: [], assignments: {}, titleEdits: {}, numberEdits: {}, numberHistory: {}, newEntries: [], moves: [] },
+  // foldersToRemove: folders from "Reset folders", dropped once their files have moved out
+  // separator: what goes between the drawing number and the title in file names
+  layout: { folders: [], assignments: {}, titleEdits: {}, numberEdits: {}, numberHistory: {}, newEntries: [], moves: [], foldersToRemove: [], separator: DEFAULT_SEPARATOR },
   drag: null,            // what's being dragged: { kind: 'drawing', token } or { kind: 'folder', folder }
   origOf: {},            // drawing number shown => number in the register (for renumbered drawings)
   movedTokens: new Set(), // register numbers of drawings with a pending move
@@ -267,7 +270,7 @@ function layoutPath() {
 }
 
 async function loadLayout() {
-  state.layout = { folders: [], assignments: {}, titleEdits: {}, numberEdits: {}, numberHistory: {}, newEntries: [], moves: [] };
+  state.layout = { folders: [], assignments: {}, titleEdits: {}, numberEdits: {}, numberHistory: {}, newEntries: [], moves: [], foldersToRemove: [], separator: DEFAULT_SEPARATOR };
   state.layoutBroken = false;
   if (!(await getStatsOrNull(layoutPath()))) return;
   try {
@@ -301,7 +304,9 @@ async function loadLayout() {
     const moves = (Array.isArray(data.moves) ? data.moves : [])
       .filter(m => m && numberRe.test(m.token) && (m.after === '' || numberRe.test(m.after)))
       .map(m => ({ token: m.token, after: m.after }));
-    state.layout = { folders: withAncestors(folders), assignments, titleEdits, numberEdits, numberHistory, newEntries, moves };
+    const foldersToRemove = (Array.isArray(data.foldersToRemove) ? data.foldersToRemove : []).filter(f => typeof f === 'string' && folders.includes(f));
+    const separator = typeof data.separator === 'string' && !separatorProblem(data.separator) ? data.separator : DEFAULT_SEPARATOR;
+    state.layout = { folders: withAncestors(folders), assignments, titleEdits, numberEdits, numberHistory, newEntries, moves, foldersToRemove, separator };
     appendLog(`📁 Loaded folder layout from ${LAYOUT_FILE} (${folders.length} folders).`);
   } catch (err) {
     state.layoutBroken = true;
@@ -325,6 +330,7 @@ async function saveLayout() {
   const data = {
     version: 1,
     register: baseName(state.registerPath),
+    separator: state.layout.separator,
     folders: state.layout.folders,
     assignments,
     // Changes made in the app that haven't been saved into the Word register yet
@@ -332,6 +338,7 @@ async function saveLayout() {
     numberEdits: state.layout.numberEdits,
     numberHistory: state.layout.numberHistory,
     moves: state.layout.moves,
+    foldersToRemove: state.layout.foldersToRemove,
     newEntries: state.layout.newEntries
   };
   try {
@@ -409,7 +416,14 @@ function validateFolderName(input) {
 // 4️⃣ Match files to register entries (exact token match, first register entry wins)
 // --------------------
 function newNameFor(token, tokenMap) {
-  return `${token} - ${sanitizeFilename(tokenMap[token])}.pdf`;
+  return `${token}${state.layout.separator}${sanitizeFilename(tokenMap[token])}.pdf`;
+}
+
+// Why a separator can't be used, or null if it's fine
+function separatorProblem(sep) {
+  if (!sep) return 'The separator can\'t be empty.';
+  if (/[\\/:*?"<>|\x00-\x1f]/.test(sep)) return 'File names can\'t contain \\ / : * ? " < > |';
+  return null;
 }
 
 // registerRels: the register and its PDF, which aren't drawings
@@ -577,7 +591,7 @@ function updateButtons() {
   renameBtn.disabled = state.busy || n === 0;
 
   const selected = selectedRows().length;
-  folderBtn.textContent = selected ? `MAKE FOLDER (${selected})` : 'MAKE FOLDER';
+  folderBtn.textContent = selected ? `FOLDER (${selected})` : '+ FOLDER';
   folderBtn.disabled = state.busy || selected === 0;
 
   const isDocx = state.registerKind === 'docx';
@@ -1472,6 +1486,10 @@ async function refresh() {
         state.addedTimes[f.rel] = addedTime(await getStatsOrNull(absPath(f.rel)));
       }
     }
+    if (await pruneResetFolders()) {
+      await saveLayout();
+      state.files = state.files.filter(f => !f.dir || state.layout.folders.includes(f.dir));
+    }
     rebuild(newFiles);
     await syncWatchers();
   } catch (err) {
@@ -2266,6 +2284,284 @@ async function removeNewEntry(token) {
   await saveLayout();
   appendLog(`➖ Removed new entry ${token}.`);
   await refresh();
+}
+
+// --------------------
+// More-actions menu
+// --------------------
+const menuBtn = document.getElementById('menu-btn');
+const menuEl = document.getElementById('menu');
+
+function menuItem(action) {
+  return menuEl.querySelector(`[data-action="${action}"]`);
+}
+
+function openMenu() {
+  const loaded = !!state.registerPath && !state.busy;
+  const reset = menuItem('reset-folders');
+  reset.disabled = !loaded || !state.layout.folders.length;
+  reset.title = state.layout.folders.length ? 'Take every drawing out of its folder' : 'There are no folders';
+  const sort = menuItem('sort');
+  sort.disabled = !loaded || !canReorder();
+  sort.title = canReorder() ? 'Put the register in drawing number order' : 'Sorting reorders the register, which needs a Word register';
+  const pending = unsavedRegisterChanges();
+  const discard = menuItem('discard');
+  discard.disabled = !loaded || !pending.total;
+  discard.title = pending.total ? `Forget ${pending.summary}` : 'There are no unsaved register changes';
+  const open = menuItem('open-folder');
+  open.disabled = !state.targetDir;
+  open.title = state.targetDir ? displayPath(state.targetDir) : 'Load a register first';
+  separatorInput.value = state.layout.separator;
+  separatorInput.disabled = !loaded;
+  showSeparatorPreview(state.layout.separator);
+  menuEl.hidden = false;
+  menuBtn.setAttribute('aria-expanded', 'true');
+}
+
+function closeMenu() {
+  menuEl.hidden = true;
+  menuBtn.setAttribute('aria-expanded', 'false');
+}
+
+menuBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  if (menuEl.hidden) openMenu();
+  else closeMenu();
+});
+document.addEventListener('click', (e) => {
+  if (!menuEl.hidden && !menuEl.contains(e.target)) closeMenu();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !menuEl.hidden) closeMenu();
+});
+menuEl.addEventListener('click', (e) => {
+  const item = e.target.closest('button[data-action]');
+  if (!item || item.disabled) return;
+  closeMenu();
+  if (item.dataset.action === 'reset-folders') resetFolders();
+  if (item.dataset.action === 'sort') sortByNumber();
+  if (item.dataset.action === 'discard') discardRegisterChanges();
+  if (item.dataset.action === 'open-folder') openFolderInExplorer();
+});
+
+// ---------- number-title separator ----------
+const separatorInput = document.getElementById('separator-input');
+const separatorPreview = document.getElementById('separator-preview');
+
+function showSeparatorPreview(sep) {
+  const problem = separatorProblem(sep);
+  separatorPreview.classList.toggle('error', !!problem);
+  if (problem) {
+    separatorPreview.textContent = problem;
+    return;
+  }
+  const token = Object.keys(state.titles)[0] || 'PA-001';
+  const title = state.titles[token] || 'Masterplan';
+  separatorPreview.textContent = `${token}${sep}${sanitizeFilename(title)}.pdf`;
+}
+
+async function setSeparator(sep) {
+  if (separatorProblem(sep) || sep === state.layout.separator) return;
+  state.layout.separator = sep;
+  appendLog(`✏️ File names now use "${sep}" between the drawing number and title; files named the old way show as Rename.`);
+  await saveLayout();
+  rebuild();
+}
+
+separatorInput.addEventListener('input', () => showSeparatorPreview(separatorInput.value));
+separatorInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    setSeparator(separatorInput.value);
+    closeMenu();
+  }
+});
+separatorInput.addEventListener('change', () => setSeparator(separatorInput.value));
+
+// ---------- discard unsaved register changes ----------
+function unsavedRegisterChanges() {
+  const counts = {
+    titles: pendingTitleEdits().length,
+    numbers: pendingNumberEdits().length,
+    entries: pendingNewEntries().length,
+    moves: state.movedTokens.size
+  };
+  const parts = [];
+  if (counts.titles) parts.push(`${counts.titles} title change(s)`);
+  if (counts.numbers) parts.push(`${counts.numbers} new number(s)`);
+  if (counts.entries) parts.push(`${counts.entries} new entr${counts.entries === 1 ? 'y' : 'ies'}`);
+  if (counts.moves) parts.push(`${counts.moves} moved drawing(s)`);
+  return { ...counts, total: counts.titles + counts.numbers + counts.entries + counts.moves, summary: parts.join(', ') };
+}
+
+// Forget title and number edits, new entries and moves that haven't been saved to the register.
+// Folder assignments that followed a renumbering go back to the register's number.
+async function discardRegisterChanges() {
+  const pending = unsavedRegisterChanges();
+  if (!pending.total) return;
+  let answer = 'YES';
+  try {
+    answer = await Neutralino.os.showMessageBox('Discard unsaved register changes',
+      `Forget ${pending.summary}? The register itself isn't changed.`, 'YES_NO', 'WARNING');
+  } catch (e) {
+    answer = window.confirm(`Forget ${pending.summary}?`) ? 'YES' : 'NO';
+  }
+  if (answer !== 'YES') return;
+
+  const assignments = state.layout.assignments;
+  for (const [token, number] of Object.entries(state.layout.numberEdits)) {
+    if (assignments[number] !== undefined) {
+      assignments[token] = assignments[number];
+      delete assignments[number];
+    }
+    if (state.choices.has(number)) {
+      state.choices.set(token, state.choices.get(number));
+      state.choices.delete(number);
+    }
+  }
+  for (const e of state.layout.newEntries) {
+    if (!(e.token in state.tokenMap)) delete assignments[e.token];
+  }
+  state.layout.titleEdits = {};
+  state.layout.numberEdits = {};
+  state.layout.newEntries = [];
+  state.layout.moves = [];
+  appendLog(`↩️ Discarded ${pending.summary}.`);
+  await saveLayout();
+  rebuild();
+}
+
+// ---------- open folder ----------
+async function openFolderInExplorer() {
+  if (!state.targetDir) return;
+  const dir = state.targetDir.replace(/\//g, '\\');
+  try {
+    if (typeof NL_OS !== 'undefined' && NL_OS !== 'Windows') await Neutralino.os.open(state.targetDir);
+    else await Neutralino.os.execCommand(`explorer.exe "${dir}"`, { background: true });
+  } catch (err) {
+    appendLog(`❌ Could not open ${dir}: ${err.message || err}`);
+  }
+}
+
+// Take every drawing out of its folder. Their files move to the top folder on RENAME; each folder
+// is removed from the layout (and deleted from disk, if nothing else is in it) once it's empty.
+async function resetFolders() {
+  const folders = state.layout.folders.slice();
+  if (!folders.length) return;
+  const assigned = Object.keys(state.layout.assignments).length;
+  let answer = 'YES';
+  try {
+    answer = await Neutralino.os.showMessageBox('Reset folders',
+      `Take all ${assigned} drawing(s) out of the ${folders.length} folder(s)? Their files move back to the top folder when you press RENAME, and the empty folders are then removed.`,
+      'YES_NO', 'QUESTION');
+  } catch (e) {
+    answer = window.confirm('Take every drawing out of its folder?') ? 'YES' : 'NO';
+  }
+  if (answer !== 'YES') return;
+  state.layout.assignments = {};
+  state.layout.foldersToRemove = folders;
+  appendLog(`📁 Took ${assigned} drawing(s) out of their folders; files move to the top folder when you press RENAME.`);
+  await saveLayout();
+  await refresh();
+}
+
+// Remove reset folders that nothing is assigned to and no scanned file is in (deepest first).
+// Deletes the folder on disk only when it's completely empty. Returns whether any were removed.
+async function pruneResetFolders() {
+  const pending = state.layout.foldersToRemove || [];
+  if (!pending.length) return false;
+  let changed = false;
+  for (const folder of pending.slice().sort((a, b) => folderDepth(b) - folderDepth(a))) {
+    const inUse = Object.values(state.layout.assignments).some(f => isInside(f, folder)) ||
+      state.files.some(f => f.dir && isInside(f.dir, folder)) ||
+      state.layout.folders.some(f => f !== folder && isInside(f, folder));
+    if (inUse) continue;
+    state.layout.folders = state.layout.folders.filter(f => f !== folder);
+    state.layout.foldersToRemove = state.layout.foldersToRemove.filter(f => f !== folder);
+    changed = true;
+    try {
+      const stats = await getStatsOrNull(absPath(folder));
+      if (stats && stats.isDirectory) {
+        if (!(await Neutralino.filesystem.readDirectory(absPath(folder))).length) {
+          const id = state.watchers.get(folder);
+          if (id !== undefined) {
+            try {
+              await Neutralino.filesystem.removeWatcher(id);
+            } catch (e) {
+              // watcher already gone
+            }
+            state.watchers.delete(folder);
+          }
+          await Neutralino.filesystem.remove(absPath(folder));
+          appendLog(`📁 Removed empty folder ${displayPath(folder)}.`);
+        } else {
+          appendLog(`📁 ${displayPath(folder)} is no longer a drawing folder; it still holds other files (e.g. ${SUPERSEDED_DIR}), so it was left on disk.`);
+        }
+      } else {
+        appendLog(`📁 Removed folder ${displayPath(folder)} from the layout.`);
+      }
+    } catch (err) {
+      appendLog(`⚠️ Could not delete ${displayPath(folder)}: ${err.message || err}`);
+    }
+  }
+  return changed;
+}
+
+// Indexes of a longest increasing run (not necessarily adjacent) in values
+function longestIncreasing(values) {
+  const tails = []; // index of the smallest tail for each length
+  const prev = new Array(values.length).fill(-1);
+  values.forEach((v, i) => {
+    let lo = 0;
+    let hi = tails.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (values[tails[mid]] < v) lo = mid + 1;
+      else hi = mid;
+    }
+    if (lo > 0) prev[i] = tails[lo - 1];
+    tails[lo] = i;
+  });
+  const keep = new Set();
+  for (let i = tails.length ? tails[tails.length - 1] : -1; i >= 0; i = prev[i]) keep.add(i);
+  return keep;
+}
+
+// Put the register in drawing number order (natural: PA-2 before PA-10), by the numbers shown.
+// Only drawings that are out of order get a move, so SAVE TO WORD changes as few rows as possible.
+async function sortByNumber() {
+  if (!canReorder()) return;
+  const shown = t => state.layout.numberEdits[t] || t;
+  const current = registerOrder(); // register numbers, in the order the rows will be in
+  const sorted = current.slice().sort((a, b) => compareNumbers(shown(a), shown(b)));
+  const rank = new Map(sorted.map((t, i) => [t, i]));
+  const keep = longestIncreasing(current.map(t => rank.get(t)));
+  const stays = new Set([...keep].map(i => current[i]));
+  const moves = [];
+  sorted.forEach((token, i) => {
+    if (!stays.has(token)) moves.push({ token, after: i ? sorted[i - 1] : '' });
+  });
+
+  // New entries go after the register drawing that precedes them in number order
+  const entries = pendingNewEntries().slice().sort((a, b) => compareNumbers(a.token, b.token));
+  let entriesMoved = 0;
+  for (const e of entries) {
+    const before = sorted.filter(t => compareNumbers(shown(t), e.token) < 0).pop();
+    const after = before === undefined ? '' : before;
+    if (e.after !== after) entriesMoved++;
+    e.after = after;
+  }
+  const others = state.layout.newEntries.filter(e => !entries.includes(e));
+  state.layout.newEntries = [...others, ...entries];
+
+  if (!moves.length && !entriesMoved) {
+    appendLog('↕️ The register is already in drawing number order.');
+    return;
+  }
+  state.layout.moves.push(...moves);
+  if (!pendingMoves().length) state.layout.moves = [];
+  appendLog(`↕️ Sorted the register by drawing number: ${moves.length} drawing(s)${entriesMoved ? ` and ${entriesMoved} new entr${entriesMoved === 1 ? 'y' : 'ies'}` : ''} move (press SAVE TO WORD to reorder the register).`);
+  await saveLayout();
+  rebuild();
 }
 
 // --------------------

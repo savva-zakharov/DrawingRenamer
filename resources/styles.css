@@ -1,20 +1,109 @@
 /* Basic styling for the Drawing Renamer UI */
+
+/* Colours: light theme by default, dark when the system is set to dark mode */
 :root{
+  color-scheme: light dark; /* native controls, scrollbars and dialogs follow the theme */
   --bg: #ffffff;
   --fg: #222;
   --muted: #6b6b6b;
   --border: #dcdcdc;
+  --row-line: #eee;
   --row-alt: #f7f7f8;
+  --header-bg: #f0f1f3;
   --named-bg: #f5fbf6;
   --named-alt: #ebf6ee;
   --missing-bg: #fdf6f6;
   --missing-alt: #f9ecec;
+  --missing-fg: #999;
+  --dimmed: #888;
+  --flash: #fff3b0;
   --code-bg: #0f1113;
   --code-fg: #eaeaea;
   --accent: #2b8fff;
+  --accent-soft: #e3f0ff;
+  --primary-fg: #fff;
+  --primary-disabled: #a9cdf5;
   --ok: #1e8e3e;
+  --ok-soft: #e6f4ea;
   --warn: #b26a00;
+  --warn-soft: #fff4e0;
   --bad: #c62828;
+  --bad-soft: #fde7e7;
+  --purple: #6a3fb5;
+  --purple-soft: #efe7fb;
+  --neutral-soft: #f0f0f0;
+  --group-line: #c9d9ee;
+  --section-bg: #e8edf4;
+  --section-line: #cfd8e3;
+  --edit-fg: #7a4b00;
+  --edit-badge-bg: #fff4d6;
+  --edit-badge-border: #f0c36d;
+  --edit-badge-fg: #8a5a00;
+  --edit-badge-hover: #ffe6a6;
+  --new-badge-border: #9bd3a9;
+  --new-badge-hover: #cdebd5;
+  --moved-badge-bg: #f1eafc;
+  --moved-badge-border: #c9b6ef;
+  --moved-badge-hover: #e4d8fa;
+  --editable-outline: #b9c6d6;
+  --handle: #a0a0a0;
+  --handle-hover: #6b6b6b;
+  --section-handle: #8c9bb0;
+  --dialog-shadow: rgba(0,0,0,.2);
+  --backdrop: rgba(0,0,0,.25);
+}
+
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg: #1b1d21;
+    --fg: #e3e5e8;
+    --muted: #9aa0a8;
+    --border: #3a3f46;
+    --row-line: #2c3036;
+    --row-alt: #202328;
+    --header-bg: #25292f;
+    --named-bg: #1a2a1f;
+    --named-alt: #1e3024;
+    --missing-bg: #2a1d1f;
+    --missing-alt: #302124;
+    --missing-fg: #858b93;
+    --dimmed: #7d838b;
+    --flash: #5a4a12;
+    --code-bg: #111316;
+    --code-fg: #d7dade;
+    --accent: #4c9dff;
+    --accent-soft: #1c3350;
+    --primary-fg: #fff;
+    --primary-disabled: #2b4466;
+    --ok: #57c27a;
+    --ok-soft: #1c3a26;
+    --warn: #e0a040;
+    --warn-soft: #3a2c12;
+    --bad: #ff6b6b;
+    --bad-soft: #3d1f22;
+    --purple: #b39af0;
+    --purple-soft: #2e2544;
+    --neutral-soft: #2c3036;
+    --group-line: #2f4a6b;
+    --section-bg: #252b33;
+    --section-line: #353c45;
+    --edit-fg: #e6b565;
+    --edit-badge-bg: #3a2e14;
+    --edit-badge-border: #7a5c1f;
+    --edit-badge-fg: #f0c36d;
+    --edit-badge-hover: #4a3a18;
+    --new-badge-border: #2f6b40;
+    --new-badge-hover: #24472e;
+    --moved-badge-bg: #2e2544;
+    --moved-badge-border: #54447a;
+    --moved-badge-hover: #3a2f57;
+    --editable-outline: #4a5a70;
+    --handle: #6b7078;
+    --handle-hover: #aab0b8;
+    --section-handle: #7d8ca0;
+    --dialog-shadow: rgba(0,0,0,.6);
+    --backdrop: rgba(0,0,0,.5);
+  }
 }
 
 *{ box-sizing:border-box }
@@ -50,12 +139,12 @@ label.inline{ display:flex; align-items:center; gap:4px; color:var(--muted) }
 input.wide{ flex:1; min-width:240px; padding:6px 8px; font-size:14px }
 button{ padding:6px 10px; font-size:14px; cursor:pointer }
 button:disabled{ cursor:default }
-button.primary{ background:var(--accent); color:#fff; border:1px solid var(--accent); border-radius:3px; font-weight:600; padding:6px 18px }
-button.primary:disabled{ background:#a9cdf5; border-color:#a9cdf5 }
+button.primary{ background:var(--accent); color:var(--primary-fg); border:1px solid var(--accent); border-radius:3px; font-weight:600; padding:6px 18px }
+button.primary:disabled{ background:var(--primary-disabled); border-color:var(--primary-disabled) }
 
 table{ width:100%; border-collapse:collapse }
-thead th{ position:sticky; top:0; background:#f0f1f3; text-align:left; font-weight:600; padding:6px 8px; border-bottom:1px solid var(--border); z-index:1 }
-tbody td{ padding:5px 8px; border-bottom:1px solid #eee; vertical-align:top; word-break:break-word }
+thead th{ position:sticky; top:0; background:var(--header-bg); text-align:left; font-weight:600; padding:6px 8px; border-bottom:1px solid var(--border); z-index:1 }
+tbody td{ padding:5px 8px; border-bottom:1px solid var(--row-line); vertical-align:top; word-break:break-word }
 tbody tr.alt{ background:var(--row-alt) }
 .col-check{ width:32px }
 .col-number{ width:110px; white-space:nowrap }
@@ -67,45 +156,45 @@ tbody tr.named{ background:var(--named-bg) }
 tbody tr.named.alt{ background:var(--named-alt) }
 tbody tr.no-file{ background:var(--missing-bg) }
 tbody tr.no-file.alt{ background:var(--missing-alt) }
-tr.no-file td{ color:#999 }
+tr.no-file td{ color:var(--missing-fg) }
 td.missing{ font-style:italic }
 tr.new td.file{ animation:flash 1.5s ease-out }
-@keyframes flash{ from{ background:#fff3b0 } to{ background:transparent } }
+@keyframes flash{ from{ background:var(--flash) } to{ background:transparent } }
 
 .status{ display:inline-block; padding:1px 8px; border-radius:10px; font-size:12px; font-weight:600; white-space:nowrap }
-.status.rename{ background:#e3f0ff; color:var(--accent) }
-.status.ok{ background:#e6f4ea; color:var(--ok) }
-.status.none{ background:#fde7e7; color:var(--bad) }
-.status.unmatched{ background:#fff4e0; color:var(--warn) }
-.status.conflict{ background:#fde7e7; color:var(--bad) }
+.status.rename{ background:var(--accent-soft); color:var(--accent) }
+.status.ok{ background:var(--ok-soft); color:var(--ok) }
+.status.none{ background:var(--bad-soft); color:var(--bad) }
+.status.unmatched{ background:var(--warn-soft); color:var(--warn) }
+.status.conflict{ background:var(--bad-soft); color:var(--bad) }
 
 #empty{ padding:24px; text-align:center }
 
 .log-header{ display:flex; align-items:center; justify-content:space-between; margin-bottom:4px }
 .log-header button{ padding:2px 8px; font-size:12px }
-#log{ white-space:pre-wrap; background:var(--code-bg); color:var(--code-fg); padding:8px; height:140px; overflow:auto; border-radius:4px; font-family:Consolas, monospace; font-size:12px }
+#log{ white-space:pre-wrap; background:var(--code-bg); color:var(--code-fg); padding:8px; height:140px; overflow:auto; border-radius:4px; border:1px solid var(--border); font-family:Consolas, monospace; font-size:12px }
 
 /* Several files matching one drawing: bracket them and dim the ones not being used */
 tr.group td:first-child{ box-shadow:inset 3px 0 0 var(--accent) }
-tr.group-first td{ border-top:1px solid #c9d9ee }
-tr.group-last td{ border-bottom:1px solid #c9d9ee }
-tr.not-chosen td.file, tr.not-chosen td.file + td{ color:#888 }
+tr.group-first td{ border-top:1px solid var(--group-line) }
+tr.group-last td{ border-bottom:1px solid var(--group-line) }
+tr.not-chosen td.file, tr.not-chosen td.file + td{ color:var(--dimmed) }
 label.choice{ display:flex; align-items:flex-start; gap:6px; cursor:pointer; color:inherit; margin:0 }
 label.choice input{ margin-top:3px; flex:none }
-.status.supersede{ background:#e3f0ff; color:var(--accent) }
-.status.superseded{ background:#efe7fb; color:#6a3fb5 }
-.status.skip{ background:#f0f0f0; color:#888 }
+.status.supersede{ background:var(--accent-soft); color:var(--accent) }
+.status.superseded{ background:var(--purple-soft); color:var(--purple) }
+.status.skip{ background:var(--neutral-soft); color:var(--dimmed) }
 
 /* Folder sections */
-tbody tr.section td{ background:#e8edf4; border-top:1px solid #cfd8e3; border-bottom:1px solid #cfd8e3; padding:6px 8px }
+tbody tr.section td{ background:var(--section-bg); border-top:1px solid var(--section-line); border-bottom:1px solid var(--section-line); padding:6px 8px }
 .section-name{ font-weight:600 }
 .section-count{ margin-left:10px; font-size:12px }
 button.link{ margin-left:12px; padding:0; border:none; background:none; color:var(--accent); font-size:12px; text-decoration:underline }
-.status.move{ background:#e3f0ff; color:var(--accent) }
+.status.move{ background:var(--accent-soft); color:var(--accent) }
 
 /* Folder name dialog */
-dialog{ border:1px solid var(--border); border-radius:6px; padding:18px 20px; width:420px; box-shadow:0 8px 30px rgba(0,0,0,.2) }
-dialog::backdrop{ background:rgba(0,0,0,.25) }
+dialog{ background:var(--bg); color:var(--fg); border:1px solid var(--border); border-radius:6px; padding:18px 20px; width:420px; box-shadow:0 8px 30px var(--dialog-shadow) }
+dialog::backdrop{ background:var(--backdrop) }
 dialog h3{ margin:0 0 6px; font-size:16px }
 dialog p{ margin:0 0 12px; font-size:12px }
 dialog input:not([type=checkbox]){ width:100%; padding:6px 8px; font-size:14px }
@@ -116,10 +205,10 @@ dialog input:not([type=checkbox]){ width:100%; padding:6px 8px; font-size:14px }
 
 /* Editable titles (Word register) */
 td.editable{ cursor:text }
-td.editable:hover{ outline:1px dashed #b9c6d6; outline-offset:-3px }
-td.edited{ color:#7a4b00 }
-button.edit-badge{ margin:0 0 0 4px; padding:0 6px; border:1px solid #f0c36d; border-radius:9px; background:#fff4d6; color:#8a5a00; font-size:11px; cursor:pointer; white-space:nowrap }
-button.edit-badge:hover{ background:#ffe6a6 }
+td.editable:hover{ outline:1px dashed var(--editable-outline); outline-offset:-3px }
+td.edited{ color:var(--edit-fg) }
+button.edit-badge{ margin:0 0 0 4px; padding:0 6px; border:1px solid var(--edit-badge-border); border-radius:9px; background:var(--edit-badge-bg); color:var(--edit-badge-fg); font-size:11px; cursor:pointer; white-space:nowrap }
+button.edit-badge:hover{ background:var(--edit-badge-hover) }
 input.title-input{ width:100%; padding:3px 5px; font:inherit }
 #save-word{ font-weight:600 }
 
@@ -133,8 +222,8 @@ label.option{ display:flex; align-items:center; gap:6px; margin:6px 0 2px; color
 p.indent{ margin:0 0 8px 22px }
 
 /* New register entries */
-button.edit-badge.new{ border-color:#9bd3a9; background:#e6f4ea; color:var(--ok) }
-button.edit-badge.new:hover{ background:#cdebd5 }
+button.edit-badge.new{ border-color:var(--new-badge-border); background:var(--ok-soft); color:var(--ok) }
+button.edit-badge.new:hover{ background:var(--new-badge-hover) }
 #new-entry{ font-weight:600 }
 #entry-dialog{ width:560px }
 .entry-grid{ display:grid; grid-template-columns:100px 1fr; gap:8px 10px; align-items:center; margin:10px 0 6px }
@@ -147,24 +236,39 @@ button.edit-badge.new:hover{ background:#cdebd5 }
 #entry-error{ color:var(--bad); font-size:12px; min-height:18px; margin-top:4px }
 
 /* Renumbered drawings */
-td.number.edited{ color:#7a4b00 }
+td.number.edited{ color:var(--edit-fg) }
 button.edit-badge.number{ margin:2px 0 0; font-family:Segoe UI, Roboto, Arial, sans-serif }
 input.number-input{ font-family:Consolas, monospace }
 
 /* Reordering the register by dragging rows */
 .col-drag{ width:18px; padding-left:2px !important; padding-right:0 !important }
 td.drag{ padding:5px 0 5px 4px; width:18px }
-.drag-handle{ display:inline-block; cursor:grab; color:#a0a0a0; font-size:13px; line-height:1; letter-spacing:-1px; user-select:none; padding:2px 2px }
-tr:hover .drag-handle{ color:#6b6b6b }
+.drag-handle{ display:inline-block; cursor:grab; color:var(--handle); font-size:13px; line-height:1; letter-spacing:-1px; user-select:none; padding:2px 2px }
+tr:hover .drag-handle{ color:var(--handle-hover) }
 .drag-handle:active{ cursor:grabbing }
 tr.dragging{ opacity:.45 }
 tr.drop-above td{ box-shadow:inset 0 2px 0 var(--accent) }
 tr.drop-below td{ box-shadow:inset 0 -2px 0 var(--accent) }
-tr.moved .drag-handle{ color:#b26a00 }
-button.edit-badge.moved{ border-color:#c9b6ef; background:#f1eafc; color:#6a3fb5 }
-button.edit-badge.moved:hover{ background:#e4d8fa }
-tr.drop-into td{ background:#e3f0ff !important; box-shadow:inset 0 0 0 1px var(--accent) }
-tr.section .drag-handle{ color:#8c9bb0 }
+tr.moved .drag-handle{ color:var(--warn) }
+button.edit-badge.moved{ border-color:var(--moved-badge-border); background:var(--moved-badge-bg); color:var(--purple) }
+button.edit-badge.moved:hover{ background:var(--moved-badge-hover) }
+tr.drop-into td{ background:var(--accent-soft) !important; box-shadow:inset 0 0 0 1px var(--accent) }
+tr.section .drag-handle{ color:var(--section-handle) }
 
 /* Files matched by an ISO code with its fields in a different order */
 .reordered{ margin-top:3px; font-size:11px; color:var(--warn); white-space:nowrap; cursor:help }
+
+/* More-actions menu */
+.menu-wrap{ position:relative; display:inline-flex }
+#menu-btn{ padding:6px 10px; font-size:15px; line-height:1 }
+.menu{ position:absolute; top:calc(100% + 4px); left:0; z-index:20; min-width:270px; padding:4px 0; background:var(--bg); border:1px solid var(--border); border-radius:5px; box-shadow:0 6px 20px var(--dialog-shadow) }
+.menu[hidden]{ display:none }
+.menu button{ display:block; width:100%; margin:0; padding:7px 14px; border:none; background:none; color:var(--fg); text-align:left; font-size:13px; white-space:nowrap }
+.menu button:hover:not(:disabled){ background:var(--accent-soft) }
+.menu button:disabled{ color:var(--muted) }
+.menu .menu-note{ display:block; font-size:11px; color:var(--muted) }
+.menu-sep{ height:1px; margin:4px 0; background:var(--border) }
+.menu-field{ display:flex; align-items:center; justify-content:space-between; gap:10px; padding:7px 14px 2px; margin:0; font-size:13px; color:var(--fg) }
+.menu-field input{ width:64px; padding:3px 6px; font-family:Consolas, monospace; font-size:13px; white-space:pre }
+.menu .menu-note{ padding:2px 14px 7px; white-space:nowrap; font-family:Consolas, monospace }
+.menu .menu-note.error{ color:var(--bad); font-family:inherit }

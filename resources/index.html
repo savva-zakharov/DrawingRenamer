@@ -2,13 +2,12 @@
 <html>
   <head>
     <meta charset="utf-8" />
-    <title>Drawing Renamer</title>
+    <title>Drawing Registrar</title>
     <link rel="icon" href="data:," />
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
     <header>
-      <h2>Drawing Renamer</h2>
       <div class="row">
         <input id="register" class="wide" placeholder="Path to the drawing register (.docx or .pdf) or the folder containing it" />
         <button id="choose">Choose folder...</button>
@@ -16,13 +15,31 @@
         <button id="load">Load</button>
       </div>
       <div class="row toolbar">
+        <span class="actions">
+          <button id="new-entry" hidden title="Add a drawing to the Word register">+ NEW ENTRY</button>
+          <button id="save-word" hidden>SAVE TO WORD</button>
+          <button id="make-folder" disabled title="Put the selected drawings in a folder">+ FOLDER</button>
+          <span class="menu-wrap">
+            <button id="menu-btn" title="More actions" aria-haspopup="true" aria-expanded="false">☰</button>
+            <div id="menu" class="menu" role="menu" hidden>
+              <button role="menuitem" data-action="reset-folders">Reset folders</button>
+              <button role="menuitem" data-action="sort">Sort by drawing number</button>
+              <button role="menuitem" data-action="discard">Discard unsaved register changes</button>
+              <div class="menu-sep"></div>
+              <button role="menuitem" data-action="open-folder">Open folder in Explorer</button>
+              <div class="menu-sep"></div>
+              <label class="menu-field" for="separator-input">
+                Number–title separator
+                <input id="separator-input" autocomplete="off" spellcheck="false" />
+              </label>
+              <div id="separator-preview" class="menu-note"></div>
+            </div>
+          </span>
+        </span>
         <span id="summary" class="muted">No register loaded.</span>
         <label class="inline"><input type="checkbox" id="hide-empty" /> Hide missing drawings</label>
         <span id="watching" class="muted"></span>
         <span class="actions">
-          <button id="new-entry" hidden title="Add a drawing to the Word register">+ NEW ENTRY</button>
-          <button id="save-word" hidden>SAVE TO WORD</button>
-          <button id="make-folder" disabled title="Put the selected drawings in a folder">MAKE FOLDER</button>
           <button id="rename" class="primary" disabled>RENAME</button>
         </span>
       </div>

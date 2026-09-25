@@ -81,6 +81,20 @@ function sanitizeFilename(name) {
     return name.replace(/[\/\\:*?"<>|]/g, "-");
 }
 
+// What goes between the drawing number and title: the separator the app saved for this folder in
+// drawing-renamer.json, else " - "
+function separatorFor(dir) {
+    try {
+        const data = JSON.parse(fs.readFileSync(path.join(dir, "drawing-renamer.json"), "utf8"));
+        if (typeof data.separator === "string" && data.separator && !/[\\/:*?"<>|\x00-\x1f]/.test(data.separator)) {
+            return data.separator;
+        }
+    } catch (err) {
+        // no layout file, or it can't be read
+    }
+    return " - ";
+}
+
 // Path given on the command line or typed in -> register file, or null with an error printed
 function resolveRegister(input) {
     const resolved = path.resolve(input);
@@ -149,6 +163,7 @@ async function renameFiles() {
     const registerPdf = registerBasename.replace(/\.[^.]+$/, "") + ".pdf";
     // Use the directory containing the register as the target directory
     const targetDir = path.dirname(register);
+    const separator = separatorFor(targetDir);
     const matchToken = core.makeMatcher(Object.keys(tokenMap));
     const matchReordered = core.makeReorderedMatcher(Object.keys(tokenMap));
     const files = fs.readdirSync(targetDir);
@@ -166,7 +181,7 @@ async function renameFiles() {
 
         const title = tokenMap[match];
         const safeTitle = sanitizeFilename(title);
-        const newName = `${match} - ${safeTitle}.pdf`;
+        const newName = `${match}${separator}${safeTitle}.pdf`;
 
         if (file === newName) continue; // already correct
 
