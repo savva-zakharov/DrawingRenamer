@@ -1169,7 +1169,7 @@ function renderRow(row, newFiles, alt, depth) {
     add.className = 'link';
     add.textContent = 'Add to register…';
     add.title = 'Add a register entry for this file';
-    add.addEventListener('click', () => openEntryDialog(row.file));
+    add.addEventListener('click', () => openEntryDialog(row));
     targetTd.appendChild(add);
   }
 
@@ -3274,7 +3274,11 @@ function suggestAfter(token) {
 // Drawing number and title from a file name like "12345-PA-A-107_Plant Deck.pdf"
 function guessFromFileName(fileName) {
   const stem = fileName.replace(/\.[^.]+$/, '');
-  const m = new RegExp(RegisterCore.DRAWING_NUMBER).exec(stem.toUpperCase());
+  // Drawing numbers are in capitals, so "...-A-1900-Block F" stops before "Block"; names written
+  // all in lower case are tried in capitals
+  const numberRe = new RegExp(RegisterCore.DRAWING_NUMBER + '(?![A-Za-z0-9])');
+  const m = numberRe.exec(stem) || numberRe.exec(stem.toUpperCase()) ||
+    new RegExp(RegisterCore.DRAWING_NUMBER).exec(stem.toUpperCase());
   if (!m) return { token: '', title: '' };
   const rest = stem.slice(m.index + m[0].length).replace(/_/g, ' ').replace(/^[\s\-–]+/, '').replace(/\s+/g, ' ').trim();
   return { token: m[0], title: rest };
@@ -3292,14 +3296,42 @@ function updateEntryPreview() {
 }
 
 // Resolves once the dialog closes; adds the entry if confirmed
-function openEntryDialog(fromFile) {
+// Fills the new entry dialog's empty title, scale and size from the file's title block (read
+// now if it hasn't been yet), unless the dialog has moved on to another file
+async function fillEntryFromTitleBlock(rel) {
+  const filePath = absPath(rel);
+  const apply = details => {
+    if (!details || !entryDialog.open || entryDialog.dataset.rel !== rel) return;
+    if (!entryFields.title.value.trim() && details.title) entryFields.title.value = details.title;
+    if (!entryFields.scale.value.trim() && details.scale) entryFields.scale.value = details.scale;
+    if (!entryFields.size.value && [...entryFields.size.options].some(o => o.value === details.size)) entryFields.size.value = details.size;
+    updateEntryPreview();
+  };
+  const cached = state.fileDetails.get(filePath);
+  if (cached) return apply(cached.details);
+  if (!/\.pdf$/i.test(rel)) return;
+  try {
+    const stats = await getStatsOrNull(filePath);
+    const details = await readFileDetails(filePath);
+    if (stats) state.fileDetails.set(filePath, { stamp: `${stats.size}:${stats.modifiedAt}`, details });
+    apply(details);
+  } catch (e) {
+    // the fields stay empty to fill in by hand
+  }
+}
+
+// fromRow: the table row of a file not in the register (its number and title are guessed from the
+// file name, the scale and size from its title block), or null for a blank entry
+function openEntryDialog(fromRow) {
   if (state.registerKind !== 'docx' || state.busy) return;
+  const fromFile = fromRow ? fromRow.file : null;
   const guess = fromFile ? guessFromFileName(fromFile) : { token: '', title: '' };
   entryFields.token.value = guess.token;
   entryFields.title.value = guess.title;
   entryFields.scale.value = '';
   entryFields.size.value = '';
   entryFields.copyMarks.checked = false;
+  entryDialog.dataset.rel = (fromRow && fromRow.rel) || '';
 
   const afterSelect = entryFields.after;
   afterSelect.textContent = '';
@@ -3322,6 +3354,7 @@ function openEntryDialog(fromFile) {
   document.getElementById('entry-error').textContent = '';
   entryDialog.showModal();
   (guess.token ? entryFields.title : entryFields.token).focus();
+  if (fromRow && fromRow.rel) fillEntryFromTitleBlock(fromRow.rel);
 
   return new Promise(resolve => {
     const form = entryDialog.querySelector('form');
