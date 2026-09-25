@@ -37,7 +37,7 @@
   // --------------------
 
   // Details printed in a drawing's title block, from the text items on its first page:
-  // { title, rev, scale, size } ('' where not found). Items are { str, x, y, h, rotated } in PDF units
+  // { title, rev, scale, size, project, client } ('' where not found). Items are { str, x, y, h, rotated } in PDF units
   // as the sheet is displayed (rotation applied), y upwards; page is { width, height }.
   function readTitleBlock(items, page) {
     // Only horizontal text; rotated notes and dimensions aren't title block fields
@@ -46,7 +46,9 @@
     const sizeField = readField(text, SIZE_LABEL_RE);
     const parsed = splitScale(scaleField);
     return {
-      title: readTitle(text),
+      title: readLabelled(text, TITLE_LABEL_RE),
+      project: readLabelled(text, PROJECT_LABEL_RE),
+      client: readLabelled(text, CLIENT_LABEL_RE),
       rev: readRevision(text),
       scale: parsed.scale || scalesOnSheet(items),
       size: (sizeField.match(SHEET_SIZE_RE) || [])[0] || parsed.size || (page ? sheetSizeOf(page.width, page.height) : '')
@@ -54,31 +56,39 @@
   }
 
   // The title sits to the right of a "Title." label, from the label's top down to the next label
-  // under it (e.g. "Client."), possibly over several lines, which are joined with spaces
+  // under it (e.g. "Client."), possibly over several lines, which are joined with spaces. The
+  // project and client are laid out the same way.
   const TITLE_LABEL_RE = /^\s*(?:drawing\s+|dwg\.?\s+)?title\s*[.:]?\s*$/i;
-  function readTitle(text) {
+  const PROJECT_LABEL_RE = /^\s*project\s*[.:]?\s*$/i;
+  const CLIENT_LABEL_RE = /^\s*client\s*[.:]?\s*$/i;
+  function readLabelled(text, labelRe) {
     let best = '';
-    for (const label of text.filter(i => TITLE_LABEL_RE.test(i.str))) {
+    for (const label of text.filter(i => labelRe.test(i.str))) {
       const sameColumn = i => Math.abs(i.x - label.x) < 2;
       const below = text.filter(i => i !== label && sameColumn(i) && i.y < label.y - 1);
       const floor = below.length ? Math.max(...below.map(i => i.y)) : label.y - label.h * 8;
       const top = label.y + label.h;
       const parts = text.filter(i => i.x > label.x + 1 && !sameColumn(i) && i.y < top && i.y > floor);
-      const title = joinLines(parts, ' ');
+      const title = joinLines(parts, ' ', true);
       if (title.length > best.length) best = title;
     }
     return best;
   }
 
   // Items grouped into lines by baseline, top to bottom, each line read left to right
-  function joinLines(parts, separator) {
+  // With stopAtLabels, reading stops at the first line that is only labels ("Rev." "Status."), the
+  // next row of the title block below a field with nothing under it in its own column
+  const LABEL_WORD_RE = /^\s*[A-Za-z][A-Za-z ]{0,20}[.:]\s*$/;
+  function joinLines(parts, separator, stopAtLabels) {
     const lines = [];
     for (const p of parts) {
       const line = lines.find(l => Math.abs(l.y - p.y) < p.h * 0.4);
       if (line) line.parts.push(p);
       else lines.push({ y: p.y, parts: [p] });
     }
-    return lines.sort((a, b) => b.y - a.y)
+    lines.sort((a, b) => b.y - a.y);
+    const end = stopAtLabels ? lines.findIndex(l => l.parts.every(p => LABEL_WORD_RE.test(p.str))) : -1;
+    return (end < 0 ? lines : lines.slice(0, end))
       .map(l => l.parts.sort((a, b) => a.x - b.x).map(p => p.str).join(''))
       .join(separator).replace(/\s+/g, ' ').trim();
   }
@@ -1077,6 +1087,92 @@
     return findElements(xml, 'w:tc', r.row.start, r.row.end).slice(4).map(c => cellText(c.xml));
   }
 
+  // --------------------
+  // Project details at the top of a register
+  // --------------------
+
+  // Register header labels -> a key the app understands (others are shown but not used)
+  const PROJECT_FIELD_KEYS = {
+    'PROJECT': 'project', 'ISSUE NO': 'issueNo', 'ISSUE NUMBER': 'issueNo', 'ISSUE SERIES': 'issueSeries',
+    'JOB NO': 'jobNo', 'JOB NUMBER': 'jobNo', 'DATE': 'date', 'REF': 'ref', 'OUR REF': 'ref',
+    'MODEL NO': 'modelNo', 'CLIENT': 'client'
+  };
+  const FIELD_LABEL_RE = /^[A-Za-z][A-Za-z .'\/]{0,30}:$/;
+  function projectField(label, value) {
+    const name = label.replace(/:$/, '').replace(/\./g, '').trim();
+    return { key: PROJECT_FIELD_KEYS[name.toUpperCase().replace(/\s+/g, ' ')] || null, label: name, value: collapse(value) };
+  }
+
+  // Label/value pairs along rows of cells ("Project:" | "Park West" | "Job No:" | "24023"); a label
+  // takes the next cell to its right that isn't another label
+  function labelledPairs(cellTexts) {
+    const fields = [];
+    cellTexts.forEach((text, i) => {
+      if (!FIELD_LABEL_RE.test(text)) return;
+      const next = cellTexts.slice(i + 1).find(t => t);
+      if (next !== undefined && !FIELD_LABEL_RE.test(next)) fields.push(projectField(text, next));
+    });
+    return fields;
+  }
+
+  // word/document.xml -> { heading, fields: [{ key, label, value }], description: [lines], client }.
+  // The fields come from the tables above the first drawing row. The description is the
+  // multi-line cell beside the issue dates ("Planning Application ... / For Greenseed Limited"),
+  // and the client its "For ..." line.
+  function readDocxProject(xml) {
+    const firstDrawing = (registerRows(xml)[0] || { row: { start: xml.length } }).row.start;
+    const out = { heading: '', fields: [], description: [], client: '' };
+    for (const tr of findElements(xml, 'w:tr').filter(r => r.start < firstDrawing)) {
+      const cells = findElements(xml, 'w:tc', tr.start, tr.end);
+      const texts = cells.map(c => cellText(c.xml));
+      const nonEmpty = texts.filter(Boolean);
+      if (!out.heading && !out.fields.length && nonEmpty.length === 1 && !FIELD_LABEL_RE.test(nonEmpty[0])) {
+        out.heading = nonEmpty[0];
+        continue;
+      }
+      out.fields.push(...labelledPairs(texts));
+      for (const c of cells) {
+        const lines = paragraphsOf(c.xml).map(pp => collapse(paragraphText(pp.xml))).filter(Boolean);
+        if (lines.length > 1 && !out.description.length) out.description = lines;
+      }
+    }
+    const forLine = out.description.find(l => /^for\s+\S/i.test(l));
+    const clientField = out.fields.find(f => f.key === 'client');
+    out.client = clientField ? clientField.value : forLine ? forLine.replace(/^for\s+/i, '') : '';
+    return out;
+  }
+
+  // The same for the current register sheet of an Excel register: label cells ("PROJECT:") in the
+  // rows above the first "DRAWING CODE" header, each with the value to its right
+  function readXlsxProject(parts) {
+    const reg = readXlsxRegister(parts);
+    const out = { heading: '', fields: [], description: [], client: '' };
+    if (!reg.path) return out;
+    const sharedStrings = parts.sharedStrings ? findElements(parts.sharedStrings, 'si').map(si => stringItemText(si.xml)) : [];
+    for (const { cells } of readSheetRows(parts.sheets[reg.path], sharedStrings, zeroPadStyles(parts.styles))) {
+      if (headerColumns(cells)) break;
+      const texts = Object.keys(cells).map(Number).sort((a, b) => a - b).map(c => collapse(cells[c]));
+      if (!out.heading && !out.fields.length && texts.length === 1 && !FIELD_LABEL_RE.test(texts[0])) {
+        out.heading = texts[0];
+        continue;
+      }
+      out.fields.push(...labelledPairs(texts));
+    }
+    const clientField = out.fields.find(f => f.key === 'client');
+    if (clientField) out.client = clientField.value;
+    return out;
+  }
+
+  // Whether a drawing's project (or client) text names the register's: every word of the
+  // register's value appears in it, ignoring case and punctuation ("Park West LRD Site 7" is in
+  // "Park West Site 7 LRD at Synge Way, Park West, Dublin 12")
+  function namesMatch(registerValue, drawingValue) {
+    const words = v => (v || '').toUpperCase().replace(/[^A-Z0-9]+/g, ' ').trim().split(' ').filter(Boolean);
+    const want = words(registerValue);
+    const have = new Set(words(drawingValue));
+    return want.length > 0 && want.every(w => have.has(w));
+  }
+
   // Scale and size cells of each drawing row: { token: { scale, size } }
   function readDocxDetails(xml) {
     const details = {};
@@ -1103,6 +1199,9 @@
     makeReorderedMatcher,
     readDocxTitles,
     readDocxDetails,
+    readDocxProject,
+    readXlsxProject,
+    namesMatch,
     readRowMarks,
     editDocxTitles,
     editDocxNumbers,

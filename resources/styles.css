@@ -117,9 +117,32 @@ html,body{
   font-size:14px;
 }
 
-/* Header / table / log stacked; only the table scrolls */
+/* Header / table / actions / log stacked; only the table scrolls */
 body{ display:flex; flex-direction:column; padding:12px 16px; gap:10px }
-header, footer{ flex:none }
+header, footer, .action-bar{ flex:none }
+
+/* Tabs along the top: each shows its own set of controls above the table */
+nav.tabs{ display:flex; gap:2px; border-bottom:1px solid var(--border); margin-bottom:8px }
+nav.tabs button{ padding:6px 14px; border:none; border-bottom:2px solid transparent; margin-bottom:-1px; background:none; color:var(--muted); font-size:13px }
+nav.tabs button[aria-selected="true"]{ border-bottom-color:var(--accent); color:var(--fg); font-weight:600 }
+nav.tabs button:hover{ color:var(--fg) }
+
+/* RENAME and SAVE TO... under the table, left and right */
+.action-bar{ display:flex; align-items:center; gap:8px }
+.action-bar #rename{ margin-left:auto }
+
+/* Project data tab: the register's header fields beside what the drawings say */
+#project-data{ max-height:260px; overflow:auto }
+.project-grid{ display:grid; grid-template-columns:minmax(260px, 1fr) minmax(300px, 1.4fr); gap:8px 32px; color:var(--fg) }
+.project-grid h4{ margin:0 0 6px; font-size:13px }
+.project-grid dl{ display:grid; grid-template-columns:max-content 1fr; gap:3px 12px; margin:0 }
+.project-grid dt{ color:var(--muted) }
+.project-grid dd{ margin:0 }
+.project-values{ margin:0 0 8px; padding:0; list-style:none }
+.project-values li{ margin:2px 0 }
+.project-values .ok{ color:var(--ok) }
+.project-values .warn{ color:var(--warn) }
+@media (max-width:760px){ .project-grid{ grid-template-columns:1fr } }
 main{ flex:1; min-height:0; overflow:auto; border:1px solid var(--border); border-radius:4px }
 
 h2{ margin:0 0 8px }

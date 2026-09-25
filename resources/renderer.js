@@ -19,6 +19,8 @@ const tableEl = document.getElementById('drawings');
 const titlesFromFilesBtn = document.getElementById('titles-from-files');
 const titlesFromRegisterBtn = document.getElementById('titles-from-register');
 const detailsFromFilesBtn = document.getElementById('details-from-files');
+const projectDataEl = document.getElementById('project-data');
+const tabButtons = [...document.querySelectorAll('nav.tabs [role=tab]')];
 
 PDFJS.workerSrc = 'js/pdfjs/pdf.worker.js';
 
@@ -38,6 +40,8 @@ const state = {
   targetDir: null,       // directory containing the register (the parent of any drawing folders)
   tokenMap: {},          // drawing number => title, as in the register
   registerDetails: {},   // drawing number => { scale, size }, as in the register
+  registerProject: null, // { heading, fields: [{ key, label, value }], description, client } from the register's header
+  activeTab: 'drawings',
   registerColumns: { scale: false, size: false }, // whether the register has scale / size columns to write to
   titles: {},            // drawing number => title used for renaming (register title or an edit)
   // folders, drawing number => folder, and register changes not yet saved to Word
@@ -251,16 +255,20 @@ async function parseRegister(filePath) {
   state.registerInfo = '';
   state.registerDetails = {};
   state.registerColumns = { scale: false, size: false };
+  state.registerProject = null;
   if (registerKindOf(baseName(filePath)) === 'docx') {
     state.registerXml = (await readDocumentXml(filePath)).xml;
     state.registerDetails = RegisterCore.readDocxDetails(state.registerXml);
+    state.registerProject = RegisterCore.readDocxProject(state.registerXml);
     state.registerColumns = { scale: true, size: true };
     return RegisterCore.readDocxTitles(state.registerXml);
   }
   state.registerXml = null;
   if (registerKindOf(baseName(filePath)) === 'xlsx') {
     const zip = await JSZip.loadAsync(await Neutralino.filesystem.readBinaryFile(filePath));
-    const found = RegisterCore.readXlsxRegister(await RegisterCore.loadXlsxParts(zip));
+    const parts = await RegisterCore.loadXlsxParts(zip);
+    const found = RegisterCore.readXlsxRegister(parts);
+    state.registerProject = RegisterCore.readXlsxProject(parts);
     if (found.sheet) state.registerInfo = `sheet "${found.sheet}"` + (found.issue !== null ? `, issue ${found.issue}` : '');
     state.xlsxSheet = found.sheet;
     state.xlsxPlaces = found.places;
@@ -1335,8 +1343,9 @@ let fileDetailRun = 0;
 const sameTitle = (a, b) => a.replace(/\s+/g, ' ').trim().toLowerCase() === b.replace(/\s+/g, ' ').trim().toLowerCase();
 const DETAIL_COLUMNS = { title: 'col-file-title', rev: 'col-file-rev', scale: 'col-file-scale', size: 'col-file-scale' };
 
+// Title blocks are read while any detail column is shown, or the Project data tab is open
 function fileDetailsShown() {
-  return fileDetailCheckboxes.some(([cb]) => cb.checked);
+  return fileDetailCheckboxes.some(([cb]) => cb.checked) || state.activeTab === 'project';
 }
 
 function renderFileDetails(tds, row) {
@@ -1520,6 +1529,7 @@ async function loadFileDetails() {
         state.fileDetails.set(filePath, { stamp, details });
         read++;
         for (const { tds, row } of fileDetailCells.get(rel) || []) renderFileDetails(tds, row);
+        renderProjectData();
       }
     } finally {
       if (worker) worker.destroy();
@@ -1570,6 +1580,109 @@ async function copyTitles(fromFiles) {
   rebuild();
 }
 
+// --------------------
+// Tabs and the Project data tab
+// --------------------
+function switchTab(name) {
+  state.activeTab = name;
+  for (const btn of tabButtons) btn.setAttribute('aria-selected', String(btn.dataset.tab === name));
+  for (const panel of document.querySelectorAll('.tab-panel')) panel.hidden = panel.dataset.panel !== name;
+  if (name === 'project') {
+    renderProjectData();
+    loadFileDetails();
+  }
+}
+
+function el(tag, text, cls) {
+  const node = document.createElement(tag);
+  if (text !== undefined) node.textContent = text;
+  if (cls) node.className = cls;
+  return node;
+}
+
+// Distinct values of a title block field across the drawings: [{ value, drawings: [label] }], most common first
+function drawingValues(field) {
+  const byValue = new Map();
+  const seen = new Set();
+  for (const row of state.rows) {
+    if (!row.rel || seen.has(row.rel)) continue;
+    seen.add(row.rel);
+    const entry = state.fileDetails.get(absPath(row.rel));
+    const value = entry && entry.details && entry.details[field];
+    if (!value) continue;
+    const key = value.toUpperCase();
+    if (!byValue.has(key)) byValue.set(key, { value, drawings: [] });
+    byValue.get(key).drawings.push(row.token || row.file);
+  }
+  return [...byValue.values()].sort((a, b) => b.drawings.length - a.drawings.length);
+}
+
+// One field's values in the drawings, each marked against the register's value when there is one
+function renderDrawingValues(parent, title, field, registerValue) {
+  const values = drawingValues(field);
+  parent.appendChild(el('h4', title));
+  const list = el('ul', undefined, 'project-values');
+  if (!values.length) list.appendChild(el('li', 'Not found in any drawing read so far', 'muted'));
+  for (const { value, drawings } of values) {
+    const li = el('li');
+    let mark;
+    if (registerValue) {
+      const ok = RegisterCore.namesMatch(registerValue, value);
+      mark = el('span', ok ? '✓ ' : '⚠ ', ok ? 'ok' : 'warn');
+      li.title = (ok ? 'Matches' : "Doesn't match") + ` the register's "${registerValue}"\n` + drawings.join('\n');
+    } else {
+      mark = el('span', values.length > 1 ? '⚠ ' : '', 'warn');
+      li.title = (values.length > 1 ? `The drawings name ${values.length} different ${title.toLowerCase()}s\n` : '') + drawings.join('\n');
+    }
+    li.append(mark, value, el('span', ` — ${drawings.length === 1 ? '1 drawing' : drawings.length + ' drawings'}`, 'muted'));
+    list.appendChild(li);
+  }
+  parent.appendChild(list);
+}
+
+function renderProjectData() {
+  if (state.activeTab !== 'project') return;
+  projectDataEl.textContent = '';
+  if (!state.registerPath) {
+    projectDataEl.className = 'muted';
+    projectDataEl.textContent = 'No register loaded.';
+    return;
+  }
+  projectDataEl.className = '';
+  const grid = el('div', undefined, 'project-grid');
+  const project = state.registerProject;
+
+  const left = el('section');
+  left.appendChild(el('h4', `Register: ${baseName(state.registerPath)}${state.registerInfo ? ` (${state.registerInfo})` : ''}`));
+  if (!project || (!project.fields.length && !project.heading)) {
+    left.appendChild(el('p', state.registerKind === 'pdf'
+      ? 'Project details are only read from Word and Excel registers.'
+      : 'No project details found at the top of the register.', 'muted'));
+  } else {
+    const dl = el('dl');
+    const add = (label, value) => dl.append(el('dt', label), el('dd', value || '—'));
+    if (project.heading) add('Heading', project.heading);
+    for (const f of project.fields) add(f.label, f.value);
+    if (project.description.length) add('Description', project.description.join('\n'));
+    if (project.client && !project.fields.some(f => f.key === 'client')) add('Client', project.client);
+    for (const dd of dl.querySelectorAll('dd')) dd.style.whiteSpace = 'pre-line';
+    left.appendChild(dl);
+  }
+
+  const right = el('section');
+  const pdfs = new Set(state.rows.filter(r => r.rel && /\.pdf$/i.test(r.rel)).map(r => r.rel));
+  const read = [...pdfs].filter(rel => state.fileDetails.has(absPath(rel))).length;
+  const registerOf = key => project && ((project.fields.find(f => f.key === key) || {}).value || (key === 'client' ? project.client : ''));
+  renderDrawingValues(right, 'Project', 'project', registerOf('project'));
+  renderDrawingValues(right, 'Client', 'client', registerOf('client'));
+  right.appendChild(el('p', read < pdfs.size
+    ? `Reading title blocks… ${read} of ${pdfs.size} drawings`
+    : `From the title blocks of ${pdfs.size} drawing${pdfs.size === 1 ? '' : 's'}. Hover a value to see which.`, 'muted'));
+
+  grid.append(left, right);
+  projectDataEl.appendChild(grid);
+}
+
 function render(newFiles) {
   // Don't throw away a title the user is typing; renderAfterEdit() catches up
   if (state.editingToken) {
@@ -1616,6 +1729,7 @@ function render(newFiles) {
   if (count('conflict')) parts.push(`${count('conflict')} conflicts`);
   summaryEl.textContent = parts.join(' · ');
 
+  renderProjectData();
   emptyEl.style.display = dataRows ? 'none' : '';
   if (!dataRows) {
     emptyEl.textContent = state.registerPath ? 'No drawings found in this folder yet.' : 'Choose a drawing register or the folder containing it.';
@@ -3006,6 +3120,8 @@ registerInput.addEventListener('keydown', (e) => {
 });
 
 hideEmptyCheckbox.addEventListener('change', () => render(new Set()));
+
+for (const btn of tabButtons) btn.addEventListener('click', () => switchTab(btn.dataset.tab));
 
 titlesFromFilesBtn.addEventListener('click', () => copyTitles(true));
 titlesFromRegisterBtn.addEventListener('click', () => copyTitles(false));

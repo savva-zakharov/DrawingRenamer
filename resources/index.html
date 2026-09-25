@@ -8,6 +8,11 @@
   </head>
   <body>
     <header>
+      <nav class="tabs" role="tablist">
+        <button role="tab" data-tab="drawings" aria-selected="true">Drawings</button>
+        <button role="tab" data-tab="project" aria-selected="false">Project data</button>
+      </nav>
+      <div class="tab-panel" data-panel="drawings" role="tabpanel">
       <div class="row">
         <input id="register" class="wide" placeholder="Path to the drawing register (.docx or .pdf) or the folder containing it" />
         <button id="choose">Choose folder...</button>
@@ -17,7 +22,6 @@
       <div class="row toolbar">
         <span class="actions">
           <button id="new-entry" hidden title="Add a drawing to the Word register">+ NEW ENTRY</button>
-          <button id="save-word" hidden>SAVE TO WORD</button>
           <button id="make-folder" disabled title="Put the selected drawings in a folder">+ FOLDER</button>
           <span class="menu-wrap">
             <button id="menu-btn" title="More actions" aria-haspopup="true" aria-expanded="false">☰</button>
@@ -42,9 +46,10 @@
         <label class="inline" title="Read the revision from each drawing's title block"><input type="checkbox" id="show-file-rev" /> Revision</label>
         <label class="inline" title="Read the scale and sheet size from each drawing's title block"><input type="checkbox" id="show-file-scale" /> Scale &amp; size</label>
         <span id="watching" class="muted"></span>
-        <span class="actions">
-          <button id="rename" class="primary" disabled>RENAME</button>
-        </span>
+      </div>
+      </div>
+      <div class="tab-panel" data-panel="project" role="tabpanel" hidden>
+        <div id="project-data" class="muted">No register loaded.</div>
       </div>
     </header>
 
@@ -69,6 +74,12 @@
       </table>
       <div id="empty" class="muted">Choose a register PDF or the folder containing it.</div>
     </main>
+
+    <!-- Always visible under the table -->
+    <div class="action-bar">
+      <button id="save-word" hidden>SAVE TO WORD</button>
+      <button id="rename" class="primary" disabled>RENAME</button>
+    </div>
 
     <footer>
       <div class="log-header">
