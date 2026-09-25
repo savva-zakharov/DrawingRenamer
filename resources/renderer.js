@@ -12,6 +12,8 @@ const hideEmptyCheckbox = document.getElementById('hide-empty');
 const checkAllCheckbox = document.getElementById('check-all');
 const fileTitlesCheckbox = document.getElementById('show-file-titles');
 const tableEl = document.getElementById('drawings');
+const titlesFromFilesBtn = document.getElementById('titles-from-files');
+const titlesFromRegisterBtn = document.getElementById('titles-from-register');
 
 PDFJS.workerSrc = 'js/pdfjs/pdf.worker.js';
 
@@ -622,6 +624,12 @@ function updateButtons() {
   wordBtn.textContent = changes ? `${saveButtonLabel()} (${changes})` : saveButtonLabel();
   wordBtn.title = `Write edited titles and numbers into the ${registerAppName()} register`;
   wordBtn.disabled = state.busy || changes === 0;
+
+  const which = selected ? `the ${selected} selected drawing${selected === 1 ? '' : 's'}` : 'the selected drawings';
+  const copyNote = editable ? '' : '\nTitles can only be changed in a Word or Excel register';
+  titlesFromFilesBtn.disabled = titlesFromRegisterBtn.disabled = state.busy || !editable || selected === 0;
+  titlesFromFilesBtn.title = `Use the in-file title for ${which}` + copyNote;
+  titlesFromRegisterBtn.title = `Put ${which} back to the register title` + copyNote;
 
   const selectable = visibleRows().filter(isSelectable);
   const on = selectable.filter(isSelected).length;
@@ -1324,6 +1332,47 @@ async function loadFileTitles() {
     state.fileTitles.set(filePath, { stamp, title });
     for (const { td, row } of fileTitleCells.get(rel) || []) renderFileTitle(td, row);
   }
+}
+
+// < : the selected drawings take the title read from their file, as pending register edits
+// > : the selected drawings go back to the title in the register, dropping any edit
+async function copyTitles(fromFiles) {
+  if (!canEditRegister() || state.editingToken) return;
+  const rows = selectedRows().filter(r => r.token);
+  let changed = 0, unread = 0;
+  for (const row of rows) {
+    const entry = row.isNew && state.layout.newEntries.find(e => e.token === row.token);
+    if (!fromFiles) {
+      // New entries have no register title to go back to
+      if (!row.isNew && state.layout.titleEdits[row.origToken] !== undefined) {
+        delete state.layout.titleEdits[row.origToken];
+        changed++;
+      }
+      continue;
+    }
+    const read = row.rel && state.fileTitles.get(absPath(row.rel));
+    const title = read && read.title;
+    if (!title) {
+      unread++;
+      continue;
+    }
+    if (title === row.title) continue;
+    if (entry) entry.title = title;
+    else if (title === state.tokenMap[row.origToken]) delete state.layout.titleEdits[row.origToken];
+    else state.layout.titleEdits[row.origToken] = title;
+    changed++;
+  }
+  const plural = n => n === 1 ? '1 drawing' : `${n} drawings`;
+  if (changed) {
+    await saveLayout();
+    appendLog(fromFiles
+      ? `✏️ ${plural(changed)} now use the in-file title (press ${saveButtonLabel()} to write them to the register).`
+      : `✏️ ${plural(changed)} back to the register title.`);
+  } else {
+    appendLog(fromFiles ? 'ℹ️ The selected drawings already use their in-file titles.' : 'ℹ️ The selected drawings already use the register title.');
+  }
+  if (unread) appendLog(`ℹ️ ${plural(unread)} skipped: no in-file title${fileTitlesCheckbox.checked ? ' (yet)' : ''}.`);
+  rebuild();
 }
 
 function render(newFiles) {
@@ -2685,6 +2734,9 @@ registerInput.addEventListener('keydown', (e) => {
 });
 
 hideEmptyCheckbox.addEventListener('change', () => render(new Set()));
+
+titlesFromFilesBtn.addEventListener('click', () => copyTitles(true));
+titlesFromRegisterBtn.addEventListener('click', () => copyTitles(false));
 
 fileTitlesCheckbox.addEventListener('change', () => {
   tableEl.classList.toggle('hide-file-titles', !fileTitlesCheckbox.checked);

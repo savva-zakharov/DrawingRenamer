@@ -155,6 +155,9 @@ td.number{ font-family:Consolas, monospace; white-space:nowrap }
 table.hide-file-titles .col-file-title{ display:none }
 td.file-title.differs{ color:var(--warn) }
 td.file-title.pending, td.file-title.none{ color:var(--muted); font-style:italic }
+/* > and < in the headers: copy titles between the register and the files for the selected rows */
+button.title-copy{ margin:0 8px 0 0; padding:0 7px; font-size:12px; font-weight:600; line-height:18px }
+button.title-copy.right{ float:right; margin:0 0 0 8px }
 
 /* Tinted rows keep the same light/dark alternation as the plain rows */
 tbody tr.named{ background:var(--named-bg) }
