@@ -19,7 +19,10 @@
         <span id="summary" class="muted">No register loaded.</span>
         <label class="inline"><input type="checkbox" id="hide-empty" /> Hide missing drawings</label>
         <span id="watching" class="muted"></span>
-        <button id="rename" class="primary" disabled>RENAME</button>
+        <span class="actions">
+          <button id="make-folder" disabled title="Put the selected drawings in a folder">MAKE FOLDER</button>
+          <button id="rename" class="primary" disabled>RENAME</button>
+        </span>
       </div>
     </header>
 
@@ -47,6 +50,22 @@
       </div>
       <div id="log"></div>
     </footer>
+
+    <dialog id="folder-dialog">
+      <form>
+        <h3 id="folder-dialog-title">Put drawings in folder</h3>
+        <p class="muted">Folders are created inside the register's folder. Files are moved when you press RENAME.</p>
+        <input id="folder-name" list="folder-list" placeholder="e.g. Plans" autocomplete="off" />
+        <datalist id="folder-list"></datalist>
+        <div id="folder-error"></div>
+        <div class="dialog-buttons">
+          <!-- OK comes first so Enter in the text box means OK; shown right-to-left -->
+          <button type="submit" value="ok" class="primary">OK</button>
+          <button type="submit" value="cancel">Cancel</button>
+          <button type="submit" value="remove" class="left">Remove from folder</button>
+        </div>
+      </form>
+    </dialog>
 
     <script src="js/pdfjs/pdf.js"></script>
     <script src="js/neutralino.js"></script>

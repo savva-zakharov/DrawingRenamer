@@ -38,7 +38,12 @@ h3{ margin:0; font-size:14px }
 
 .row{ display:flex; align-items:center; gap:8px; flex-wrap:wrap }
 .toolbar{ margin-top:8px }
-.toolbar #rename{ margin-left:auto }
+.toolbar{ flex-wrap:nowrap }
+.toolbar #summary{ flex:1 1 auto; min-width:0 }
+.toolbar label.inline, .toolbar #watching{ flex:none; white-space:nowrap }
+.toolbar .actions{ flex:none; display:flex; gap:8px; margin-left:8px }
+.toolbar .actions button{ margin:0 }
+#make-folder{ font-weight:600 }
 .muted{ color:var(--muted) }
 label.inline{ display:flex; align-items:center; gap:4px; color:var(--muted) }
 
@@ -51,7 +56,7 @@ button.primary:disabled{ background:#a9cdf5; border-color:#a9cdf5 }
 table{ width:100%; border-collapse:collapse }
 thead th{ position:sticky; top:0; background:#f0f1f3; text-align:left; font-weight:600; padding:6px 8px; border-bottom:1px solid var(--border); z-index:1 }
 tbody td{ padding:5px 8px; border-bottom:1px solid #eee; vertical-align:top; word-break:break-word }
-tbody tr:nth-child(even){ background:var(--row-alt) }
+tbody tr.alt{ background:var(--row-alt) }
 .col-check{ width:32px }
 .col-number{ width:110px; white-space:nowrap }
 .col-status{ width:100px }
@@ -59,9 +64,9 @@ td.number{ font-family:Consolas, monospace; white-space:nowrap }
 
 /* Tinted rows keep the same light/dark alternation as the plain rows */
 tbody tr.named{ background:var(--named-bg) }
-tbody tr.named:nth-child(even){ background:var(--named-alt) }
+tbody tr.named.alt{ background:var(--named-alt) }
 tbody tr.no-file{ background:var(--missing-bg) }
-tbody tr.no-file:nth-child(even){ background:var(--missing-alt) }
+tbody tr.no-file.alt{ background:var(--missing-alt) }
 tr.no-file td{ color:#999 }
 td.missing{ font-style:italic }
 tr.new td.file{ animation:flash 1.5s ease-out }
@@ -90,3 +95,21 @@ label.choice input{ margin-top:3px; flex:none }
 .status.supersede{ background:#e3f0ff; color:var(--accent) }
 .status.superseded{ background:#efe7fb; color:#6a3fb5 }
 .status.skip{ background:#f0f0f0; color:#888 }
+
+/* Folder sections */
+tbody tr.section td{ background:#e8edf4; border-top:1px solid #cfd8e3; border-bottom:1px solid #cfd8e3; padding:6px 8px }
+.section-name{ font-weight:600 }
+.section-count{ margin-left:10px; font-size:12px }
+button.link{ margin-left:12px; padding:0; border:none; background:none; color:var(--accent); font-size:12px; text-decoration:underline }
+.status.move{ background:#e3f0ff; color:var(--accent) }
+
+/* Folder name dialog */
+dialog{ border:1px solid var(--border); border-radius:6px; padding:18px 20px; width:420px; box-shadow:0 8px 30px rgba(0,0,0,.2) }
+dialog::backdrop{ background:rgba(0,0,0,.25) }
+dialog h3{ margin:0 0 6px; font-size:16px }
+dialog p{ margin:0 0 12px; font-size:12px }
+dialog input{ width:100%; padding:6px 8px; font-size:14px }
+#folder-error{ color:var(--bad); font-size:12px; min-height:18px; margin-top:4px }
+.dialog-buttons{ display:flex; flex-direction:row-reverse; gap:8px; margin-top:8px }
+.dialog-buttons button{ margin:0 }
+.dialog-buttons .left{ margin-right:auto }

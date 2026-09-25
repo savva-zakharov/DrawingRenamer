@@ -5,25 +5,35 @@ const emptyEl = document.getElementById('empty');
 const summaryEl = document.getElementById('summary');
 const watchingEl = document.getElementById('watching');
 const renameBtn = document.getElementById('rename');
+const folderBtn = document.getElementById('make-folder');
 const hideEmptyCheckbox = document.getElementById('hide-empty');
 const checkAllCheckbox = document.getElementById('check-all');
 
 PDFJS.workerSrc = 'js/pdfjs/pdf.worker.js';
 
+const SUPERSEDED_DIR = 'SS';
+// Saved next to the register: which folder each drawing belongs in, for later runs
+const LAYOUT_FILE = 'drawing-renamer.json';
+
+// File paths inside targetDir are "relative paths" using '/', e.g. "Plans/PA-100 - Plan.pdf"
 const state = {
   registerPDF: null,     // full path of the loaded register
   registerModified: null,
-  targetDir: null,       // directory containing the register (and the drawings)
+  targetDir: null,       // directory containing the register (the parent of any drawing folders)
   tokenMap: {},          // drawing number => title
+  layout: { folders: [], assignments: {} }, // folder list and drawing number => folder
+  layoutBroken: false,   // the layout file couldn't be read, so don't overwrite it
   rows: [],
-  files: [],             // all files in targetDir
+  files: [],             // { dir, name, rel } for the top folder and every drawing folder
   match: null,           // result of matchFiles()
-  addedTimes: {},        // when each file sharing a drawing number arrived in the folder
-  choices: new Map(),    // drawing number => file the user picked to use
-  unchecked: new Set(),  // files the user has deselected
-  anchorFile: null,      // last ticked/unticked file, start of a Shift+click range
-  knownFiles: null,      // files seen on the previous refresh, to highlight new arrivals
-  watcherId: null,
+  addedTimes: {},        // rel => when a file sharing a drawing number arrived in its folder
+  choices: new Map(),    // drawing number => rel of the file the user picked to use
+  unchecked: new Set(),  // keys of rows the user deselected (rows needing a rename start selected)
+  picked: new Set(),     // keys of rows the user selected
+  anchorKey: null,       // last ticked/unticked row, start of a Shift+click range
+  displayKeys: [],       // keys of the selectable rows in the order shown
+  knownFiles: null,      // rels seen on the previous refresh, to highlight new arrivals
+  watchers: new Map(),   // rel dir => watcher id
   pollTimer: null,
   busy: false
 };
@@ -140,24 +150,133 @@ function sanitizeFilename(name) {
 }
 
 // --------------------
+// Relative paths inside targetDir
+// --------------------
+function relJoin(dir, name) {
+  return dir ? `${dir}/${name}` : name;
+}
+
+function absPath(rel) {
+  return rel ? joinPath(state.targetDir, rel) : state.targetDir;
+}
+
+function displayPath(rel) {
+  return rel.replace(/\//g, '\\');
+}
+
+async function ensureDir(rel) {
+  let current = '';
+  for (const part of rel.split('/').filter(Boolean)) {
+    current = relJoin(current, part);
+    const stats = await getStatsOrNull(absPath(current));
+    if (!stats) await Neutralino.filesystem.createDirectory(absPath(current));
+    else if (!stats.isDirectory) throw new Error(`"${displayPath(current)}" exists but is not a folder`);
+  }
+}
+
+// Files in the top folder plus every drawing folder in the layout
+async function scanFiles() {
+  const files = [];
+  for (const dir of ['', ...state.layout.folders]) {
+    let names;
+    try {
+      names = await listFiles(absPath(dir));
+    } catch (e) {
+      continue; // folder not created yet
+    }
+    for (const name of names) files.push({ dir, name, rel: relJoin(dir, name) });
+  }
+  return files;
+}
+
+// --------------------
+// Folder layout file
+// --------------------
+function layoutPath() {
+  return joinPath(state.targetDir, LAYOUT_FILE);
+}
+
+async function loadLayout() {
+  state.layout = { folders: [], assignments: {} };
+  state.layoutBroken = false;
+  if (!(await getStatsOrNull(layoutPath()))) return;
+  try {
+    const data = JSON.parse(await Neutralino.filesystem.readFile(layoutPath()));
+    const folders = Array.isArray(data.folders) ? data.folders.filter(f => typeof f === 'string') : [];
+    const assignments = {};
+    for (const [token, folder] of Object.entries(data.assignments || {})) {
+      if (typeof folder !== 'string' || !folder) continue;
+      assignments[token] = folder;
+      if (!folders.includes(folder)) folders.push(folder);
+    }
+    state.layout = { folders, assignments };
+    appendLog(`📁 Loaded folder layout from ${LAYOUT_FILE} (${folders.length} folders).`);
+  } catch (err) {
+    state.layoutBroken = true;
+    appendLog(`⚠️ Could not read ${LAYOUT_FILE}; folder changes won't be saved until it's fixed: ${err.message || err}`);
+  }
+}
+
+async function saveLayout() {
+  if (state.layoutBroken) {
+    appendLog(`⚠️ Not saving folders: ${LAYOUT_FILE} could not be read when the register was loaded.`);
+    return;
+  }
+  // Keep assignments in register order so the file is easy to read
+  const assignments = {};
+  for (const token of Object.keys(state.tokenMap)) {
+    if (state.layout.assignments[token]) assignments[token] = state.layout.assignments[token];
+  }
+  for (const [token, folder] of Object.entries(state.layout.assignments)) {
+    if (!(token in assignments)) assignments[token] = folder; // drawings no longer in the register
+  }
+  const data = {
+    version: 1,
+    register: baseName(state.registerPDF),
+    folders: state.layout.folders,
+    assignments
+  };
+  try {
+    await Neutralino.filesystem.writeFile(layoutPath(), JSON.stringify(data, null, 2) + '\n');
+  } catch (err) {
+    appendLog(`❌ Could not save ${LAYOUT_FILE}: ${err.message || err}`);
+  }
+}
+
+function folderOf(token) {
+  return state.layout.assignments[token] || '';
+}
+
+// Returns the normalised folder path ("Plans/Level 1"), or throws with a reason
+function validateFolderName(input) {
+  const parts = input.split(/[\\/]+/).map(p => p.trim()).filter(Boolean);
+  if (!parts.length) throw new Error('Enter a folder name.');
+  for (const part of parts) {
+    if (/[:*?"<>|]/.test(part)) throw new Error('Folder names can\'t contain : * ? " < > |');
+    if (part === '.' || part === '..' || /[. ]$/.test(part)) throw new Error('Folder names can\'t end with a dot or space.');
+    if (/^(con|prn|aux|nul|com\d|lpt\d)$/i.test(part)) throw new Error(`"${part}" is reserved by Windows.`);
+    if (part.toLowerCase() === SUPERSEDED_DIR.toLowerCase()) throw new Error(`"${SUPERSEDED_DIR}" is used for superseded drawings.`);
+  }
+  return parts.join('/');
+}
+
+// --------------------
 // 4️⃣ Match files to register entries (exact token match, first register entry wins)
 // --------------------
-const SUPERSEDED_DIR = 'SS';
-
 function newNameFor(token, tokenMap) {
   return `${token} - ${sanitizeFilename(tokenMap[token])}.pdf`;
 }
 
-function matchFiles(tokenMap, allFiles, registerBasename) {
+function matchFiles(tokenMap, files, registerRel) {
   const tokens = Object.keys(tokenMap);
-  const pdfs = allFiles
-    .filter(f => f.toLowerCase().endsWith('.pdf') && f !== registerBasename)
-    .sort((a, b) => a.localeCompare(b));
+  const pdfs = files
+    .filter(f => f.name.toLowerCase().endsWith('.pdf') && f.rel !== registerRel)
+    .sort((a, b) => a.rel.localeCompare(b.rel));
 
   const byToken = {};
   const unmatched = [];
   for (const file of pdfs) {
-    const token = tokens.find(t => file.includes(t));
+    const token = tokens.find(t => file.name.includes(t));
     if (!token) unmatched.push(file);
     else (byToken[token] = byToken[token] || []).push(file);
   }
@@ -165,47 +284,58 @@ function matchFiles(tokenMap, allFiles, registerBasename) {
 }
 
 // When several files match one drawing, the user picks which to use.
-// Default: the file most recently added to the folder (an unnamed file wins a tie).
-function chosenFile(token, files, newName, addedTimes, choices) {
+// Default: the file most recently added to its folder (a file already in place wins a tie).
+function chosenFile(token, files, targetRel, addedTimes, choices) {
   const choice = choices.get(token);
-  if (choice && files.includes(choice)) return choice;
+  const picked = choice && files.find(f => f.rel === choice);
+  if (picked) return picked;
   return files.slice().sort((a, b) =>
-    (addedTimes[b] || 0) - (addedTimes[a] || 0) || (a === newName) - (b === newName)
+    (addedTimes[b.rel] || 0) - (addedTimes[a.rel] || 0) || (a.rel === targetRel) - (b.rel === targetRel)
   )[0];
 }
 
-function computeRows(tokenMap, match, allFiles, addedTimes, choices) {
+function computeRows(tokenMap, match, files, addedTimes, choices) {
   // Windows file names are case-insensitive, so compare lowercased
-  const existing = new Set(allFiles.map(f => f.toLowerCase()));
+  const existing = new Set(files.map(f => f.rel.toLowerCase()));
 
   const rows = [];
   for (const token of Object.keys(tokenMap)) {
     const title = tokenMap[token];
-    const files = match.byToken[token];
-    if (!files) {
-      rows.push({ token, title, file: null, newName: null, status: 'none' });
+    const folder = folderOf(token);
+    const matches = match.byToken[token];
+    if (!matches) {
+      rows.push({ key: '#' + token, token, title, folder, status: 'none' });
       continue;
     }
     const newName = newNameFor(token, tokenMap);
-    const named = files.find(f => f === newName) || null;
-    const group = files.length > 1;
-    const chosen = group ? chosenFile(token, files, newName, addedTimes, choices) : files[0];
+    const targetRel = relJoin(folder, newName);
+    // The file already sitting at the target path, if any
+    const occupant = matches.find(f => f.rel === targetRel) ||
+      matches.find(f => f.rel.toLowerCase() === targetRel.toLowerCase()) || null;
+    const group = matches.length > 1;
+    const chosen = group ? chosenFile(token, matches, targetRel, addedTimes, choices) : matches[0];
 
     // Newest first; kept stable so picking a different file doesn't reorder the rows
-    const ordered = files.slice().sort((a, b) => (addedTimes[b] || 0) - (addedTimes[a] || 0) || a.localeCompare(b));
-    ordered.forEach((file, i) => {
-      const row = { token, title, file, newName, group, chosen: file === chosen, named, first: i === 0, last: i === ordered.length - 1 };
-      if (file === chosen) {
-        if (file === newName) {
+    const ordered = matches.slice().sort((a, b) => (addedTimes[b.rel] || 0) - (addedTimes[a.rel] || 0) || a.rel.localeCompare(b.rel));
+    ordered.forEach((f, i) => {
+      const row = {
+        key: f.rel, token, title, folder, file: f.name, dir: f.dir, rel: f.rel, newName, targetRel,
+        group, chosen: f === chosen, first: i === 0, last: i === ordered.length - 1
+      };
+      if (f === chosen) {
+        if (f.rel === targetRel) {
           row.status = 'ok';
-        } else if (!named && existing.has(newName.toLowerCase()) && file.toLowerCase() !== newName.toLowerCase()) {
-          // Target name is taken by a file that doesn't match this drawing (e.g. different letter case)
+        } else if (!occupant && existing.has(targetRel.toLowerCase())) {
+          // Target path is taken by a file that doesn't match this drawing
           row.status = 'conflict';
           row.reason = 'A file with this name already exists';
+        } else if (occupant && occupant !== f) {
+          row.status = 'supersede';
+          row.occupant = occupant;
         } else {
-          row.status = named ? 'supersede' : 'rename';
+          row.status = f.name === newName ? 'move' : 'rename';
         }
-      } else if (file === named) {
+      } else if (f === occupant) {
         row.status = 'superseded';
       } else {
         row.status = 'skip';
@@ -213,10 +343,71 @@ function computeRows(tokenMap, match, allFiles, addedTimes, choices) {
       rows.push(row);
     });
   }
-  for (const file of match.unmatched) {
-    rows.push({ token: null, title: null, file, newName: null, status: 'unmatched' });
+  for (const f of match.unmatched) {
+    rows.push({ key: f.rel, token: null, title: null, folder: null, file: f.name, dir: f.dir, rel: f.rel, status: 'unmatched' });
   }
   return rows;
+}
+
+// --------------------
+// Selection
+// --------------------
+const ACTION_STATUSES = ['rename', 'supersede', 'move'];
+
+// One checkbox per drawing: on the file being used, or on the register entry if there's no file
+function isSelectable(row) {
+  return !!row.token && (!row.group || row.chosen);
+}
+
+function isSelected(row) {
+  if (!isSelectable(row)) return false;
+  return ACTION_STATUSES.includes(row.status) ? !state.unchecked.has(row.key) : state.picked.has(row.key);
+}
+
+function setSelected(key, on) {
+  if (on) {
+    state.unchecked.delete(key);
+    state.picked.add(key);
+  } else {
+    state.unchecked.add(key);
+    state.picked.delete(key);
+  }
+}
+
+function selectedRows() {
+  return state.rows.filter(isSelected);
+}
+
+function renameRows() {
+  return selectedRows().filter(r => ACTION_STATUSES.includes(r.status));
+}
+
+function visibleRows() {
+  return state.rows.filter(r => !(hideEmptyCheckbox.checked && r.status === 'none'));
+}
+
+function updateButtons() {
+  const n = renameRows().length;
+  renameBtn.textContent = n ? `RENAME (${n})` : 'RENAME';
+  renameBtn.disabled = state.busy || n === 0;
+
+  const selected = selectedRows().length;
+  folderBtn.textContent = selected ? `MAKE FOLDER (${selected})` : 'MAKE FOLDER';
+  folderBtn.disabled = state.busy || selected === 0;
+
+  const selectable = visibleRows().filter(isSelectable);
+  const on = selectable.filter(isSelected).length;
+  checkAllCheckbox.checked = selectable.length > 0 && on === selectable.length;
+  checkAllCheckbox.indeterminate = on > 0 && on < selectable.length;
+}
+
+// Keys of the selectable rows shown, from one row to another inclusive (for Shift+click)
+function rangeBetween(fromKey, toKey) {
+  const keys = state.displayKeys;
+  const a = keys.indexOf(fromKey);
+  const b = keys.indexOf(toKey);
+  if (a < 0 || b < 0) return [toKey];
+  return keys.slice(Math.min(a, b), Math.max(a, b) + 1);
 }
 
 // --------------------
@@ -224,6 +415,7 @@ function computeRows(tokenMap, match, allFiles, addedTimes, choices) {
 // --------------------
 const STATUS_LABELS = {
   rename: 'Rename',
+  move: 'Move',
   supersede: 'Replace',
   superseded: 'To SS',
   ok: 'Named',
@@ -234,13 +426,12 @@ const STATUS_LABELS = {
 };
 
 const STATUS_TIPS = {
+  move: 'Already named; will be moved into its folder',
   supersede: `Will be renamed; the current file moves to ${SUPERSEDED_DIR}\\`,
   superseded: `Will be moved to ${SUPERSEDED_DIR}\\ when the replacement is renamed`,
   skip: 'Left as it is; pick it with the radio button to use it instead',
-  none: 'No file in the folder matches this drawing number'
+  none: 'No file matches this drawing number'
 };
-
-const ACTION_STATUSES = ['rename', 'supersede'];
 
 function cell(tr, text, cls) {
   const td = document.createElement('td');
@@ -250,103 +441,157 @@ function cell(tr, text, cls) {
   return td;
 }
 
-function selectedRows() {
-  return state.rows.filter(r => ACTION_STATUSES.includes(r.status) && !state.unchecked.has(r.file));
+function makeCheckbox(checked, onClick) {
+  const cb = document.createElement('input');
+  cb.type = 'checkbox';
+  cb.checked = checked;
+  cb.addEventListener('click', onClick);
+  return cb;
 }
 
-function updateRenameButton() {
-  const n = selectedRows().length;
-  renameBtn.textContent = n ? `RENAME (${n})` : 'RENAME';
-  renameBtn.disabled = state.busy || n === 0;
-  const renameable = state.rows.filter(r => ACTION_STATUSES.includes(r.status));
-  checkAllCheckbox.checked = renameable.length > 0 && n === renameable.length;
-  checkAllCheckbox.indeterminate = n > 0 && n < renameable.length;
+// Rows split into the top folder, each drawing folder, then files matching nothing
+function sections(rows) {
+  const top = { folder: '', rows: [] };
+  const byFolder = new Map(state.layout.folders.slice().sort((a, b) => a.localeCompare(b)).map(f => [f, { folder: f, rows: [] }]));
+  const unmatched = { unmatched: true, rows: [] };
+  for (const row of rows) {
+    if (row.status === 'unmatched') unmatched.rows.push(row);
+    else (byFolder.get(row.folder) || top).rows.push(row);
+  }
+  return [top, ...byFolder.values(), unmatched];
 }
 
-// Files of the tickable rows currently shown, from one file to another inclusive (for Shift+click)
-function rangeBetween(fromFile, toFile) {
-  const files = state.rows
-    .filter(r => ACTION_STATUSES.includes(r.status) && !(hideEmptyCheckbox.checked && r.status === 'none'))
-    .map(r => r.file);
-  const a = files.indexOf(fromFile);
-  const b = files.indexOf(toFile);
-  if (a < 0 || b < 0) return [toFile];
-  return files.slice(Math.min(a, b), Math.max(a, b) + 1);
+function renderSectionHeader(section, visible) {
+  const tr = document.createElement('tr');
+  tr.className = 'section';
+  const selectable = visible.filter(isSelectable);
+
+  const checkTd = cell(tr, '');
+  if (selectable.length) {
+    const allOn = selectable.every(isSelected);
+    const cb = makeCheckbox(allOn, () => {
+      for (const row of selectable) setSelected(row.key, cb.checked);
+      render(new Set());
+    });
+    cb.indeterminate = !allOn && selectable.some(isSelected);
+    cb.title = 'Select every drawing in this folder';
+    checkTd.appendChild(cb);
+  }
+
+  const td = cell(tr, '');
+  td.colSpan = 5;
+  const name = document.createElement('span');
+  name.className = 'section-name';
+  if (section.unmatched) name.textContent = 'Files not in the register';
+  else if (section.folder) name.textContent = '📁 ' + displayPath(section.folder);
+  else name.textContent = `📂 ${baseName(state.targetDir)} (top folder)`;
+  td.appendChild(name);
+
+  if (!section.unmatched) {
+    const drawings = new Set(section.rows.map(r => r.token)).size;
+    const count = document.createElement('span');
+    count.className = 'muted section-count';
+    count.textContent = drawings === 1 ? '1 drawing' : `${drawings} drawings`;
+    td.appendChild(count);
+  }
+
+  // A folder can be dropped from the layout once nothing is assigned to it or stored in it
+  if (section.folder && !section.rows.length && !state.files.some(f => f.dir === section.folder)) {
+    const btn = document.createElement('button');
+    btn.className = 'link';
+    btn.textContent = 'Remove folder';
+    btn.addEventListener('click', async () => {
+      state.layout.folders = state.layout.folders.filter(f => f !== section.folder);
+      await saveLayout();
+      appendLog(`📁 Removed empty folder ${displayPath(section.folder)} from the layout.`);
+      rebuild();
+    });
+    td.appendChild(btn);
+  }
+  rowsEl.appendChild(tr);
+}
+
+function renderRow(row, newFiles, alt) {
+  const tr = document.createElement('tr');
+  if (row.status === 'none') tr.className = 'no-file';
+  if (row.status === 'ok') tr.className = 'named';
+  if (alt) tr.classList.add('alt');
+  if (row.rel && newFiles.has(row.rel)) tr.classList.add('new');
+  if (row.group) {
+    tr.classList.add('group');
+    if (row.first) tr.classList.add('group-first');
+    if (row.last) tr.classList.add('group-last');
+    if (!row.chosen) tr.classList.add('not-chosen');
+  }
+
+  const checkTd = cell(tr, '');
+  if (isSelectable(row)) {
+    const cb = makeCheckbox(isSelected(row), (e) => {
+      const range = e.shiftKey && state.anchorKey ? rangeBetween(state.anchorKey, row.key) : [row.key];
+      for (const key of range) setSelected(key, cb.checked);
+      state.anchorKey = row.key;
+      if (range.length > 1) render(new Set());
+      else updateButtons();
+    });
+    checkTd.appendChild(cb);
+  }
+
+  // Only label the drawing once per group
+  const showDrawing = !row.group || row.first;
+  cell(tr, showDrawing ? row.token : '', 'number');
+  cell(tr, showDrawing ? row.title : '');
+
+  const current = row.rel ? displayPath(row.rel) : 'No matching file';
+  const fileTd = cell(tr, row.group ? '' : current, row.rel ? 'file' : 'file missing');
+  if (row.group) {
+    const label = document.createElement('label');
+    label.className = 'choice';
+    const radio = document.createElement('input');
+    radio.type = 'radio';
+    radio.name = 'choice-' + row.token;
+    radio.checked = row.chosen;
+    radio.title = 'Use this file for ' + row.token;
+    radio.addEventListener('change', () => {
+      state.choices.set(row.token, row.rel);
+      rebuild();
+    });
+    label.append(radio, document.createTextNode(current));
+    fileTd.appendChild(label);
+  }
+
+  let target = row.targetRel ? displayPath(row.targetRel) : '';
+  if (row.status === 'ok') target = '(already named)';
+  else if (row.status === 'superseded') target = displayPath(relJoin(relJoin(row.dir, SUPERSEDED_DIR), supersededName(row.file)));
+  else if (row.status === 'skip' || row.status === 'none') target = '';
+  cell(tr, target);
+
+  const statusTd = cell(tr, '');
+  const badge = document.createElement('span');
+  badge.className = 'status ' + row.status;
+  badge.textContent = STATUS_LABELS[row.status];
+  const tip = row.reason || STATUS_TIPS[row.status];
+  if (tip) badge.title = tip;
+  statusTd.appendChild(badge);
+
+  rowsEl.appendChild(tr);
 }
 
 function render(newFiles) {
   rowsEl.textContent = '';
-  const hideEmpty = hideEmptyCheckbox.checked;
+  const showHeaders = state.layout.folders.length > 0;
+  state.displayKeys = [];
+  let dataRows = 0;
 
-  for (const row of state.rows) {
-    if (hideEmpty && row.status === 'none') continue;
-
-    const tr = document.createElement('tr');
-    if (row.status === 'none') tr.className = 'no-file';
-    if (row.status === 'ok') tr.className = 'named';
-    if (row.file && newFiles.has(row.file)) tr.classList.add('new');
-    if (row.group) {
-      tr.classList.add('group');
-      if (row.first) tr.classList.add('group-first');
-      if (row.last) tr.classList.add('group-last');
-      if (!row.chosen) tr.classList.add('not-chosen');
+  for (const section of sections(state.rows)) {
+    const visible = section.rows.filter(r => !(hideEmptyCheckbox.checked && r.status === 'none'));
+    // Once folders exist, every folder gets a header (even when empty); the unmatched list only when it has rows
+    const header = showHeaders && (!section.unmatched || visible.length);
+    if (header) renderSectionHeader(section, visible);
+    for (const row of visible) {
+      if (isSelectable(row)) state.displayKeys.push(row.key);
+      renderRow(row, newFiles, dataRows % 2 === 1);
+      dataRows++;
     }
-
-    const checkTd = cell(tr, '');
-    if (ACTION_STATUSES.includes(row.status)) {
-      const cb = document.createElement('input');
-      cb.type = 'checkbox';
-      cb.checked = !state.unchecked.has(row.file);
-      cb.addEventListener('click', (e) => {
-        const range = e.shiftKey && state.anchorFile ? rangeBetween(state.anchorFile, row.file) : [row.file];
-        for (const file of range) {
-          if (cb.checked) state.unchecked.delete(file);
-          else state.unchecked.add(file);
-        }
-        state.anchorFile = row.file;
-        if (range.length > 1) render(new Set());
-        else updateRenameButton();
-      });
-      checkTd.appendChild(cb);
-    }
-
-    // Only label the drawing once per group
-    const showDrawing = !row.group || row.first;
-    cell(tr, showDrawing ? row.token : '', 'number');
-    cell(tr, showDrawing ? row.title : '');
-
-    const fileTd = cell(tr, row.group ? '' : (row.file || 'No matching file'), row.file ? 'file' : 'file missing');
-    if (row.group) {
-      const label = document.createElement('label');
-      label.className = 'choice';
-      const radio = document.createElement('input');
-      radio.type = 'radio';
-      radio.name = 'choice-' + row.token;
-      radio.checked = row.chosen;
-      radio.title = 'Use this file for ' + row.token;
-      radio.addEventListener('change', () => {
-        state.choices.set(row.token, row.file);
-        rebuild();
-      });
-      label.append(radio, document.createTextNode(row.file));
-      fileTd.appendChild(label);
-    }
-
-    let target = row.newName;
-    if (row.status === 'ok') target = '(already named)';
-    else if (row.status === 'superseded') target = `${SUPERSEDED_DIR}\\${supersededName(row.file)}`;
-    else if (row.status === 'skip') target = '';
-    cell(tr, target);
-
-    const statusTd = cell(tr, '');
-    const badge = document.createElement('span');
-    badge.className = 'status ' + row.status;
-    badge.textContent = STATUS_LABELS[row.status];
-    const tip = row.reason || STATUS_TIPS[row.status];
-    if (tip) badge.title = tip;
-    statusTd.appendChild(badge);
-
-    rowsEl.appendChild(tr);
   }
 
   const count = s => state.rows.filter(r => r.status === s).length;
@@ -357,22 +602,23 @@ function render(newFiles) {
     `${count('ok')} already named`,
     `${count('unmatched')} unmatched`
   ];
+  if (count('move')) parts.push(`${count('move')} to move`);
   if (count('none')) parts.push(`${count('none')} missing`);
   if (count('supersede')) parts.push(`${count('supersede')} replacing older files`);
   if (count('conflict')) parts.push(`${count('conflict')} conflicts`);
   summaryEl.textContent = parts.join(' · ');
 
-  emptyEl.style.display = rowsEl.children.length ? 'none' : '';
-  if (!rowsEl.children.length) {
+  emptyEl.style.display = dataRows ? 'none' : '';
+  if (!dataRows) {
     emptyEl.textContent = state.registerPDF ? 'No drawings found in this folder yet.' : 'Choose a register PDF or the folder containing it.';
   }
-  updateRenameButton();
+  updateButtons();
 }
 
 // --------------------
 // Loading and live refresh
 // --------------------
-// When a file arrived in the folder. On Windows, Neutralino's getStats reports the creation
+// When a file arrived in its folder. On Windows, Neutralino's getStats reports the creation
 // time (as both createdAt and modifiedAt), which Windows sets when a file is copied or saved
 // into a folder and keeps through renames.
 function addedTime(stats) {
@@ -418,17 +664,17 @@ async function refresh() {
       appendLog(`📘 Loaded ${Object.keys(state.tokenMap).length} drawing entries from register.`);
     }
 
-    const files = await listFiles(state.targetDir);
+    const files = await scanFiles();
     const newFiles = new Set();
     if (state.knownFiles) {
       for (const f of files) {
-        if (!state.knownFiles.has(f)) {
-          newFiles.add(f);
-          if (f.toLowerCase().endsWith('.pdf')) appendLog(`➕ New file: ${f}`);
+        if (!state.knownFiles.has(f.rel)) {
+          newFiles.add(f.rel);
+          if (f.name.toLowerCase().endsWith('.pdf')) appendLog(`➕ New file: ${displayPath(f.rel)}`);
         }
       }
     }
-    state.knownFiles = new Set(files);
+    state.knownFiles = new Set(files.map(f => f.rel));
 
     state.files = files;
     state.match = matchFiles(state.tokenMap, files, baseName(state.registerPDF));
@@ -437,10 +683,11 @@ async function refresh() {
     for (const group of Object.values(state.match.byToken)) {
       if (group.length < 2) continue;
       for (const f of group) {
-        state.addedTimes[f] = addedTime(await getStatsOrNull(joinPath(state.targetDir, f)));
+        state.addedTimes[f.rel] = addedTime(await getStatsOrNull(absPath(f.rel)));
       }
     }
     rebuild(newFiles);
+    await syncWatchers();
   } catch (err) {
     appendLog('❌ Could not refresh folder: ' + (err.message || err));
   } finally {
@@ -455,30 +702,50 @@ async function refresh() {
 async function stopWatching() {
   clearInterval(state.pollTimer);
   state.pollTimer = null;
-  if (state.watcherId !== null) {
+  for (const id of state.watchers.values()) {
     try {
-      await Neutralino.filesystem.removeWatcher(state.watcherId);
+      await Neutralino.filesystem.removeWatcher(id);
     } catch (e) {
       // watcher already gone
     }
-    state.watcherId = null;
   }
+  state.watchers.clear();
   watchingEl.textContent = '';
 }
 
-async function startWatching(dir) {
-  try {
-    state.watcherId = await Neutralino.filesystem.createWatcher(dir);
-    watchingEl.textContent = '● Watching folder';
-  } catch (err) {
-    // Fall back to polling if the native watcher is unavailable
-    state.pollTimer = setInterval(refresh, 3000);
-    watchingEl.textContent = '● Checking folder every 3s';
+// Watch the top folder and every drawing folder that exists
+async function syncWatchers() {
+  if (state.pollTimer) return;
+  const wanted = [];
+  for (const dir of ['', ...state.layout.folders]) {
+    const stats = await getStatsOrNull(absPath(dir));
+    if (stats && stats.isDirectory) wanted.push(dir);
   }
+  for (const [dir, id] of state.watchers) {
+    if (wanted.includes(dir)) continue;
+    try {
+      await Neutralino.filesystem.removeWatcher(id);
+    } catch (e) {
+      // watcher already gone
+    }
+    state.watchers.delete(dir);
+  }
+  for (const dir of wanted) {
+    if (state.watchers.has(dir)) continue;
+    try {
+      state.watchers.set(dir, await Neutralino.filesystem.createWatcher(absPath(dir)));
+    } catch (err) {
+      // Fall back to polling if the native watcher is unavailable
+      state.pollTimer = setInterval(refresh, 3000);
+      watchingEl.textContent = '● Checking folders every 3s';
+      return;
+    }
+  }
+  watchingEl.textContent = state.watchers.size > 1 ? `● Watching ${state.watchers.size} folders` : '● Watching folder';
 }
 
 Neutralino.events.on('watchFile', (evt) => {
-  if (evt.detail && evt.detail.id === state.watcherId) scheduleRefresh();
+  if (evt.detail && [...state.watchers.values()].includes(evt.detail.id)) scheduleRefresh();
 });
 
 async function load() {
@@ -499,18 +766,94 @@ async function load() {
       files: [],
       match: null,
       addedTimes: {},
-      knownFiles: null
+      knownFiles: null,
+      anchorKey: null
     });
     state.unchecked.clear();
+    state.picked.clear();
     state.choices.clear();
-    state.anchorFile = null;
+    await loadLayout();
     appendLog(`📚 Parsing PDF register: ${registerPDF} ...`);
     summaryEl.textContent = 'Reading register...';
     await refresh();
-    await startWatching(state.targetDir);
   } catch (err) {
     appendLog('❌ ' + (err.message || err));
   }
+}
+
+// --------------------
+// Folder dialog
+// --------------------
+const folderDialog = document.getElementById('folder-dialog');
+const folderNameInput = document.getElementById('folder-name');
+const folderError = document.getElementById('folder-error');
+
+// Resolves to { action: 'ok', folder } | { action: 'remove' } | { action: 'cancel' }
+function askForFolder(count, current) {
+  document.getElementById('folder-dialog-title').textContent =
+    count === 1 ? 'Put 1 drawing in folder' : `Put ${count} drawings in folder`;
+  const list = document.getElementById('folder-list');
+  list.textContent = '';
+  for (const f of state.layout.folders) {
+    const opt = document.createElement('option');
+    opt.value = displayPath(f);
+    list.appendChild(opt);
+  }
+  folderNameInput.value = current ? displayPath(current) : '';
+  folderError.textContent = '';
+  folderDialog.showModal();
+  folderNameInput.select();
+
+  return new Promise(resolve => {
+    const form = folderDialog.querySelector('form');
+    const finish = (result) => {
+      form.removeEventListener('submit', onSubmit);
+      folderDialog.removeEventListener('cancel', onCancel);
+      folderDialog.close();
+      resolve(result);
+    };
+    const onSubmit = (e) => {
+      e.preventDefault();
+      const action = e.submitter ? e.submitter.value : 'ok'; // Enter in the text box means OK
+      if (action !== 'ok') return finish({ action });
+      try {
+        finish({ action: 'ok', folder: validateFolderName(folderNameInput.value) });
+      } catch (err) {
+        folderError.textContent = err.message;
+        folderNameInput.focus();
+      }
+    };
+    const onCancel = (e) => {
+      e.preventDefault();
+      finish({ action: 'cancel' });
+    };
+    form.addEventListener('submit', onSubmit);
+    folderDialog.addEventListener('cancel', onCancel);
+  });
+}
+
+async function makeFolder() {
+  const rows = selectedRows();
+  if (!rows.length) return;
+  const tokens = [...new Set(rows.map(r => r.token))];
+  const folders = new Set(tokens.map(folderOf));
+  const current = folders.size === 1 ? [...folders][0] : '';
+
+  const result = await askForFolder(tokens.length, current);
+  if (result.action === 'cancel') return;
+
+  if (result.action === 'remove') {
+    for (const token of tokens) delete state.layout.assignments[token];
+    appendLog(`📁 ${tokens.length} drawing(s) will go back to the top folder when you press RENAME.`);
+  } else {
+    const folder = state.layout.folders.find(f => f.toLowerCase() === result.folder.toLowerCase()) || result.folder;
+    if (!state.layout.folders.includes(folder)) state.layout.folders.push(folder);
+    for (const token of tokens) state.layout.assignments[token] = folder;
+    appendLog(`📁 ${tokens.length} drawing(s) assigned to ${displayPath(folder)}; files move there when you press RENAME.`);
+  }
+  await saveLayout();
+  // New folders may already hold files (e.g. layout edited by hand), so rescan
+  await refresh();
 }
 
 // --------------------
@@ -527,47 +870,47 @@ function supersededName(file) {
   return `${datePrefix()} ${file}`;
 }
 
-// Move a file into the SS (superseded) folder, prefixed with today's date,
+// Move a file into the SS (superseded) folder next to it, prefixed with today's date,
 // adding " (2)", " (3)"... if that name is taken there
 async function supersede(file) {
-  const ssDir = joinPath(state.targetDir, SUPERSEDED_DIR);
-  const ssStats = await getStatsOrNull(ssDir);
-  if (!ssStats) await Neutralino.filesystem.createDirectory(ssDir);
-  else if (!ssStats.isDirectory) throw new Error(`"${SUPERSEDED_DIR}" exists but is not a folder`);
+  const ssRel = relJoin(file.dir, SUPERSEDED_DIR);
+  await ensureDir(ssRel);
 
-  const stem = supersededName(file).replace(/\.pdf$/i, '');
-  const ext = file.slice(file.replace(/\.pdf$/i, '').length);
+  const stem = supersededName(file.name).replace(/\.pdf$/i, '');
+  const ext = file.name.slice(file.name.replace(/\.pdf$/i, '').length);
   let dest = stem + ext;
-  for (let n = 2; await getStatsOrNull(joinPath(ssDir, dest)); n++) {
+  for (let n = 2; await getStatsOrNull(absPath(relJoin(ssRel, dest))); n++) {
     dest = `${stem} (${n})${ext}`;
   }
-  await Neutralino.filesystem.move(joinPath(state.targetDir, file), joinPath(ssDir, dest));
-  appendLog(`📦 Moved ${file} → ${SUPERSEDED_DIR}\\${dest}`);
+  await Neutralino.filesystem.move(absPath(file.rel), absPath(relJoin(ssRel, dest)));
+  appendLog(`📦 Moved ${displayPath(file.rel)} → ${displayPath(relJoin(ssRel, dest))}`);
 }
 
 async function renameSelected() {
-  const toRename = selectedRows();
+  const toRename = renameRows();
   if (!toRename.length) return;
 
   state.busy = true;
-  updateRenameButton();
+  updateButtons();
   let renamed = 0;
   for (const row of toRename) {
     try {
-      if (row.status === 'supersede') await supersede(row.named);
-      await Neutralino.filesystem.move(joinPath(state.targetDir, row.file), joinPath(state.targetDir, row.newName));
-      appendLog(`✅ Renamed ${row.file} → ${row.newName}`);
+      if (row.folder) await ensureDir(row.folder);
+      if (row.status === 'supersede') await supersede(row.occupant);
+      await Neutralino.filesystem.move(absPath(row.rel), absPath(row.targetRel));
+      const verb = row.status === 'move' ? '📁 Moved' : '✅ Renamed';
+      appendLog(`${verb} ${displayPath(row.rel)} → ${displayPath(row.targetRel)}`);
       renamed++;
       // Keep using the renamed file, so leftover older copies don't try to replace it
-      if (row.group) state.choices.set(row.token, row.newName);
+      if (row.group) state.choices.set(row.token, row.targetRel);
+      // Renamed files shouldn't be highlighted as new arrivals
+      state.knownFiles.add(row.targetRel);
     } catch (err) {
-      appendLog(`❌ Failed to rename ${row.file}: ${err.message || err}`);
+      appendLog(`❌ Failed to rename ${displayPath(row.rel)}: ${err.message || err}`);
     }
   }
   appendLog(`Renamed ${renamed} of ${toRename.length} files.`);
   state.busy = false;
-  // Renamed files shouldn't be highlighted as new arrivals
-  for (const row of toRename) state.knownFiles.add(row.newName);
   await refresh();
 }
 
@@ -608,10 +951,8 @@ registerInput.addEventListener('keydown', (e) => {
 hideEmptyCheckbox.addEventListener('change', () => render(new Set()));
 
 checkAllCheckbox.addEventListener('change', () => {
-  for (const row of state.rows) {
-    if (!ACTION_STATUSES.includes(row.status)) continue;
-    if (checkAllCheckbox.checked) state.unchecked.delete(row.file);
-    else state.unchecked.add(row.file);
+  for (const row of visibleRows()) {
+    if (isSelectable(row)) setSelected(row.key, checkAllCheckbox.checked);
   }
   render(new Set());
 });
@@ -621,6 +962,7 @@ rowsEl.addEventListener('mousedown', (e) => {
   if (e.shiftKey) e.preventDefault();
 });
 
+folderBtn.addEventListener('click', makeFolder);
 renameBtn.addEventListener('click', renameSelected);
 
 document.getElementById('clear-log').addEventListener('click', () => {
