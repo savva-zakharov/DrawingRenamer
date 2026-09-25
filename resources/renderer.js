@@ -209,7 +209,7 @@ async function loadLayout() {
       assignments[token] = folder;
       if (!folders.includes(folder)) folders.push(folder);
     }
-    state.layout = { folders, assignments };
+    state.layout = { folders: withAncestors(folders), assignments };
     appendLog(`📁 Loaded folder layout from ${LAYOUT_FILE} (${folders.length} folders).`);
   } catch (err) {
     state.layoutBroken = true;
@@ -247,12 +247,59 @@ function folderOf(token) {
   return state.layout.assignments[token] || '';
 }
 
-// Returns the normalised folder path ("Plans/Level 1"), or throws with a reason
+// --------------------
+// Nested folders ("Plans/Houses/House 1")
+// --------------------
+function folderDepth(folder) {
+  return folder ? folder.split('/').length : 0;
+}
+
+function folderLeaf(folder) {
+  return folder.split('/').pop();
+}
+
+function isInside(folder, ancestor) {
+  return folder === ancestor || folder.startsWith(ancestor + '/');
+}
+
+// Tree order: parents before their subfolders, siblings alphabetically
+function compareFolders(a, b) {
+  const pa = a.split('/');
+  const pb = b.split('/');
+  for (let i = 0; i < Math.min(pa.length, pb.length); i++) {
+    const c = pa[i].localeCompare(pb[i]);
+    if (c) return c;
+  }
+  return pa.length - pb.length;
+}
+
+// Every folder plus all of its parent folders, in tree order
+function withAncestors(folders) {
+  const all = new Set();
+  for (const folder of folders) {
+    const parts = folder.split('/');
+    for (let i = 1; i <= parts.length; i++) all.add(parts.slice(0, i).join('/'));
+  }
+  return [...all].sort(compareFolders);
+}
+
+// Reuse the capitalisation of folder levels that already exist ("plans/new" -> "Plans/new")
+function matchExistingCase(folder) {
+  let result = '';
+  for (const part of folder.split('/')) {
+    const candidate = relJoin(result, part);
+    result = state.layout.folders.find(f => f.toLowerCase() === candidate.toLowerCase()) || candidate;
+  }
+  return result;
+}
+
+// Returns the normalised folder path ("Plans/Houses/House 1"), or throws with a reason.
+// Levels can be separated with \, / or > ("Plans > Houses > House 1").
 function validateFolderName(input) {
-  const parts = input.split(/[\\/]+/).map(p => p.trim()).filter(Boolean);
+  const parts = input.split(/[\\/>]+/).map(p => p.trim()).filter(Boolean);
   if (!parts.length) throw new Error('Enter a folder name.');
   for (const part of parts) {
-    if (/[:*?"<>|]/.test(part)) throw new Error('Folder names can\'t contain : * ? " < > |');
+    if (/[:*?"<|]/.test(part)) throw new Error('Folder names can\'t contain : * ? " < |');
     if (part === '.' || part === '..' || /[. ]$/.test(part)) throw new Error('Folder names can\'t end with a dot or space.');
     if (/^(con|prn|aux|nul|com\d|lpt\d)$/i.test(part)) throw new Error(`"${part}" is reserved by Windows.`);
     if (part.toLowerCase() === SUPERSEDED_DIR.toLowerCase()) throw new Error(`"${SUPERSEDED_DIR}" is used for superseded drawings.`);
@@ -449,10 +496,10 @@ function makeCheckbox(checked, onClick) {
   return cb;
 }
 
-// Rows split into the top folder, each drawing folder, then files matching nothing
+// Rows split into the top folder, each drawing folder (in tree order), then files matching nothing
 function sections(rows) {
   const top = { folder: '', rows: [] };
-  const byFolder = new Map(state.layout.folders.slice().sort((a, b) => a.localeCompare(b)).map(f => [f, { folder: f, rows: [] }]));
+  const byFolder = new Map(state.layout.folders.slice().sort(compareFolders).map(f => [f, { folder: f, rows: [] }]));
   const unmatched = { unmatched: true, rows: [] };
   for (const row of rows) {
     if (row.status === 'unmatched') unmatched.rows.push(row);
@@ -461,10 +508,12 @@ function sections(rows) {
   return [top, ...byFolder.values(), unmatched];
 }
 
-function renderSectionHeader(section, visible) {
+// `inside` is the visible rows of this folder and all of its subfolders
+function renderSectionHeader(section, visible, inside) {
   const tr = document.createElement('tr');
   tr.className = 'section';
-  const selectable = visible.filter(isSelectable);
+  const selectable = inside.filter(isSelectable);
+  const depth = folderDepth(section.folder);
 
   const checkTd = cell(tr, '');
   if (selectable.length) {
@@ -474,7 +523,7 @@ function renderSectionHeader(section, visible) {
       render(new Set());
     });
     cb.indeterminate = !allOn && selectable.some(isSelected);
-    cb.title = 'Select every drawing in this folder';
+    cb.title = 'Select every drawing in this folder and its subfolders';
     checkTd.appendChild(cb);
   }
 
@@ -483,20 +532,29 @@ function renderSectionHeader(section, visible) {
   const name = document.createElement('span');
   name.className = 'section-name';
   if (section.unmatched) name.textContent = 'Files not in the register';
-  else if (section.folder) name.textContent = '📁 ' + displayPath(section.folder);
-  else name.textContent = `📂 ${baseName(state.targetDir)} (top folder)`;
+  else if (section.folder) {
+    name.textContent = '📁 ' + folderLeaf(section.folder);
+    name.title = displayPath(section.folder);
+    td.style.paddingLeft = `${8 + (depth - 1) * 22}px`;
+  } else name.textContent = `📂 ${baseName(state.targetDir)} (top folder)`;
   td.appendChild(name);
 
   if (!section.unmatched) {
-    const drawings = new Set(section.rows.map(r => r.token)).size;
+    const plural = n => n === 1 ? '1 drawing' : `${n} drawings`;
+    const direct = new Set(section.rows.map(r => r.token)).size;
     const count = document.createElement('span');
     count.className = 'muted section-count';
-    count.textContent = drawings === 1 ? '1 drawing' : `${drawings} drawings`;
+    count.textContent = plural(direct);
+    if (section.folder) {
+      const total = new Set(state.rows.filter(r => r.token && r.folder && isInside(r.folder, section.folder)).map(r => r.token)).size;
+      if (total > direct) count.textContent += ` · ${plural(total)} including subfolders`;
+    }
     td.appendChild(count);
   }
 
-  // A folder can be dropped from the layout once nothing is assigned to it or stored in it
-  if (section.folder && !section.rows.length && !state.files.some(f => f.dir === section.folder)) {
+  // A folder can be dropped from the layout once nothing is assigned to it or stored in it, and it has no subfolders
+  if (section.folder && !section.rows.length && !state.files.some(f => f.dir === section.folder) &&
+      !state.layout.folders.some(f => f !== section.folder && isInside(f, section.folder))) {
     const btn = document.createElement('button');
     btn.className = 'link';
     btn.textContent = 'Remove folder';
@@ -511,7 +569,7 @@ function renderSectionHeader(section, visible) {
   rowsEl.appendChild(tr);
 }
 
-function renderRow(row, newFiles, alt) {
+function renderRow(row, newFiles, alt, depth) {
   const tr = document.createElement('tr');
   if (row.status === 'none') tr.className = 'no-file';
   if (row.status === 'ok') tr.className = 'named';
@@ -538,7 +596,8 @@ function renderRow(row, newFiles, alt) {
 
   // Only label the drawing once per group
   const showDrawing = !row.group || row.first;
-  cell(tr, showDrawing ? row.token : '', 'number');
+  const numberTd = cell(tr, showDrawing ? row.token : '', 'number');
+  if (depth) numberTd.style.paddingLeft = `${8 + depth * 22}px`;
   cell(tr, showDrawing ? row.title : '');
 
   const current = row.rel ? displayPath(row.rel) : 'No matching file';
@@ -582,14 +641,21 @@ function render(newFiles) {
   state.displayKeys = [];
   let dataRows = 0;
 
-  for (const section of sections(state.rows)) {
-    const visible = section.rows.filter(r => !(hideEmptyCheckbox.checked && r.status === 'none'));
+  const isVisible = r => !(hideEmptyCheckbox.checked && r.status === 'none');
+  const all = sections(state.rows);
+  for (const section of all) {
+    const visible = section.rows.filter(isVisible);
     // Once folders exist, every folder gets a header (even when empty); the unmatched list only when it has rows
     const header = showHeaders && (!section.unmatched || visible.length);
-    if (header) renderSectionHeader(section, visible);
+    if (header) {
+      const inside = section.folder
+        ? all.filter(s => !s.unmatched && s.folder && isInside(s.folder, section.folder)).flatMap(s => s.rows.filter(isVisible))
+        : visible;
+      renderSectionHeader(section, visible, inside);
+    }
     for (const row of visible) {
       if (isSelectable(row)) state.displayKeys.push(row.key);
-      renderRow(row, newFiles, dataRows % 2 === 1);
+      renderRow(row, newFiles, dataRows % 2 === 1, section.unmatched ? 0 : folderDepth(section.folder));
       dataRows++;
     }
   }
@@ -846,8 +912,8 @@ async function makeFolder() {
     for (const token of tokens) delete state.layout.assignments[token];
     appendLog(`📁 ${tokens.length} drawing(s) will go back to the top folder when you press RENAME.`);
   } else {
-    const folder = state.layout.folders.find(f => f.toLowerCase() === result.folder.toLowerCase()) || result.folder;
-    if (!state.layout.folders.includes(folder)) state.layout.folders.push(folder);
+    const folder = matchExistingCase(result.folder);
+    state.layout.folders = withAncestors([...state.layout.folders, folder]);
     for (const token of tokens) state.layout.assignments[token] = folder;
     appendLog(`📁 ${tokens.length} drawing(s) assigned to ${displayPath(folder)}; files move there when you press RENAME.`);
   }
