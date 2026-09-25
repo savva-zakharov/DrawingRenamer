@@ -22,6 +22,7 @@
   "modes": {
     "window": {
       "title": "Drawing Renamer",
+      "icon": "/resources/icons/appIcon.png",
       "width": 1150,
       "height": 780,
       "minWidth": 700,
