@@ -169,6 +169,8 @@ table.revision-table td{ padding:3px 6px; border-bottom:1px solid var(--row-line
 table.revision-table td.ok{ color:var(--ok) }
 table.revision-table td.warn{ color:var(--warn) }
 input.mark-input{ width:70px; padding:2px 5px; font:inherit }
+input.highlight-color{ width:34px; height:22px; padding:0 2px; border:1px solid var(--border); background:none; cursor:pointer }
+input.highlight-color:disabled{ opacity:.4; cursor:default }
 @media (max-width:760px){ .revision-grid{ grid-template-columns:1fr } }
 main{ flex:1; min-height:0; overflow:auto; border:1px solid var(--border); border-radius:4px }
 

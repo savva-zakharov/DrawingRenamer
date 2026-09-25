@@ -57,7 +57,9 @@ const state = {
   // detailEdits: drawing number => { scale, size } changes (either may be missing), keyed like titleEdits
   // projectEdits: register header field label => new value ("Heading" for the heading)
   // issueEdit: a staged issue { mode: 'new' | 'update', index, date: { day, month, year }, marks:
-  // { register number: mark }, header: { label: value } } (header: the Issue No / Date edits it made)
+  // { register number: mark }, header: { label: value }, highlight: 'RRGGBB' or null, register }
+  // (header: the Issue No / Date edits it made; highlight: the colour to highlight the issue column
+  // with; register: the file name of the register it's for)
   layout: { folders: [], assignments: {}, titleEdits: {}, detailEdits: {}, projectEdits: {}, issueEdit: null, numberEdits: {}, numberHistory: {}, newEntries: [], moves: [], foldersToRemove: [], separator: DEFAULT_SEPARATOR },
   drag: null,            // what's being dragged: { kind: 'drawing', token } or { kind: 'folder', folder }
   origOf: {},            // drawing number shown => number in the register (for renumbered drawings)
@@ -358,15 +360,30 @@ async function loadLayout() {
     for (const [token, title] of Object.entries(data.titleEdits || {})) {
       if (typeof title === 'string' && title.trim()) titleEdits[token] = title;
     }
+    // Header edits and a staged issue belong to one register: they're kept per register file
+    // (registerDrafts), so another register in the same folder neither sees nor loses them.
+    // Older files kept them at the top level, for the register last saved.
+    const drafts = {};
+    for (const [name, d] of Object.entries(data.registerDrafts || {})) if (d && typeof d === 'object') drafts[name] = d;
+    if ((data.projectEdits || data.issueEdit) && data.register && !drafts[data.register]) {
+      // A staged issue from before issues recorded their register can't be trusted to be this one's
+      drafts[data.register] = { projectEdits: data.projectEdits || {}, issueEdit: data.issueEdit && data.issueEdit.register ? data.issueEdit : null };
+    }
+    const current = baseName(state.registerPath);
+    const mine = drafts[current] || {};
+    delete drafts[current];
     const projectEdits = {};
-    for (const [label, value] of Object.entries(data.projectEdits || {})) {
+    for (const [label, value] of Object.entries(mine.projectEdits || {})) {
       if (typeof value === 'string') projectEdits[label] = value;
     }
-    const issue = data.issueEdit;
+    const issue = mine.issueEdit;
     const issueEdit = issue && ['new', 'update'].includes(issue.mode) && Number.isInteger(issue.index) && issue.date && typeof issue.marks === 'object'
       ? { mode: issue.mode, index: issue.index, date: { day: String(issue.date.day), month: String(issue.date.month), year: String(issue.date.year) },
-          marks: Object.fromEntries(Object.entries(issue.marks).filter(([, m]) => typeof m === 'string')), header: issue.header || {} }
+          marks: Object.fromEntries(Object.entries(issue.marks).filter(([, m]) => typeof m === 'string')), header: issue.header || {},
+          highlight: /^[0-9A-F]{6}$/i.test(issue.highlight || '') ? issue.highlight.toUpperCase() : null, register: current }
       : null;
+    const others = Object.keys(drafts).filter(name => Object.keys(drafts[name].projectEdits || {}).length || drafts[name].issueEdit);
+    if (others.length) appendLog(`ℹ️ ${others.join(', ')} ${others.length === 1 ? 'has' : 'have'} unsaved project detail changes or a staged issue; they're kept for when ${others.length === 1 ? 'it is' : 'they are'} loaded.`);
     const detailEdits = {};
     for (const [token, edit] of Object.entries(data.detailEdits || {})) {
       const kept = {};
@@ -393,12 +410,22 @@ async function loadLayout() {
       .map(m => ({ token: m.token, after: m.after }));
     const foldersToRemove = (Array.isArray(data.foldersToRemove) ? data.foldersToRemove : []).filter(f => typeof f === 'string' && folders.includes(f));
     const separator = typeof data.separator === 'string' && !separatorProblem(data.separator) ? data.separator : DEFAULT_SEPARATOR;
-    state.layout = { folders: withAncestors(folders), assignments, titleEdits, detailEdits, projectEdits, issueEdit, numberEdits, numberHistory, newEntries, moves, foldersToRemove, separator };
+    state.layout = { folders: withAncestors(folders), assignments, titleEdits, detailEdits, projectEdits, issueEdit, otherDrafts: drafts, numberEdits, numberHistory, newEntries, moves, foldersToRemove, separator };
     appendLog(`📁 Loaded folder layout from ${LAYOUT_FILE} (${folders.length} folders).`);
   } catch (err) {
     state.layoutBroken = true;
     appendLog(`⚠️ Could not read ${LAYOUT_FILE}; folder changes won't be saved until it's fixed: ${err.message || err}`);
   }
+}
+
+// The layout file's registerDrafts: this register's drafts beside the other registers' (empty ones left out)
+function registerDrafts() {
+  const all = { ...(state.layout.otherDrafts || {}) };
+  if (state.registerPath) all[baseName(state.registerPath)] = { projectEdits: state.layout.projectEdits, issueEdit: state.layout.issueEdit };
+  for (const [name, d] of Object.entries(all)) {
+    if (!Object.keys(d.projectEdits || {}).length && !d.issueEdit) delete all[name];
+  }
+  return all;
 }
 
 async function saveLayout() {
@@ -423,8 +450,8 @@ async function saveLayout() {
     // Changes made in the app that haven't been saved into the Word register yet
     titleEdits: state.layout.titleEdits,
     detailEdits: state.layout.detailEdits,
-    projectEdits: state.layout.projectEdits,
-    issueEdit: state.layout.issueEdit,
+    // Per register file: project detail changes and a staged issue
+    registerDrafts: registerDrafts(),
     numberEdits: state.layout.numberEdits,
     numberHistory: state.layout.numberHistory,
     moves: state.layout.moves,
@@ -1824,12 +1851,14 @@ function issueTarget(mode) {
 
 function describeIssue(issue) {
   const date = [issue.date.day, issue.date.month, issue.date.year].join('.');
-  return issue.mode === 'new' ? `New issue in column ${issue.index + 1}, dated ${date}` : `Issue in column ${issue.index + 1} dated ${date}`;
+  const text = issue.mode === 'new' ? `New issue in column ${issue.index + 1}, dated ${date}` : `Issue in column ${issue.index + 1} dated ${date}`;
+  return text + (issue.highlight ? `, highlighted #${issue.highlight}` : '');
 }
 
 function pendingIssue() {
   const issue = state.layout.issueEdit;
-  return issue && canEditRegister() && state.registerIssues && state.registerIssues.columns[issue.index] ? issue : null;
+  return issue && (!issue.register || issue.register === baseName(state.registerPath)) &&
+    canEditRegister() && state.registerIssues && state.registerIssues.columns[issue.index] ? issue : null;
 }
 
 // A drawing's marks before column `index`: { prev, prevDate } (the last one), and the mark already in it
@@ -1880,10 +1909,14 @@ function issueRows() {
 function revisionChoices() {
   const issueNo = headerField('issueNo');
   const date = headerField('date');
-  if (!state.revisionUi) state.revisionUi = { mode: 'new', scheme: null, dateFormat: null, marks: {} };
+  if (!state.revisionUi) state.revisionUi = { mode: 'new', scheme: null, dateFormat: null, highlight: null, color: null, marks: {} };
   const ui = state.revisionUi;
   if (!ui.scheme) ui.scheme = (issueNo && RegisterCore.detectNumbering(issueNo.value)) || 'number';
   if (!ui.dateFormat) ui.dateFormat = (date && RegisterCore.detectDateFormat(date.value)) || 'dd.mm.yyyy';
+  // Highlight the issue column when the register already highlights its latest one, in that colour
+  const inUse = state.registerIssues && state.registerIssues.highlight;
+  if (ui.highlight === null) ui.highlight = !!inUse;
+  if (!ui.color) ui.color = '#' + (inUse || 'FFFF00');
   return ui;
 }
 
@@ -1976,6 +2009,27 @@ function renderRevisionData(force = false) {
     dd.append(sel, el('span', `${dateField.value || '(blank)'} → ${RegisterCore.formatDate(today, ui.dateFormat)}`, 'muted'));
     dl.append(el('dt', 'Date format'), dd);
   }
+  {
+    const inUse = info.highlight;
+    const dd = el('dd');
+    const lbl = el('label', undefined, 'option');
+    const box = el('input');
+    box.type = 'checkbox';
+    box.checked = ui.highlight;
+    box.disabled = !editable;
+    box.addEventListener('change', () => { ui.highlight = box.checked; renderRevisionData(true); });
+    lbl.append(box, ' Highlight the issue column');
+    const picker = el('input', undefined, 'highlight-color');
+    picker.type = 'color';
+    picker.value = ui.color.toLowerCase();
+    picker.disabled = !editable || !ui.highlight;
+    picker.title = 'Highlight colour';
+    picker.addEventListener('change', () => { ui.color = picker.value; renderRevisionData(true); });
+    dd.append(lbl, picker, el('span', inUse
+      ? `in use: #${inUse}${target && target.mode === 'new' ? ', moves from the last issue' : ''}`
+      : 'not used in this register', 'muted'));
+    dl.append(el('dt', 'Highlight'), dd);
+  }
   if (!issueNo || !dateField) left.appendChild(el('p', `The register has no ${[!issueNo && 'Issue No', !dateField && 'Date'].filter(Boolean).join(' or ')} field at the top, so that isn't updated.`, 'muted'));
   left.appendChild(dl);
 
@@ -2065,7 +2119,9 @@ async function stageIssue(target, rows) {
   state.layout.issueEdit = {
     mode: target.mode, index: target.index,
     date: { day: two(today.d), month: two(today.m), year: two(today.y % 100) },
-    marks, header
+    marks, header,
+    register: baseName(state.registerPath),
+    highlight: ui.highlight ? ui.color.replace('#', '').toUpperCase() : null
   };
   const problems = rows.filter(r => markProblems(r, marks[r.origToken] || '', target.index).length).map(r => r.token);
   appendLog(`📅 Staged: ${describeIssue(state.layout.issueEdit)} with ${Object.keys(marks).length} drawing(s)` +
@@ -2098,7 +2154,8 @@ function issueReadBackProblem(issue, info, newNumber, notFound) {
   const wrong = Object.entries(issue.marks)
     .filter(([token, mark]) => !notFound.includes(token) && ((info.marks[newNumber(token)] || [])[issue.index] || '') !== mark)
     .map(([token]) => token);
-  return wrong.length ? `the marks didn't read back as expected for ${wrong.join(', ')}` : '';
+  if (wrong.length) return `the marks didn't read back as expected for ${wrong.join(', ')}`;
+  return issue.highlight && info.highlight !== issue.highlight ? `the highlight didn't read back as #${issue.highlight}` : '';
 }
 
 function logIssueSaved(issue, applied, notFound, how) {
@@ -2451,7 +2508,8 @@ async function load() {
       addedTimes: {},
       knownFiles: null,
       anchorKey: null,
-      editingToken: null
+      editingToken: null,
+      revisionUi: null
     });
     state.unchecked.clear();
     state.picked.clear();
@@ -3090,7 +3148,7 @@ async function saveToExcel() {
       if (!got || got.value !== (result.applied.project[f.label] ? result.applied.project[f.label].to : f.value)) wrong.push(f.label);
     }
     if (issue) {
-      const problem = issueReadBackProblem(issue, RegisterCore.readXlsxIssues({ ...parts, sheets: { ...parts.sheets, [result.path]: result.xml } }), newNumber,
+      const problem = issueReadBackProblem(issue, RegisterCore.readXlsxIssues({ ...parts, styles: result.styles, sheets: { ...parts.sheets, [result.path]: result.xml } }), newNumber,
         Object.keys(issue.marks).filter(t => result.notFound.includes(t)));
       if (problem) throw new Error(`${problem}; nothing was saved.`);
     }
@@ -3100,6 +3158,7 @@ async function saveToExcel() {
 
     await backupToSS(xlsx);
     zip.file(result.path, result.xml);
+    if (result.styles !== parts.styles) zip.file('xl/styles.xml', result.styles);
     const data = await zip.generateAsync({ type: 'arraybuffer', compression: 'DEFLATE', compressionOptions: { level: 6 } });
     await Neutralino.filesystem.writeBinaryFile(xlsx, data);
 

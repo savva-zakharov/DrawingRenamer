@@ -363,6 +363,125 @@
       : { titles: {}, details: {}, places: {}, sheet: null, path: null, issue: null };
   }
 
+  // --------------------
+  // Excel cell fills (the highlighted issue column)
+  // --------------------
+
+  // styles.xml -> { xml, fills: [fill xml], xfs: [xf xml] } with helpers to read and add styles
+  function styleBook(stylesXml) {
+    const section = tag => {
+      const m = new RegExp('<' + tag + '\\b[^>]*>([\\s\\S]*?)</' + tag + '>').exec(stylesXml || '');
+      return m ? m[1] : '';
+    };
+    const fills = findElements(section('fills'), 'fill').map(f => f.xml);
+    const xfs = findElements(section('cellXfs'), 'xf').map(f => f.xml);
+    const added = { fills: [], xfs: [] };
+    const book = {
+      fills, xfs,
+      fillOf: styleIndex => {
+        const xf = xfs[styleIndex || 0];
+        return xf ? parseInt((/\bfillId="(\d+)"/.exec(xf) || [0, 0])[1], 10) : 0;
+      },
+      // 'RRGGBB' of a solid fill, or null (none, pattern or theme colour)
+      solidColor: fillId => {
+        const f = fills[fillId] || '';
+        if (!/patternType="solid"/.test(f)) return null;
+        const rgb = (/<fgColor\b[^>]*\brgb="([0-9A-Fa-f]{6,8})"/.exec(f) || [])[1];
+        return rgb ? rgb.slice(-6).toUpperCase() : null;
+      },
+      // A fill with this solid colour (reused when the workbook has one)
+      solidFill: color => {
+        const want = color.toUpperCase();
+        const existing = fills.findIndex(f => /patternType="solid"/.test(f) && book.solidColor(fills.indexOf(f)) === want &&
+          !/<fgColor\b[^>]*\b(theme|indexed)=/.test(f));
+        if (existing >= 0) return existing;
+        fills.push(`<fill><patternFill patternType="solid"><fgColor rgb="FF${want}"/><bgColor indexed="64"/></patternFill></fill>`);
+        added.fills.push(fills.length - 1);
+        return fills.length - 1;
+      },
+      // The style `styleIndex` with another fill (borders, font, alignment and number format kept)
+      withFill: (styleIndex, fillId) => {
+        const base = xfs[styleIndex || 0] || xfs[0];
+        if (book.fillOf(styleIndex) === fillId) return styleIndex || 0;
+        let xf = base.replace(/\bfillId="\d+"/, `fillId="${fillId}"`);
+        if (!/\bfillId=/.test(xf)) xf = xf.replace(/^<xf\b/, `<xf fillId="${fillId}"`);
+        if (/\bapplyFill="0"/.test(xf)) xf = xf.replace(/\bapplyFill="0"/, 'applyFill="1"');
+        else if (!/\bapplyFill=/.test(xf)) xf = xf.replace(/^<xf\b/, '<xf applyFill="1"');
+        const same = xfs.indexOf(xf);
+        if (same >= 0) return same;
+        xfs.push(xf);
+        added.xfs.push(xfs.length - 1);
+        return xfs.length - 1;
+      },
+      // styles.xml with the added fills and styles
+      toXml: () => {
+        let out = stylesXml;
+        const append = (tag, child, items) => {
+          out = out.replace(new RegExp('(<' + tag + '\\b[^>]*?)(?:\\s+count="\\d+")?(\\s*>)([\\s\\S]*?)(</' + tag + '>)'),
+            (m, open, gt, inner, close) => `${open} count="${items.length}"${gt}${inner}${items.slice(items.length - added[child].length).join('')}${close}`);
+        };
+        if (added.fills.length) append('fills', 'fills', fills);
+        if (added.xfs.length) append('cellXfs', 'xfs', xfs);
+        return out;
+      }
+    };
+    return book;
+  }
+
+  // Style index of every cell in a sheet: { 'T8': 99 }
+  function cellStyles(sheetXml) {
+    const out = {};
+    for (const m of sheetXml.matchAll(/<c\s([^>]*?)\/?>/g)) {
+      const ref = (/\br="([A-Z]+\d+)"/.exec(m[1]) || [])[1];
+      if (ref) out[ref] = parseInt((/\bs="(\d+)"/.exec(m[1]) || [0, 0])[1], 10);
+    }
+    return out;
+  }
+
+  // Change the style of cells: styles { row: { col: styleIndex } }; missing cells are added empty
+  function setCellStyles(sheetXml, styles) {
+    let xml = sheetXml;
+    const rows = findElements(xml, 'row').filter(r => styles[(/\br="(\d+)"/.exec(r.xml) || [])[1]]);
+    for (const r of rows.reverse()) {
+      const rowNum = (/\br="(\d+)"/.exec(r.xml) || [])[1];
+      const { open, inner, close } = splitElement(r.xml);
+      const cells = childElements(inner);
+      for (const [colText, style] of Object.entries(styles[rowNum])) {
+        const col = Number(colText);
+        const ref = columnName(col) + rowNum;
+        const i = cells.findIndex(c => (/\br="([A-Z]+\d+)"/.exec(c) || [])[1] === ref);
+        if (i >= 0) {
+          cells[i] = cells[i].replace(/^<c\b[^>]*?(?=\/?>)/, o => (/\bs="\d+"/.test(o) ? o.replace(/\bs="\d+"/, `s="${style}"`) : `${o} s="${style}"`));
+        } else {
+          const at = cells.findIndex(c => columnIndex((/\br="([A-Z]+)\d+"/.exec(c) || [])[1] || 'A') > col);
+          cells.splice(at < 0 ? cells.length : at, 0, `<c r="${ref}" s="${style}"/>`);
+        }
+      }
+      xml = xml.slice(0, r.start) + (open.endsWith('/>') ? open.replace(/\/>$/, '>') + cells.join('') + '</row>' : open + cells.join('') + close) + xml.slice(r.end);
+    }
+    return xml;
+  }
+
+  // The style of the issue column two over from `col` in a row (issue columns alternate two
+  // shades, so it has the column's usual shading): the one before, or after at the first columns
+  function neighbourStyle(styles, row, col, firstCol) {
+    return [col - 2 >= firstCol ? col - 2 : null, col + 2].filter(c => c !== null)
+      .map(c => styles[columnName(c) + row]).find(v => v !== undefined);
+  }
+
+  // Cells of an issue column that are highlighted: a solid fill unlike its neighbour's
+  function highlightedCells(styles, book, col, rows, firstCol) {
+    const found = [];
+    for (const row of rows) {
+      const own = book.fillOf(styles[columnName(col) + row]);
+      const color = book.solidColor(own);
+      if (!color) continue;
+      const neighbour = neighbourStyle(styles, row, col, firstCol);
+      if (neighbour === undefined || book.fillOf(neighbour) !== own) found.push({ row, color });
+    }
+    return found;
+  }
+
   function columnName(index) {
     let name = '';
     for (let n = index; n > 0; n = Math.floor((n - 1) / 26)) name = String.fromCharCode(65 + ((n - 1) % 26)) + name;
@@ -407,7 +526,9 @@
   // per cell is split the same way again, so a new number must have the same number of fields.
   // edits.project: { label: value } changes the project fields above the drawings (labels as
   // readXlsxProject gives them). edits.issue: { index, date: { day, month, year } or null, marks:
-  // { code: mark } } dates an issue column (in every date block) and/or sets drawings' marks in it. Returns { path, sheet, xml (of that sheet), applied: { titles,
+  // { code: mark }, highlight: 'RRGGBB' or null } dates an issue column (in every date block) and/or
+  // sets drawings' marks in it, and highlights it (moving the highlight from the previous column).
+  // styles (in the result) is styles.xml, changed when a highlight added styles. Returns { path, sheet, xml (of that sheet), applied: { titles,
   // numbers, scales, sizes, project } ({ code or label: { from, to } }), notFound: [code or label],
   // errors: [message] }.
   function editXlsxRegister(parts, edits) {
@@ -524,12 +645,40 @@
     }
 
     let xml = parts.sheets[reg.path];
+    let stylesXml = parts.styles;
+    // Highlight the issue column: its dates and marked cells; the previously highlighted column
+    // (the latest one before) goes back to its usual shading
+    if (applied.issue && edits.issue.highlight) {
+      const issues = readXlsxIssues(parts);
+      const col = issues.columns[edits.issue.index].col;
+      const book = styleBook(stylesXml);
+      const styles = cellStyles(xml);
+      const fill = book.solidFill(edits.issue.highlight);
+      const byStyleRow = {};
+      const setStyle = (row, c, style) => ((byStyleRow[row] = byStyleRow[row] || {})[c] = style);
+      const dateRows = issues.blocks.flatMap(b => [b.day, b.month, b.year]);
+      const allRows = dateRows.concat(Object.values(reg.places).map(pl => pl.row));
+      const old = issues.latest >= 0 && issues.latest !== edits.issue.index ? issues.columns[issues.latest].col : null;
+      if (old !== null) {
+        for (const { row } of highlightedCells(styles, book, old, allRows, issues.columns[0].col)) {
+          const neighbour = neighbourStyle(styles, row, old, issues.columns[0].col);
+          setStyle(row, old, book.withFill(styles[columnName(old) + row], book.fillOf(neighbour)));
+        }
+      }
+      const markedRows = Object.entries(reg.places)
+        .filter(([code]) => ((applied.issue.marks[code] || {}).to || (issues.marks[code] || [])[edits.issue.index]))
+        .map(([, pl]) => pl.row);
+      for (const row of dateRows.concat(markedRows)) setStyle(row, col, book.withFill(styles[columnName(col) + row], fill));
+      xml = setCellStyles(xml, byStyleRow);
+      stylesXml = book.toXml();
+      applied.issue.highlight = edits.issue.highlight;
+    }
     const rowNumOf = r => parseInt((/\br="(\d+)"/.exec(r.xml) || [])[1], 10);
     const rows = findElements(xml, 'row').filter(r => byRow[rowNumOf(r)]);
     for (const r of rows.reverse()) {
       xml = xml.slice(0, r.start) + setRowCells(r.xml, rowNumOf(r), byRow[rowNumOf(r)], zeroPad) + xml.slice(r.end);
     }
-    return { path: reg.path, sheet: reg.sheet, xml, applied, notFound, errors };
+    return { path: reg.path, sheet: reg.sheet, xml, styles: stylesXml, applied, notFound, errors };
   }
 
   // How many cells a drawing's code is split over in an Excel register (1 when it's one cell)
@@ -1291,17 +1440,69 @@
         if (at >= 0 && !found[key]) found[key] = { tr: trIndex, from: at + 1, values: texts.slice(at + 1) };
       }
     });
-    if (!found.day || !found.month || !found.year) return { columns: [], latest: -1, marks: {}, rows: null };
+    if (!found.day || !found.month || !found.year) return { columns: [], latest: -1, marks: {}, rows: null, highlight: null };
     const { columns, latest } = issueColumns(found.day.values, found.month.values, found.year.values);
     const marks = {};
-    for (const { token, cells } of registerRows(xml)) {
+    const drawingRows = registerRows(xml);
+    for (const { token, cells } of drawingRows) {
       if (!(token in marks)) marks[token] = columns.map((c, i) => (cells[4 + i] ? cellText(cells[4 + i].xml) : ''));
     }
-    return { columns, latest, marks, rows: { day: found.day, month: found.month, year: found.year } };
+    // Whether the latest issue column is highlighted (shaded), and in what colour
+    let highlight = null;
+    if (latest >= 0) {
+      const trs = findElements(xml, 'w:tr');
+      const rows = ['day', 'month', 'year'].map(k => found[k]).map(r => ({ tcs: findElements(xml, 'w:tc', trs[r.tr].start, trs[r.tr].end), at: r.from + latest, first: r.from }))
+        .concat(drawingRows.map(r => ({ tcs: r.cells, at: 4 + latest, first: 4 })));
+      const shaded = docxHighlighted(rows).map(({ tcs, at }) => cellShading(tcs[at].xml));
+      if (shaded.length) highlight = mostCommon(shaded);
+    }
+    return { columns, latest, marks, rows: { day: found.day, month: found.month, year: found.year }, highlight };
+  }
+
+  // A table cell's shading colour ('RRGGBB'), or null
+  function cellShading(cellXml) {
+    const shd = /<w:tcPr\b[\s\S]*?<w:shd\b([^>]*)\/?>/.exec(cellXml);
+    const fill = shd && (/\bw:fill="([0-9A-Fa-f]{6})"/.exec(shd[1]) || [])[1];
+    return fill ? fill.toUpperCase() : null;
+  }
+
+  // The cell with its shading set to `color` ('RRGGBB') or removed (null)
+  function setCellShading(cellXml, color) {
+    const shd = color ? `<w:shd w:val="clear" w:color="auto" w:fill="${color}"/>` : '';
+    // The cell's own properties come before its first paragraph (a nested table's don't)
+    const bodyAt = cellXml.search(/<w:(p|tbl)\b/);
+    const head = bodyAt < 0 ? cellXml : cellXml.slice(0, bodyAt);
+    if (/<w:tcPr\b[^>]*\/>/.test(head)) return cellXml.replace(/<w:tcPr\b([^>]*)\/>/, `<w:tcPr$1>${shd}</w:tcPr>`);
+    if (!/<w:tcPr\b/.test(head)) return color ? cellXml.replace(/^<w:tc\b[^>]*>/, open => `${open}<w:tcPr>${shd}</w:tcPr>`) : cellXml;
+    return cellXml.replace(/<w:tcPr\b([^>]*)>([\s\S]*?)<\/w:tcPr>/, (m, attrs, inner) => {
+      const without = inner.replace(/<w:shd\b[^>]*\/>/, '');
+      // w:shd goes after the cell's width, borders and merge settings and before its margins and alignment
+      const after = /<w:(noWrap|tcMar|textDirection|tcFitText|vAlign|hideMark|headers|cellIns|cellDel|cellMerge|tcPrChange)\b/.exec(without);
+      const at = after ? after.index : without.length;
+      return `<w:tcPr${attrs}>${without.slice(0, at)}${shd}${without.slice(at)}</w:tcPr>`;
+    });
+  }
+
+  // The issue cell two over from `at` (see neighbourStyle): rows alternate two shades
+  function docxNeighbour({ tcs, at, first }) {
+    return (at - 2 >= first ? tcs[at - 2] : null) || tcs[at + 2];
+  }
+
+  // Cells of an issue column that are highlighted: shaded unlike their neighbour. rows: [{ tcs, at,
+  // first }] with `at` the column's cell index in that row and `first` the row's first issue cell.
+  function docxHighlighted(rows) {
+    return rows.filter(r => {
+      const own = r.tcs[r.at] && cellShading(r.tcs[r.at].xml);
+      if (!own) return false;
+      const neighbour = docxNeighbour(r);
+      return !neighbour || cellShading(neighbour.xml) !== own;
+    });
   }
 
   // Date an issue column and/or set drawings' marks in it: issue { index, date: { day, month, year }
-  // or null, marks: { token: mark } }. opts as editDocxTitles.
+  // or null, marks: { token: mark }, highlight: 'RRGGBB' or null }. With a highlight, the column's
+  // dates and marked cells are shaded, and the previously highlighted (latest) column's shading
+  // goes back to the one beside it. opts as editDocxTitles.
   // Returns { xml, applied: { index, date: { from, to } | null, marks: { token: { from, to } } }, notFound: [token] }
   function editDocxIssue(xml, issue, opts = {}) {
     const rev = makeRevisions(xml, opts.author || 'Drawing Renamer', opts.date || new Date().toISOString().replace(/\.\d+Z$/, 'Z'));
@@ -1340,7 +1541,38 @@
     for (const token of Object.keys(issue.marks || {})) if (!done.has(token)) notFound.push(token);
     let out = xml;
     for (const c of changes.sort((a, b) => b.start - a.start)) out = out.slice(0, c.start) + c.xml + out.slice(c.end);
+    if (issue.highlight) {
+      out = shadeIssueColumn(out, issue, info);
+      applied.highlight = issue.highlight;
+    }
     return { xml: out, applied, notFound };
+  }
+
+  // Shading for a highlighted issue column (see editDocxIssue); formatting isn't tracked
+  function shadeIssueColumn(xml, issue, before) {
+    const info = readDocxIssues(xml);
+    const trs = findElements(xml, 'w:tr');
+    const cellsOf = tr => findElements(xml, 'w:tc', tr.start, tr.end);
+    const dateRows = ['day', 'month', 'year'].map(k => info.rows[k]).map(r => ({ tr: trs[r.tr], from: r.from }));
+    const drawingRows = registerRows(xml);
+    const column = (index, onlyMarked) => [
+      ...dateRows.map(r => ({ tr: r.tr, tcs: cellsOf(r.tr), at: r.from + index, first: r.from })),
+      ...drawingRows.filter(r => !onlyMarked || (info.marks[r.token] || [])[index]).map(r => ({ tr: r.row, tcs: r.cells, at: 4 + index, first: 4 }))
+    ];
+    const changes = [];
+    const old = before.latest >= 0 && before.latest !== issue.index ? before.latest : -1;
+    if (old >= 0) {
+      for (const r of docxHighlighted(column(old, false))) {
+        const neighbour = docxNeighbour(r);
+        changes.push({ cell: r.tcs[r.at], color: neighbour ? cellShading(neighbour.xml) : null });
+      }
+    }
+    for (const { tcs, at } of column(issue.index, true)) if (tcs[at]) changes.push({ cell: tcs[at], color: issue.highlight.toUpperCase() });
+    let out = xml;
+    for (const c of changes.sort((a, b) => b.cell.start - a.cell.start)) {
+      out = out.slice(0, c.cell.start) + setCellShading(c.cell.xml, c.color) + out.slice(c.cell.end);
+    }
+    return out;
   }
 
   // The same for the current register sheet of an Excel register: columns from the first
@@ -1348,7 +1580,7 @@
   // DAY row has (used or not); blocks: [{ day, month, year }] row numbers of every repeat of it.
   function readXlsxIssues(parts) {
     const reg = readXlsxRegister(parts);
-    const empty = { columns: [], latest: -1, marks: {}, blocks: [] };
+    const empty = { columns: [], latest: -1, marks: {}, blocks: [], highlight: null };
     if (!reg.path) return empty;
     const sheetXml = parts.sheets[reg.path];
     const sharedStrings = parts.sharedStrings ? findElements(parts.sharedStrings, 'si').map(si => stringItemText(si.xml)) : [];
@@ -1384,7 +1616,21 @@
     columns.forEach((column, i) => { column.col = cols[i]; });
     const marks = {};
     for (const [code, place] of Object.entries(reg.places)) marks[code] = cols.map(c => at(place.row, c));
-    return { columns, latest, marks, blocks };
+    // Whether the latest issue column is highlighted, and in what colour
+    let highlight = null;
+    if (latest >= 0) {
+      const book = styleBook(parts.styles);
+      const rowsOf = blocks.flatMap(b => [b.day, b.month, b.year]).concat(Object.values(reg.places).map(pl => pl.row));
+      const found = highlightedCells(cellStyles(sheetXml), book, cols[latest], rowsOf, cols[0]);
+      if (found.length) highlight = mostCommon(found.map(f => f.color));
+    }
+    return { columns, latest, marks, blocks, highlight };
+  }
+
+  function mostCommon(values) {
+    const counts = {};
+    for (const v of values) counts[v] = (counts[v] || 0) + 1;
+    return Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0];
   }
 
   // Numbering of the register's issue number: 'number' (1, 2, 3), 'ordinal' (1st, 2nd, 3rd) or
