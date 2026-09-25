@@ -146,6 +146,26 @@ input.project-input.edited{ color:var(--edit-fg); border-color:var(--edit-badge-
 .project-values .ok{ color:var(--ok) }
 .project-values .warn{ color:var(--warn) }
 @media (max-width:760px){ .project-grid{ grid-template-columns:1fr } }
+
+/* Revisions tab */
+#revision-data{ max-height:300px; overflow:auto }
+.revision-grid{ display:grid; grid-template-columns:minmax(300px, 1fr) minmax(360px, 1.5fr); gap:8px 32px }
+.revision-grid h4{ margin:0 0 6px; font-size:13px }
+.revision-grid p{ margin:0 0 6px }
+.revision-modes{ display:flex; flex-direction:column; gap:3px; margin-bottom:8px }
+.revision-modes label.option{ display:flex; align-items:center; gap:4px }
+.revision-grid dl{ display:grid; grid-template-columns:max-content 1fr; gap:4px 12px; margin:0 0 8px }
+.revision-grid dt{ color:var(--muted); align-self:center }
+.revision-grid dd{ margin:0; display:flex; align-items:center; gap:8px }
+.revision-grid select{ padding:3px 4px; font:inherit }
+.revision-actions{ display:flex; align-items:center; gap:8px; flex-wrap:wrap }
+table.revision-table{ width:100% }
+table.revision-table th{ position:static; text-align:left; font-weight:600; padding:3px 6px; border-bottom:1px solid var(--border); background:none }
+table.revision-table td{ padding:3px 6px; border-bottom:1px solid var(--row-line) }
+table.revision-table td.ok{ color:var(--ok) }
+table.revision-table td.warn{ color:var(--warn) }
+input.mark-input{ width:70px; padding:2px 5px; font:inherit }
+@media (max-width:760px){ .revision-grid{ grid-template-columns:1fr } }
 main{ flex:1; min-height:0; overflow:auto; border:1px solid var(--border); border-radius:4px }
 
 h2{ margin:0 0 8px }

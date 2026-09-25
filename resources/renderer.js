@@ -20,6 +20,7 @@ const titlesFromFilesBtn = document.getElementById('titles-from-files');
 const titlesFromRegisterBtn = document.getElementById('titles-from-register');
 const detailsFromFilesBtn = document.getElementById('details-from-files');
 const projectDataEl = document.getElementById('project-data');
+const revisionDataEl = document.getElementById('revision-data');
 const tabButtons = [...document.querySelectorAll('nav.tabs [role=tab]')];
 
 PDFJS.workerSrc = 'js/pdfjs/pdf.worker.js';
@@ -41,6 +42,8 @@ const state = {
   tokenMap: {},          // drawing number => title, as in the register
   registerDetails: {},   // drawing number => { scale, size }, as in the register
   registerProject: null, // { heading, fields: [{ key, label, value }], description, client } from the register's header
+  registerIssues: null,  // { columns: [{ index, day, month, year, date }], latest, marks: { number: [mark per column] } }
+  revisionUi: null,      // Revisions tab choices: { mode, scheme, dateFormat, marks: { number: typed mark } }
   activeTab: 'drawings',
   registerColumns: { scale: false, size: false }, // whether the register has scale / size columns to write to
   titles: {},            // drawing number => title used for renaming (register title or an edit)
@@ -53,7 +56,9 @@ const state = {
   // separator: what goes between the drawing number and the title in file names
   // detailEdits: drawing number => { scale, size } changes (either may be missing), keyed like titleEdits
   // projectEdits: register header field label => new value ("Heading" for the heading)
-  layout: { folders: [], assignments: {}, titleEdits: {}, detailEdits: {}, projectEdits: {}, numberEdits: {}, numberHistory: {}, newEntries: [], moves: [], foldersToRemove: [], separator: DEFAULT_SEPARATOR },
+  // issueEdit: a staged issue { mode: 'new' | 'update', index, date: { day, month, year }, marks:
+  // { register number: mark }, header: { label: value } } (header: the Issue No / Date edits it made)
+  layout: { folders: [], assignments: {}, titleEdits: {}, detailEdits: {}, projectEdits: {}, issueEdit: null, numberEdits: {}, numberHistory: {}, newEntries: [], moves: [], foldersToRemove: [], separator: DEFAULT_SEPARATOR },
   drag: null,            // what's being dragged: { kind: 'drawing', token } or { kind: 'folder', folder }
   origOf: {},            // drawing number shown => number in the register (for renumbered drawings)
   movedTokens: new Set(), // register numbers of drawings with a pending move
@@ -257,10 +262,12 @@ async function parseRegister(filePath) {
   state.registerDetails = {};
   state.registerColumns = { scale: false, size: false };
   state.registerProject = null;
+  state.registerIssues = null;
   if (registerKindOf(baseName(filePath)) === 'docx') {
     state.registerXml = (await readDocumentXml(filePath)).xml;
     state.registerDetails = RegisterCore.readDocxDetails(state.registerXml);
     state.registerProject = RegisterCore.readDocxProject(state.registerXml);
+    state.registerIssues = RegisterCore.readDocxIssues(state.registerXml);
     state.registerColumns = { scale: true, size: true };
     return RegisterCore.readDocxTitles(state.registerXml);
   }
@@ -270,6 +277,7 @@ async function parseRegister(filePath) {
     const parts = await RegisterCore.loadXlsxParts(zip);
     const found = RegisterCore.readXlsxRegister(parts);
     state.registerProject = RegisterCore.readXlsxProject(parts);
+    state.registerIssues = RegisterCore.readXlsxIssues(parts);
     if (found.sheet) state.registerInfo = `sheet "${found.sheet}"` + (found.issue !== null ? `, issue ${found.issue}` : '');
     state.xlsxSheet = found.sheet;
     state.xlsxPlaces = found.places;
@@ -334,7 +342,7 @@ function layoutPath() {
 }
 
 async function loadLayout() {
-  state.layout = { folders: [], assignments: {}, titleEdits: {}, detailEdits: {}, projectEdits: {}, numberEdits: {}, numberHistory: {}, newEntries: [], moves: [], foldersToRemove: [], separator: DEFAULT_SEPARATOR };
+  state.layout = { folders: [], assignments: {}, titleEdits: {}, detailEdits: {}, projectEdits: {}, issueEdit: null, numberEdits: {}, numberHistory: {}, newEntries: [], moves: [], foldersToRemove: [], separator: DEFAULT_SEPARATOR };
   state.layoutBroken = false;
   if (!(await getStatsOrNull(layoutPath()))) return;
   try {
@@ -354,6 +362,11 @@ async function loadLayout() {
     for (const [label, value] of Object.entries(data.projectEdits || {})) {
       if (typeof value === 'string') projectEdits[label] = value;
     }
+    const issue = data.issueEdit;
+    const issueEdit = issue && ['new', 'update'].includes(issue.mode) && Number.isInteger(issue.index) && issue.date && typeof issue.marks === 'object'
+      ? { mode: issue.mode, index: issue.index, date: { day: String(issue.date.day), month: String(issue.date.month), year: String(issue.date.year) },
+          marks: Object.fromEntries(Object.entries(issue.marks).filter(([, m]) => typeof m === 'string')), header: issue.header || {} }
+      : null;
     const detailEdits = {};
     for (const [token, edit] of Object.entries(data.detailEdits || {})) {
       const kept = {};
@@ -380,7 +393,7 @@ async function loadLayout() {
       .map(m => ({ token: m.token, after: m.after }));
     const foldersToRemove = (Array.isArray(data.foldersToRemove) ? data.foldersToRemove : []).filter(f => typeof f === 'string' && folders.includes(f));
     const separator = typeof data.separator === 'string' && !separatorProblem(data.separator) ? data.separator : DEFAULT_SEPARATOR;
-    state.layout = { folders: withAncestors(folders), assignments, titleEdits, detailEdits, projectEdits, numberEdits, numberHistory, newEntries, moves, foldersToRemove, separator };
+    state.layout = { folders: withAncestors(folders), assignments, titleEdits, detailEdits, projectEdits, issueEdit, numberEdits, numberHistory, newEntries, moves, foldersToRemove, separator };
     appendLog(`📁 Loaded folder layout from ${LAYOUT_FILE} (${folders.length} folders).`);
   } catch (err) {
     state.layoutBroken = true;
@@ -411,6 +424,7 @@ async function saveLayout() {
     titleEdits: state.layout.titleEdits,
     detailEdits: state.layout.detailEdits,
     projectEdits: state.layout.projectEdits,
+    issueEdit: state.layout.issueEdit,
     numberEdits: state.layout.numberEdits,
     numberHistory: state.layout.numberHistory,
     moves: state.layout.moves,
@@ -676,8 +690,8 @@ function updateButtons() {
   entryBtn.hidden = !isDocx;
   entryBtn.disabled = state.busy;
   const changes = isDocx
-    ? pendingTitleEdits().length + pendingDetailEdits().length + pendingProjectEdits().length + pendingNumberEdits().length + pendingNewEntries().length + state.movedTokens.size
-    : editable ? pendingTitleEdits().length + pendingDetailEdits().length + pendingProjectEdits().length + pendingNumberEdits().length : 0;
+    ? pendingTitleEdits().length + pendingDetailEdits().length + pendingProjectEdits().length + (pendingIssue() ? 1 : 0) + pendingNumberEdits().length + pendingNewEntries().length + state.movedTokens.size
+    : editable ? pendingTitleEdits().length + pendingDetailEdits().length + pendingProjectEdits().length + (pendingIssue() ? 1 : 0) + pendingNumberEdits().length : 0;
   wordBtn.textContent = changes ? `${saveButtonLabel()} (${changes})` : saveButtonLabel();
   wordBtn.title = `Write edited titles and numbers into the ${registerAppName()} register`;
   wordBtn.disabled = state.busy || changes === 0;
@@ -1349,9 +1363,9 @@ let fileDetailRun = 0;
 const sameTitle = (a, b) => a.replace(/\s+/g, ' ').trim().toLowerCase() === b.replace(/\s+/g, ' ').trim().toLowerCase();
 const DETAIL_COLUMNS = { title: 'col-file-title', rev: 'col-file-rev', scale: 'col-file-scale', size: 'col-file-scale' };
 
-// Title blocks are read while any detail column is shown, or the Project data tab is open
+// Title blocks are read while any detail column is shown, or the Project data or Revisions tab is open
 function fileDetailsShown() {
-  return fileDetailCheckboxes.some(([cb]) => cb.checked) || state.activeTab === 'project';
+  return fileDetailCheckboxes.some(([cb]) => cb.checked) || state.activeTab === 'project' || state.activeTab === 'revisions';
 }
 
 function renderFileDetails(tds, row) {
@@ -1536,6 +1550,7 @@ async function loadFileDetails() {
         read++;
         for (const { tds, row } of fileDetailCells.get(rel) || []) renderFileDetails(tds, row);
         renderProjectData();
+        renderRevisionData();
       }
     } finally {
       if (worker) worker.destroy();
@@ -1595,6 +1610,10 @@ function switchTab(name) {
   for (const panel of document.querySelectorAll('.tab-panel')) panel.hidden = panel.dataset.panel !== name;
   if (name === 'project') {
     renderProjectData();
+    loadFileDetails();
+  }
+  if (name === 'revisions') {
+    renderRevisionData(true);
     loadFileDetails();
   }
 }
@@ -1770,6 +1789,324 @@ function renderProjectData(fields = false) {
   renderProjectDrawings(right);
 }
 
+// --------------------
+// Revisions tab: a new issue (the next date column, dated today) or the latest issue re-dated to
+// today, with each selected drawing's mark, and the Issue No / Date at the top of the register
+// --------------------
+function todayParts() {
+  const now = new Date();
+  return { y: now.getFullYear(), m: now.getMonth() + 1, d: now.getDate() };
+}
+const isoOf = t => `${t.y}-${String(t.m).padStart(2, '0')}-${String(t.d).padStart(2, '0')}`;
+const shortDate = c => (c && c.date ? `${c.day.padStart(2, '0')}.${c.month.padStart(2, '0')}.${c.year}` : '');
+
+// Register header fields the issue changes, or undefined
+function headerField(key) {
+  return ((state.registerProject || { fields: [] }).fields || []).find(f => f.key === key);
+}
+
+// Whether the register marks drawings with ticks ("/") rather than revision codes
+function registerUsesTicks() {
+  const marks = Object.values((state.registerIssues || { marks: {} }).marks).flat().filter(Boolean);
+  return marks.length > 0 && marks.every(m => !/[A-Za-z0-9]/.test(m));
+}
+
+// The issue the Revisions tab would make: { mode, index, sameDay, column, latestColumn } or null
+function issueTarget(mode) {
+  const info = state.registerIssues;
+  if (!info || !info.columns.length) return null;
+  const latest = info.columns[info.latest] || null;
+  const sameDay = !!latest && latest.date === isoOf(todayParts());
+  if (sameDay || mode === 'update') return latest ? { mode: 'update', index: info.latest, sameDay, column: latest, latestColumn: latest } : null;
+  const next = info.columns[info.latest + 1];
+  return next ? { mode: 'new', index: info.latest + 1, sameDay, column: next, latestColumn: latest } : null;
+}
+
+function describeIssue(issue) {
+  const date = [issue.date.day, issue.date.month, issue.date.year].join('.');
+  return issue.mode === 'new' ? `New issue in column ${issue.index + 1}, dated ${date}` : `Issue in column ${issue.index + 1} dated ${date}`;
+}
+
+function pendingIssue() {
+  const issue = state.layout.issueEdit;
+  return issue && canEditRegister() && state.registerIssues && state.registerIssues.columns[issue.index] ? issue : null;
+}
+
+// A drawing's marks before column `index`: { prev, prevDate } (the last one), and the mark already in it
+function previousMark(token, index) {
+  const info = state.registerIssues;
+  const marks = (info.marks[token] || []);
+  for (let i = index - 1; i >= 0; i--) {
+    if (marks[i]) return { prev: marks[i], prevDate: shortDate(info.columns[i]), current: marks[index] || '' };
+  }
+  return { prev: '', prevDate: '', current: marks[index] || '' };
+}
+
+function inFileRevision(row) {
+  const entry = row.rel && state.fileDetails.get(absPath(row.rel));
+  return (entry && entry.details && entry.details.rev) || '';
+}
+
+// The mark a drawing gets by default: the revision in its title block, or the one after its last
+// issue; with a tick register, the tick it used before
+function defaultMark(row, index) {
+  const { prev } = previousMark(row.origToken, index);
+  if (registerUsesTicks()) return prev || '/';
+  return inFileRevision(row) || RegisterCore.nextRevision(prev);
+}
+
+// Problems with a drawing's mark: [text]; empty when it's fine
+function markProblems(row, mark, index) {
+  const { prev, prevDate } = previousMark(row.origToken, index);
+  if (!mark) return ['No mark, so the drawing is left out of this issue'];
+  if (registerUsesTicks()) return [];
+  const problems = [];
+  const inFile = inFileRevision(row);
+  if (inFile && inFile.toUpperCase() !== mark.toUpperCase()) problems.push(`The drawing's title block says ${inFile}`);
+  if (prev && !RegisterCore.revisionFollows(prev, mark)) {
+    problems.push(prev.toUpperCase() === mark.toUpperCase()
+      ? `Same as issued on ${prevDate}`
+      : `Doesn't follow ${prev} (issued ${prevDate}); expected ${RegisterCore.nextRevision(prev)}`);
+  }
+  return problems;
+}
+
+// Drawings in the issue: the selected rows that are in the register and have a file here
+function issueRows() {
+  const seen = new Set();
+  return selectedRows().filter(r => r.token && r.rel && !r.isNew && state.registerIssues.marks[r.origToken] && !seen.has(r.origToken) && seen.add(r.origToken));
+}
+
+function revisionChoices() {
+  const issueNo = headerField('issueNo');
+  const date = headerField('date');
+  if (!state.revisionUi) state.revisionUi = { mode: 'new', scheme: null, dateFormat: null, marks: {} };
+  const ui = state.revisionUi;
+  if (!ui.scheme) ui.scheme = (issueNo && RegisterCore.detectNumbering(issueNo.value)) || 'number';
+  if (!ui.dateFormat) ui.dateFormat = (date && RegisterCore.detectDateFormat(date.value)) || 'dd.mm.yyyy';
+  return ui;
+}
+
+function select(options, value, onChange) {
+  const sel = el('select');
+  for (const [v, label] of options) {
+    const opt = el('option', label);
+    opt.value = v;
+    opt.selected = v === value;
+    sel.appendChild(opt);
+  }
+  sel.addEventListener('change', () => onChange(sel.value));
+  return sel;
+}
+
+// Redraws the tab, except while a mark is being typed (unless `force`)
+function renderRevisionData(force = false) {
+  if (state.activeTab !== 'revisions') return;
+  if (!force && revisionDataEl.contains(document.activeElement) && ['INPUT', 'SELECT'].includes(document.activeElement.tagName)) return;
+  revisionDataEl.textContent = '';
+  revisionDataEl.className = '';
+  const info = state.registerIssues;
+  if (!state.registerPath || !info) {
+    revisionDataEl.className = 'muted';
+    revisionDataEl.textContent = !state.registerPath ? 'No register loaded.' : 'Issues are only read from Word and Excel registers.';
+    return;
+  }
+  if (!info.columns.length) {
+    revisionDataEl.className = 'muted';
+    revisionDataEl.textContent = 'No Day / Month / Year issue rows found in the register.';
+    return;
+  }
+  const ui = revisionChoices();
+  const today = todayParts();
+  const latest = info.columns[info.latest];
+  const target = issueTarget(ui.mode);
+  const issueNo = headerField('issueNo');
+  const dateField = headerField('date');
+  const staged = pendingIssue();
+  const editable = canEditRegister() && !state.busy;
+
+  const grid = el('div', undefined, 'revision-grid');
+  const left = el('section');
+  left.appendChild(el('h4', 'Issue'));
+  left.appendChild(el('p', latest
+    ? `Latest issue: ${shortDate(latest)} (column ${info.latest + 1} of ${info.columns.length})${issueNo ? ` · ${issueNo.label} ${issueNo.value}` : ''}`
+    : `No issues yet (${info.columns.length} columns)`, 'muted'));
+
+  // New issue / update the latest
+  const modes = el('div', undefined, 'revision-modes');
+  const addMode = (value, label, disabled, note) => {
+    const lbl = el('label', undefined, 'option');
+    const radio = el('input');
+    radio.type = 'radio';
+    radio.name = 'issue-mode';
+    radio.checked = (target && target.mode) === value;
+    radio.disabled = disabled || !editable;
+    radio.addEventListener('change', () => { ui.mode = value; renderRevisionData(true); });
+    lbl.append(radio, ` ${label}`);
+    if (note) lbl.appendChild(el('span', ` ${note}`, 'muted'));
+    modes.appendChild(lbl);
+  };
+  const todayShort = RegisterCore.formatDate(today, 'dd.mm.yy');
+  if (latest && latest.date === isoOf(today)) {
+    addMode('update', `Add to today's issue (column ${info.latest + 1}, ${todayShort})`, false);
+  } else {
+    const free = info.columns[info.latest + 1];
+    addMode('new', 'Create a new issue', !free, free ? `column ${info.latest + 2}, dated ${todayShort}` : '(no free column left)');
+    addMode('update', 'Update the latest issue to today', !latest, latest ? `column ${info.latest + 1}: ${shortDate(latest)} → ${todayShort}` : '');
+  }
+  left.appendChild(modes);
+
+  // Issue number and date formats
+  const dl = el('dl');
+  if (issueNo) {
+    const schemeLabels = { number: '1, 2, 3', ordinal: '1st, 2nd, 3rd', letter: 'A, B, C' };
+    const detected = RegisterCore.detectNumbering(issueNo.value);
+    const dd = el('dd');
+    const sel = select(RegisterCore.NUMBERING_SCHEMES.map(sc => [sc, schemeLabels[sc] + (sc === detected ? ' (in use)' : '')]), ui.scheme, v => { ui.scheme = v; renderRevisionData(true); });
+    sel.disabled = !editable;
+    const next = target && target.mode === 'new' ? RegisterCore.nextIssueNumber(issueNo.value, ui.scheme) : issueNo.value;
+    dd.append(sel, el('span', target && target.mode === 'new' ? `${issueNo.value} → ${next}` : `stays ${issueNo.value}`, 'muted'));
+    dl.append(el('dt', 'Issue numbering'), dd);
+  }
+  if (dateField) {
+    const detected = RegisterCore.detectDateFormat(dateField.value);
+    const dd = el('dd');
+    const sel = select(RegisterCore.DATE_FORMATS.map(f => [f.id, RegisterCore.formatDate(today, f.id) + (f.id === detected ? ' (in use)' : '')]), ui.dateFormat, v => { ui.dateFormat = v; renderRevisionData(true); });
+    sel.disabled = !editable;
+    dd.append(sel, el('span', `${dateField.value || '(blank)'} → ${RegisterCore.formatDate(today, ui.dateFormat)}`, 'muted'));
+    dl.append(el('dt', 'Date format'), dd);
+  }
+  if (!issueNo || !dateField) left.appendChild(el('p', `The register has no ${[!issueNo && 'Issue No', !dateField && 'Date'].filter(Boolean).join(' or ')} field at the top, so that isn't updated.`, 'muted'));
+  left.appendChild(dl);
+
+  // Stage / cancel
+  const actions = el('div', undefined, 'revision-actions');
+  const rows = target ? issueRows() : [];
+  const stage = el('button', staged ? 'Replace the staged issue' : 'Add to register edits', 'primary');
+  stage.disabled = !editable || !target;
+  stage.title = `Stage this issue; press ${saveButtonLabel()} to write it to the register`;
+  stage.addEventListener('click', () => stageIssue(target, rows));
+  actions.appendChild(stage);
+  if (staged) {
+    const cancel = el('button', 'Cancel staged issue');
+    cancel.addEventListener('click', unstageIssue);
+    actions.append(cancel, el('span', `Staged: ${describeIssue(staged)}, ${Object.keys(staged.marks).length} drawing(s). Press ${saveButtonLabel()} to write it.`, 'muted'));
+  }
+  left.appendChild(actions);
+
+  // The drawings in the issue
+  const right = el('section');
+  right.appendChild(el('h4', `Drawings in this issue (${rows.length} selected)`));
+  if (!target) right.appendChild(el('p', 'There is no issue column to use.', 'muted'));
+  else if (!rows.length) right.appendChild(el('p', 'Select drawings with files in the table to put them in the issue.', 'muted'));
+  else {
+    const table = el('table', undefined, 'revision-table');
+    const head = el('tr');
+    for (const h of ['Drawing', 'Last issued', 'In file', target.mode === 'new' ? 'New mark' : 'Mark', '']) head.appendChild(el('th', h));
+    table.appendChild(el('thead')).appendChild(head);
+    const body = el('tbody');
+    for (const row of rows) {
+      const tr = el('tr');
+      const { prev, prevDate, current } = previousMark(row.origToken, target.index);
+      const typed = ui.marks[row.origToken];
+      const mark = typed !== undefined ? typed : defaultMark(row, target.index);
+      tr.appendChild(el('td', row.token, 'number'));
+      tr.appendChild(el('td', prev ? `${prev} (${prevDate})` : '—'));
+      tr.appendChild(el('td', inFileRevision(row) || '—'));
+      const markTd = el('td');
+      const input = el('input', undefined, 'mark-input');
+      input.value = mark;
+      input.disabled = !editable;
+      input.spellcheck = false;
+      if (current && target.mode === 'update') input.title = `Currently ${current}`;
+      input.addEventListener('change', () => { ui.marks[row.origToken] = input.value.trim(); renderRevisionData(true); });
+      markTd.appendChild(input);
+      tr.appendChild(markTd);
+      const problems = markProblems(row, mark, target.index);
+      const check = el('td', problems.length ? `⚠ ${problems.join('; ')}` : (prev || registerUsesTicks() ? '✓' : '✓ first issue'), problems.length ? 'warn' : 'ok');
+      tr.appendChild(check);
+      body.appendChild(tr);
+    }
+    table.appendChild(body);
+    right.appendChild(table);
+  }
+  grid.append(left, right);
+  revisionDataEl.appendChild(grid);
+}
+
+// Turns the Revisions tab's choices into a staged register edit (plus the Issue No / Date header edits)
+async function stageIssue(target, rows) {
+  if (!target) return;
+  const ui = revisionChoices();
+  const today = todayParts();
+  const two = n => String(n).padStart(2, '0');
+  const marks = {};
+  for (const row of rows) {
+    const typed = ui.marks[row.origToken];
+    const mark = (typed !== undefined ? typed : defaultMark(row, target.index)).trim();
+    if (mark) marks[row.origToken] = mark;
+  }
+  // Undo the header edits of an issue staged before
+  if (state.layout.issueEdit) {
+    for (const [label, value] of Object.entries(state.layout.issueEdit.header || {})) {
+      if (state.layout.projectEdits[label] === value) delete state.layout.projectEdits[label];
+    }
+  }
+  const header = {};
+  const issueNo = headerField('issueNo');
+  if (issueNo && target.mode === 'new') header[issueNo.label] = RegisterCore.nextIssueNumber(issueNo.value, ui.scheme);
+  const dateField = headerField('date');
+  if (dateField) header[dateField.label] = RegisterCore.formatDate(today, ui.dateFormat);
+  for (const [label, value] of Object.entries(header)) {
+    const field = state.registerProject.fields.find(f => f.label === label);
+    if (value === field.value) delete header[label];
+    else state.layout.projectEdits[label] = value;
+  }
+  state.layout.issueEdit = {
+    mode: target.mode, index: target.index,
+    date: { day: two(today.d), month: two(today.m), year: two(today.y % 100) },
+    marks, header
+  };
+  const problems = rows.filter(r => markProblems(r, marks[r.origToken] || '', target.index).length).map(r => r.token);
+  appendLog(`📅 Staged: ${describeIssue(state.layout.issueEdit)} with ${Object.keys(marks).length} drawing(s)` +
+    (Object.keys(header).length ? `; ${Object.entries(header).map(([l, v]) => `${l} → ${v}`).join(', ')}` : '') +
+    ` (press ${saveButtonLabel()} to write it).`);
+  if (problems.length) appendLog(`⚠️ Check the revisions of ${problems.join(', ')} in the Revisions tab.`);
+  await saveLayout();
+  rebuild();
+  renderRevisionData(true);
+}
+
+async function unstageIssue() {
+  const issue = state.layout.issueEdit;
+  if (!issue) return;
+  for (const [label, value] of Object.entries(issue.header || {})) {
+    if (state.layout.projectEdits[label] === value) delete state.layout.projectEdits[label];
+  }
+  state.layout.issueEdit = null;
+  appendLog('↩️ Cancelled the staged issue.');
+  await saveLayout();
+  rebuild();
+  renderRevisionData(true);
+}
+
+// Checks a saved-to-be register (read back) has the staged issue: '' when it does
+function issueReadBackProblem(issue, info, newNumber, notFound) {
+  const column = info.columns[issue.index];
+  const want = `20${issue.date.year}-${issue.date.month}-${issue.date.day}`;
+  if (!column || column.date !== want) return `issue column ${issue.index + 1} didn't read back as ${[issue.date.day, issue.date.month, issue.date.year].join('.')}`;
+  const wrong = Object.entries(issue.marks)
+    .filter(([token, mark]) => !notFound.includes(token) && ((info.marks[newNumber(token)] || [])[issue.index] || '') !== mark)
+    .map(([token]) => token);
+  return wrong.length ? `the marks didn't read back as expected for ${wrong.join(', ')}` : '';
+}
+
+function logIssueSaved(issue, applied, notFound, how) {
+  if (applied.date) appendLog(`📅 ${describeIssue(issue)}${how}`);
+  for (const [token, { from, to }] of Object.entries(applied.marks)) appendLog(`📅 ${token}: ${from ? `"${from}" → ` : ''}"${to}"${how}`);
+  for (const token of notFound) appendLog(`⚠️ ${token} wasn't found in the register, so it wasn't marked.`);
+}
+
 function render(newFiles) {
   // Don't throw away a title the user is typing; renderAfterEdit() catches up
   if (state.editingToken) {
@@ -1817,6 +2154,7 @@ function render(newFiles) {
   summaryEl.textContent = parts.join(' · ');
 
   renderProjectData();
+  renderRevisionData();
   emptyEl.style.display = dataRows ? 'none' : '';
   if (!dataRows) {
     emptyEl.textContent = state.registerPath ? 'No drawings found in this folder yet.' : 'Choose a drawing register or the folder containing it.';
@@ -2355,14 +2693,14 @@ try {
 const wordDialog = document.getElementById('word-dialog');
 
 // Resolves to { tracked, exportPdf } or null if cancelled
-async function askWordOptions(edits, additions, numbers, movedCount, details = [], project = []) {
+async function askWordOptions(edits, additions, numbers, movedCount, details = [], project = [], issue = null) {
   const excel = state.registerKind === 'xlsx';
   const wordOk = excel ? await checkExcelAvailable() : await checkWordAvailable();
   const pdfTarget = excel ? await excelPdfPath() : registerPdfPath();
   // Excel has no tracked changes
   document.getElementById('word-tracked').closest('label').hidden = excel;
   document.getElementById('word-export-label').textContent = `Also update the register PDF using ${registerAppName()}`;
-  const total = edits.length + additions.length + numbers.length + movedCount + details.length + project.length;
+  const total = edits.length + additions.length + numbers.length + movedCount + details.length + project.length + (issue ? 1 : 0);
   document.getElementById('word-dialog-title').textContent =
     `Save ${total === 1 ? '1 change' : total + ' changes'} to ${baseName(state.registerPath)}`;
   const list = document.getElementById('word-changes');
@@ -2405,6 +2743,13 @@ async function askWordOptions(edits, additions, numbers, movedCount, details = [
     const to = document.createElement('ins');
     to.textContent = e.to;
     li.append(num, ' ', from, ' → ', to);
+    list.appendChild(li);
+  }
+  if (issue) {
+    const li = document.createElement('li');
+    const marks = Object.entries(issue.marks).map(([t, m]) => `${t} ${m}`);
+    li.append(`📅 ${describeIssue(issue)}`);
+    if (marks.length) li.append(': ', Object.assign(document.createElement('ins'), { textContent: marks.join(', ') }));
     list.appendChild(li);
   }
   for (const e of project) {
@@ -2496,8 +2841,9 @@ async function saveToWord() {
   const numbers = pendingNumberEdits();
   const moves = pendingMoves();
   const project = pendingProjectEdits();
-  if ((!edits.length && !details.length && !project.length && !additions.length && !numbers.length && !moves.length) || state.registerKind !== 'docx') return;
-  const options = await askWordOptions(edits, additions, numbers, state.movedTokens.size, details, project);
+  const issue = pendingIssue();
+  if ((!edits.length && !details.length && !project.length && !issue && !additions.length && !numbers.length && !moves.length) || state.registerKind !== 'docx') return;
+  const options = await askWordOptions(edits, additions, numbers, state.movedTokens.size, details, project, issue);
   const wantOrder = Object.keys(state.titles);
   if (!options) return;
 
@@ -2524,7 +2870,8 @@ async function saveToWord() {
     const scales = RegisterCore.editDocxScales(result.xml, detailsOf('scale'), revOpts);
     const sizes = RegisterCore.editDocxSizes(scales.xml, detailsOf('size'), revOpts);
     const header = RegisterCore.editDocxProject(sizes.xml, Object.fromEntries(project.map(e => [e.label, e.to])), revOpts);
-    const renumber = RegisterCore.editDocxNumbers(header.xml, Object.fromEntries(numbers.map(e => [e.token, e.to])), revOpts);
+    const issued = issue ? RegisterCore.editDocxIssue(header.xml, issue, revOpts) : { xml: header.xml, applied: null, notFound: [] };
+    const renumber = RegisterCore.editDocxNumbers(issued.xml, Object.fromEntries(numbers.map(e => [e.token, e.to])), revOpts);
     const newNumber = t => (renumber.applied[t] ? renumber.applied[t].to : t);
     const move = RegisterCore.moveDocxRows(renumber.xml, moves.map(m => ({ token: newNumber(m.token), after: m.after && newNumber(m.after) })), revOpts);
     const insert = RegisterCore.insertDocxRows(move.xml, additions.map(e => ({ ...e, after: e.after && newNumber(e.after) })), revOpts);
@@ -2561,6 +2908,11 @@ async function saveToWord() {
       return !got || got.value !== (header.applied[f.label] ? header.applied[f.label].to : f.value);
     }).map(f => f.label);
     if (wrongHeader.length) throw new Error(`the project details didn't read back as expected (${wrongHeader.join(', ')}); nothing was saved.`);
+    // ...and the issue column
+    if (issue) {
+      const problem = issueReadBackProblem(issue, RegisterCore.readDocxIssues(insert.xml), newNumber, issued.notFound);
+      if (problem) throw new Error(`${problem}; nothing was saved.`);
+    }
 
     await backupToSS(docx);
     zip.file('word/document.xml', insert.xml);
@@ -2580,6 +2932,7 @@ async function saveToWord() {
       if (from !== to) appendLog(`🗂️ ${label}: "${from}" → "${to}" (${how})`);
     }
     for (const label of header.notFound) appendLog(`⚠️ The "${label}" field wasn't found in ${baseName(docx)}; its edit was kept.`);
+    if (issued.applied) logIssueSaved(issue, issued.applied, issued.notFound, ` (${how})`);
     for (const e of additions.filter(a => insert.inserted.includes(a.token))) {
       appendLog(`➕ ${e.token}: added "${e.title}" ${describePlace(e.after)} (${how})`);
     }
@@ -2592,6 +2945,7 @@ async function saveToWord() {
     for (const token of Object.keys(result.applied)) delete state.layout.titleEdits[token];
     clearSavedDetails(scales.applied, sizes.applied);
     for (const label of Object.keys(header.applied)) delete state.layout.projectEdits[label];
+    if (issue) state.layout.issueEdit = null;
     recordRenumbers(renumber.applied);
     // Saved moves are done; any later ones (made after this save started) stay
     state.layout.moves = state.layout.moves.filter(m => !moves.includes(m));
@@ -2601,6 +2955,7 @@ async function saveToWord() {
       `${Object.keys(result.applied).length} title change(s)`,
       `${Object.keys(scales.applied).length + Object.keys(sizes.applied).length} scale/size change(s)`,
       `${Object.keys(header.applied).length} project detail change(s)`,
+      ...(issue ? [issue.mode === 'new' ? 'a new issue' : 'an issue update'] : []),
       `${Object.keys(renumber.applied).length} new number(s)`,
       `${new Set(move.moved).size} move(s)`,
       `${insert.inserted.length} new entr${insert.inserted.length === 1 ? 'y' : 'ies'}`
@@ -2688,8 +3043,9 @@ async function saveToExcel() {
   const details = pendingDetailEdits();
   const numbers = pendingNumberEdits();
   const project = pendingProjectEdits();
-  if (!edits.length && !details.length && !project.length && !numbers.length) return;
-  const options = await askWordOptions(edits, [], numbers, 0, details, project);
+  const issue = pendingIssue();
+  if (!edits.length && !details.length && !project.length && !issue && !numbers.length) return;
+  const options = await askWordOptions(edits, [], numbers, 0, details, project, issue);
   if (!options) return;
 
   const xlsx = state.registerPath;
@@ -2707,7 +3063,8 @@ async function saveToExcel() {
       numbers: Object.fromEntries(numbers.map(e => [e.token, e.to])),
       scales: Object.fromEntries(details.filter(e => e.field === 'scale').map(e => [e.token, e.to])),
       sizes: Object.fromEntries(details.filter(e => e.field === 'size').map(e => [e.token, e.to])),
-      project: Object.fromEntries(project.map(e => [e.label, e.to]))
+      project: Object.fromEntries(project.map(e => [e.label, e.to])),
+      issue
     });
     if (result.errors.length) throw new Error(result.errors.join('; ') + '; nothing was saved.');
 
@@ -2732,6 +3089,11 @@ async function saveToExcel() {
       const got = headerAfter.find(g => g.label === f.label);
       if (!got || got.value !== (result.applied.project[f.label] ? result.applied.project[f.label].to : f.value)) wrong.push(f.label);
     }
+    if (issue) {
+      const problem = issueReadBackProblem(issue, RegisterCore.readXlsxIssues({ ...parts, sheets: { ...parts.sheets, [result.path]: result.xml } }), newNumber,
+        Object.keys(issue.marks).filter(t => result.notFound.includes(t)));
+      if (problem) throw new Error(`${problem}; nothing was saved.`);
+    }
     if (wrong.length || after.sheet !== before.sheet) {
       throw new Error(`the edited sheet didn't read back as expected${wrong.length ? ' for ' + wrong.join(', ') : ''}; nothing was saved.`);
     }
@@ -2753,10 +3115,15 @@ async function saveToExcel() {
       appendLog(`🗂️ ${label}: "${from}" → "${to}"`);
       delete state.layout.projectEdits[label];
     }
+    if (result.applied.issue) {
+      logIssueSaved(issue, result.applied.issue, Object.keys(issue.marks).filter(t => result.notFound.includes(t)), '');
+      state.layout.issueEdit = null;
+    }
     recordRenumbers(result.applied.numbers);
     await saveLayout();
     const detailCount = Object.keys(result.applied.scales).length + Object.keys(result.applied.sizes).length;
-    appendLog(`✅ Saved ${Object.keys(result.applied.titles).length} title change(s), ${detailCount} scale/size change(s), ${Object.keys(result.applied.project).length} project detail change(s) and ${Object.keys(result.applied.numbers).length} new number(s) to sheet "${result.sheet}" of ${baseName(xlsx)}.`);
+    const issueText = result.applied.issue ? (issue.mode === 'new' ? ', a new issue' : ', an issue update') : '';
+    appendLog(`✅ Saved ${Object.keys(result.applied.titles).length} title change(s), ${detailCount} scale/size change(s), ${Object.keys(result.applied.project).length} project detail change(s)${issueText} and ${Object.keys(result.applied.numbers).length} new number(s) to sheet "${result.sheet}" of ${baseName(xlsx)}.`);
 
     if (options.exportPdf) {
       const pdf = options.pdf;
@@ -3023,6 +3390,7 @@ function unsavedRegisterChanges() {
     titles: pendingTitleEdits().length,
     details: pendingDetailEdits().length,
     project: pendingProjectEdits().length,
+    issue: pendingIssue() ? 1 : 0,
     numbers: pendingNumberEdits().length,
     entries: pendingNewEntries().length,
     moves: state.movedTokens.size
@@ -3031,10 +3399,11 @@ function unsavedRegisterChanges() {
   if (counts.titles) parts.push(`${counts.titles} title change(s)`);
   if (counts.details) parts.push(`${counts.details} scale/size change(s)`);
   if (counts.project) parts.push(`${counts.project} project detail change(s)`);
+  if (counts.issue) parts.push(state.layout.issueEdit.mode === 'new' ? 'a new issue' : 'an issue update');
   if (counts.numbers) parts.push(`${counts.numbers} new number(s)`);
   if (counts.entries) parts.push(`${counts.entries} new entr${counts.entries === 1 ? 'y' : 'ies'}`);
   if (counts.moves) parts.push(`${counts.moves} moved drawing(s)`);
-  return { ...counts, total: counts.titles + counts.details + counts.project + counts.numbers + counts.entries + counts.moves, summary: parts.join(', ') };
+  return { ...counts, total: counts.titles + counts.details + counts.project + counts.issue + counts.numbers + counts.entries + counts.moves, summary: parts.join(', ') };
 }
 
 // Forget title and number edits, new entries and moves that haven't been saved to the register.
@@ -3068,6 +3437,7 @@ async function discardRegisterChanges() {
   state.layout.titleEdits = {};
   state.layout.detailEdits = {};
   state.layout.projectEdits = {};
+  state.layout.issueEdit = null;
   state.layout.numberEdits = {};
   state.layout.newEntries = [];
   state.layout.moves = [];

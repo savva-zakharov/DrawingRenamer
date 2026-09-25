@@ -369,12 +369,15 @@
     return name;
   }
 
-  // Set cells in one row of a worksheet: values { columnIndex: text }. Text goes in as an inline
-  // string, except whole numbers replacing a number (which stay numbers). Styles are kept.
+  // Set cells in one row of a worksheet: values { columnIndex: text or { text, number: true } }.
+  // Text goes in as an inline string, except whole numbers replacing a number, or asked to be
+  // numbers (which are written as numbers). Styles are kept.
   function setRowCells(rowXml, rowNum, values, zeroPad) {
     const { open, inner, close } = splitElement(rowXml);
     const cells = childElements(inner);
-    for (const [colText, text] of Object.entries(values)) {
+    for (const [colText, value] of Object.entries(values)) {
+      const text = typeof value === 'object' ? value.text : value;
+      const asNumber = typeof value === 'object' && value.number && /^\d+$/.test(text);
       const col = Number(colText);
       const ref = columnName(col) + rowNum;
       const i = cells.findIndex(c => (/\br="([A-Z]+\d+)"/.exec(c) || [])[1] === ref);
@@ -383,7 +386,7 @@
       const style = (/\bs="(\d+)"/.exec(oldOpen) || [])[1];
       const wasNumber = !!old && !/\bt="/.test(oldOpen) && /<v>/.test(old);
       const width = style !== undefined ? zeroPad[style] || 0 : 0;
-      const keepNumber = wasNumber && /^\d+$/.test(text) && (!/^0\d/.test(text) || width === text.length);
+      const keepNumber = asNumber || (wasNumber && /^\d+$/.test(text) && (!/^0\d/.test(text) || width === text.length));
       const attrs = oldOpen.replace(/\s+t="[^"]*"/, '');
       const cell = keepNumber
         ? `${attrs}><v>${parseInt(text, 10)}</v></c>`
@@ -403,7 +406,8 @@
   // scale }, sizes: { code: size } } (codes as currently in the register). A code split one field
   // per cell is split the same way again, so a new number must have the same number of fields.
   // edits.project: { label: value } changes the project fields above the drawings (labels as
-  // readXlsxProject gives them). Returns { path, sheet, xml (of that sheet), applied: { titles,
+  // readXlsxProject gives them). edits.issue: { index, date: { day, month, year } or null, marks:
+  // { code: mark } } dates an issue column (in every date block) and/or sets drawings' marks in it. Returns { path, sheet, xml (of that sheet), applied: { titles,
   // numbers, scales, sizes, project } ({ code or label: { from, to } }), notFound: [code or label],
   // errors: [message] }.
   function editXlsxRegister(parts, edits) {
@@ -414,7 +418,7 @@
     const rowCells = {};
     for (const r of readSheetRows(parts.sheets[reg.path], sharedStrings, zeroPad)) rowCells[r.row] = r.cells;
 
-    const applied = { titles: {}, numbers: {}, scales: {}, sizes: {}, project: {} };
+    const applied = { titles: {}, numbers: {}, scales: {}, sizes: {}, project: {}, issue: null };
     const notFound = [];
     const errors = [];
     const byRow = {}; // row => { column: text }
@@ -430,6 +434,35 @@
       if (to === reg.titles[code]) continue;
       set(place.row, place.titleCol, to);
       applied.titles[code] = { from: reg.titles[code], to };
+    }
+    if (edits.issue) {
+      const issues = readXlsxIssues(parts);
+      const column = issues.columns[edits.issue.index];
+      if (!column) errors.push(`sheet "${reg.sheet}" has no issue column ${edits.issue.index + 1}`);
+      else {
+        applied.issue = { index: edits.issue.index, date: null, marks: {} };
+        const d = edits.issue.date;
+        if (d) {
+          // Every DAY / MONTH / YEAR block on the sheet (they repeat above each section)
+          for (const block of issues.blocks) {
+            set(block.day, column.col, d.day);
+            set(block.month, column.col, d.month);
+            set(block.year, column.col, { text: d.year, number: true });
+          }
+          applied.issue.date = { from: column.date ? [column.day, column.month, column.year].join('.') : '', to: [d.day, d.month, d.year].join('.') };
+        }
+        for (const [code, mark] of Object.entries(edits.issue.marks || {})) {
+          const place = reg.places[code];
+          if (!place) {
+            notFound.push(code);
+            continue;
+          }
+          const from = (issues.marks[code] || [])[edits.issue.index] || '';
+          if (collapse(mark) === from) continue;
+          set(place.row, column.col, collapse(mark));
+          applied.issue.marks[code] = { from, to: collapse(mark) };
+        }
+      }
     }
     if (edits.project && Object.keys(edits.project).length) {
       const { fields } = readXlsxProject(parts);
@@ -1220,6 +1253,230 @@
     return out;
   }
 
+  // --------------------
+  // Issues: the date columns and each drawing's mark (revision) in them
+  // --------------------
+
+  function issueDate(day, month, year) {
+    const d = parseInt(day, 10), m = parseInt(month, 10);
+    let y = parseInt(year, 10);
+    if (!d || !m || isNaN(y)) return null;
+    if (y < 100) y += 2000;
+    return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+  }
+
+  // Issue columns from the rows labelled Day / Month / Year: [{ index, day, month, year, date }]
+  // (date 'YYYY-MM-DD' or null when the column hasn't been used). latest: index of the last dated column.
+  function issueColumns(days, months, years) {
+    const columns = days.map((day, index) => {
+      const month = months[index] || '', year = years[index] || '';
+      return { index, day: day || '', month, year, date: issueDate(day, month, year) };
+    });
+    let latest = -1;
+    columns.forEach((c, i) => { if (c.date) latest = i; });
+    return { columns, latest };
+  }
+
+  // word/document.xml -> { columns, latest, marks: { token: [mark per column] }, rows: { day, month, year } }.
+  // The Day/Month/Year rows sit above the drawing list; the dates follow the row's label cell, and
+  // each drawing's marks follow its number, title, scale and size cells, column by column.
+  function readDocxIssues(xml) {
+    const firstDrawing = (registerRows(xml)[0] || { row: { start: xml.length } }).row.start;
+    const found = {};
+    findElements(xml, 'w:tr').forEach((tr, trIndex) => {
+      if (tr.start >= firstDrawing) return;
+      const texts = findElements(xml, 'w:tc', tr.start, tr.end).map(c => cellText(c.xml));
+      for (const key of ['day', 'month', 'year']) {
+        const at = texts.findIndex(t => t.toLowerCase() === key);
+        if (at >= 0 && !found[key]) found[key] = { tr: trIndex, from: at + 1, values: texts.slice(at + 1) };
+      }
+    });
+    if (!found.day || !found.month || !found.year) return { columns: [], latest: -1, marks: {}, rows: null };
+    const { columns, latest } = issueColumns(found.day.values, found.month.values, found.year.values);
+    const marks = {};
+    for (const { token, cells } of registerRows(xml)) {
+      if (!(token in marks)) marks[token] = columns.map((c, i) => (cells[4 + i] ? cellText(cells[4 + i].xml) : ''));
+    }
+    return { columns, latest, marks, rows: { day: found.day, month: found.month, year: found.year } };
+  }
+
+  // Date an issue column and/or set drawings' marks in it: issue { index, date: { day, month, year }
+  // or null, marks: { token: mark } }. opts as editDocxTitles.
+  // Returns { xml, applied: { index, date: { from, to } | null, marks: { token: { from, to } } }, notFound: [token] }
+  function editDocxIssue(xml, issue, opts = {}) {
+    const rev = makeRevisions(xml, opts.author || 'Drawing Renamer', opts.date || new Date().toISOString().replace(/\.\d+Z$/, 'Z'));
+    const info = readDocxIssues(xml);
+    const column = info.columns[issue.index];
+    if (!column) throw new Error(`the register has no issue column ${issue.index + 1}`);
+    const rows = findElements(xml, 'w:tr');
+    const changes = [];
+    const setCell = (cell, text) => {
+      if (cell && cellText(cell.xml) !== text) changes.push({ start: cell.start, end: cell.end, xml: setCellTitle(cell.xml, text, opts, rev) });
+    };
+    const applied = { index: issue.index, date: null, marks: {} };
+    if (issue.date) {
+      for (const key of ['day', 'month', 'year']) {
+        const r = info.rows[key];
+        const tr = rows[r.tr];
+        setCell(findElements(xml, 'w:tc', tr.start, tr.end)[r.from + issue.index], issue.date[key]);
+      }
+      applied.date = { from: column.date ? [column.day, column.month, column.year].join('.') : '', to: [issue.date.day, issue.date.month, issue.date.year].join('.') };
+    }
+    const notFound = [];
+    const done = new Set();
+    for (const { token, cells } of registerRows(xml)) {
+      if (!(token in (issue.marks || {})) || done.has(token)) continue;
+      done.add(token);
+      const cell = cells[4 + issue.index];
+      if (!cell) {
+        notFound.push(token);
+        continue;
+      }
+      const to = collapse(issue.marks[token]);
+      const from = cellText(cell.xml);
+      if (from !== to) applied.marks[token] = { from, to };
+      setCell(cell, to);
+    }
+    for (const token of Object.keys(issue.marks || {})) if (!done.has(token)) notFound.push(token);
+    let out = xml;
+    for (const c of changes.sort((a, b) => b.start - a.start)) out = out.slice(0, c.start) + c.xml + out.slice(c.end);
+    return { xml: out, applied, notFound };
+  }
+
+  // The same for the current register sheet of an Excel register: columns from the first
+  // DAY / MONTH / YEAR block, running from the REVISION NUMBER heading to the last cell the
+  // DAY row has (used or not); blocks: [{ day, month, year }] row numbers of every repeat of it.
+  function readXlsxIssues(parts) {
+    const reg = readXlsxRegister(parts);
+    const empty = { columns: [], latest: -1, marks: {}, blocks: [] };
+    if (!reg.path) return empty;
+    const sheetXml = parts.sheets[reg.path];
+    const sharedStrings = parts.sharedStrings ? findElements(parts.sharedStrings, 'si').map(si => stringItemText(si.xml)) : [];
+    const rows = readSheetRows(sheetXml, sharedStrings, zeroPadStyles(parts.styles));
+    const byRow = {};
+    for (const r of rows) byRow[r.row] = r.cells;
+    const labelAt = (cells, word) => Object.keys(cells).map(Number).find(c => norm(cells[c]) === word);
+    const blocks = [];
+    rows.forEach((r, i) => {
+      const col = labelAt(r.cells, 'DAY');
+      if (col === undefined) return;
+      const month = rows.slice(i + 1, i + 3).find(x => labelAt(x.cells, 'MONTH') === col);
+      const year = rows.slice(i + 1, i + 4).find(x => labelAt(x.cells, 'YEAR') === col);
+      if (month && year) blocks.push({ day: r.row, month: month.row, year: year.row, labelCol: col });
+    });
+    if (!blocks.length) return empty;
+    let startCol;
+    for (const r of rows) {
+      const c = Object.keys(r.cells).map(Number).find(k => /^REVISION( NUMBER| ISSUED)?$|^ISSUE DATE$/.test(norm(r.cells[k])));
+      if (c !== undefined && c > blocks[0].labelCol) {
+        startCol = c;
+        break;
+      }
+    }
+    if (startCol === undefined) startCol = blocks[0].labelCol + 1;
+    const dayRowXml = (findElements(sheetXml, 'row').find(r => (/\br="(\d+)"/.exec(r.xml) || [])[1] === String(blocks[0].day)) || { xml: '' }).xml;
+    const lastCol = Math.max(startCol, ...[...dayRowXml.matchAll(/<c\s[^>]*\br="([A-Z]+)\d+"/g)].map(m => columnIndex(m[1])));
+    const cols = [];
+    for (let c = startCol; c <= lastCol; c++) cols.push(c);
+    const first = blocks[0];
+    const at = (row, c) => ((byRow[row] || {})[c] || '').trim();
+    const { columns, latest } = issueColumns(cols.map(c => at(first.day, c)), cols.map(c => at(first.month, c)), cols.map(c => at(first.year, c)));
+    columns.forEach((column, i) => { column.col = cols[i]; });
+    const marks = {};
+    for (const [code, place] of Object.entries(reg.places)) marks[code] = cols.map(c => at(place.row, c));
+    return { columns, latest, marks, blocks };
+  }
+
+  // Numbering of the register's issue number: 'number' (1, 2, 3), 'ordinal' (1st, 2nd, 3rd) or
+  // 'letter' (A, B, C ... Z, AA)
+  const NUMBERING_SCHEMES = ['number', 'ordinal', 'letter'];
+  function detectNumbering(value) {
+    const v = (value || '').trim();
+    if (/^\d+$/.test(v)) return 'number';
+    if (/^\d+\s*(st|nd|rd|th)$/i.test(v)) return 'ordinal';
+    if (/^[A-Z]{1,2}$/i.test(v)) return 'letter';
+    return null;
+  }
+  function ordinalSuffix(n) {
+    const tens = n % 100;
+    if (tens >= 11 && tens <= 13) return 'th';
+    return ['th', 'st', 'nd', 'rd'][n % 10] || 'th';
+  }
+  function parseNumbering(value) {
+    const v = (value || '').trim().toUpperCase();
+    const digits = /^(\d+)/.exec(v);
+    if (digits) return parseInt(digits[1], 10);
+    if (/^[A-Z]{1,2}$/.test(v)) return [...v].reduce((n, ch) => n * 26 + ch.charCodeAt(0) - 64, 0);
+    return null;
+  }
+  function formatNumbering(n, scheme) {
+    if (scheme === 'ordinal') return n + ordinalSuffix(n);
+    if (scheme === 'letter') {
+      let out = '';
+      for (let k = n; k > 0; k = Math.floor((k - 1) / 26)) out = String.fromCharCode(65 + ((k - 1) % 26)) + out;
+      return out;
+    }
+    return String(n);
+  }
+  // The issue number after `value`, written in `scheme` (default: the one `value` uses)
+  function nextIssueNumber(value, scheme) {
+    const n = parseNumbering(value);
+    return formatNumbering(n === null ? 1 : n + 1, scheme || detectNumbering(value) || 'number');
+  }
+
+  // A drawing's next revision after `prev`: C07 -> C08, P1 -> P2, 01 -> 02, 2nd -> 3rd, B -> C;
+  // a mark that isn't a code (a tick like "/") stays the same
+  function nextRevision(prev) {
+    const v = (prev || '').trim();
+    if (!v) return '';
+    let m = /^([A-Za-z]*)(\d+)$/.exec(v);
+    if (m) return m[1] + String(parseInt(m[2], 10) + 1).padStart(m[2].length, '0');
+    m = /^(\d+)\s*(st|nd|rd|th)$/i.exec(v);
+    if (m) return formatNumbering(parseInt(m[1], 10) + 1, 'ordinal');
+    if (/^[A-Z]{1,2}$/.test(v)) return formatNumbering(parseNumbering(v) + 1, 'letter');
+    if (/^[a-z]{1,2}$/.test(v)) return formatNumbering(parseNumbering(v) + 1, 'letter').toLowerCase();
+    return v;
+  }
+  // Whether `next` properly follows `prev` (anything follows no previous issue)
+  function revisionFollows(prev, next) {
+    if (!(prev || '').trim()) return true;
+    return (next || '').trim().toUpperCase() === nextRevision(prev).toUpperCase();
+  }
+
+  // Header date formats, detected from the register's current date and used to write the new one
+  const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+  const DATE_FORMATS = [
+    { id: 'dd.mm.yyyy', re: /^\d{1,2}\.\d{1,2}\.\d{4}$/ },
+    { id: 'dd/mm/yyyy', re: /^\d{1,2}\/\d{1,2}\/\d{4}$/ },
+    { id: 'dd-mm-yyyy', re: /^\d{1,2}-\d{1,2}-\d{4}$/ },
+    { id: 'dd.mm.yy', re: /^\d{1,2}\.\d{1,2}\.\d{2}$/ },
+    { id: 'dd/mm/yy', re: /^\d{1,2}\/\d{1,2}\/\d{2}$/ },
+    { id: 'yyyy-mm-dd', re: /^\d{4}-\d{2}-\d{2}$/ },
+    { id: 'dth mmmm yyyy', re: /^\d{1,2}(st|nd|rd|th)\s+[A-Za-z]+\s+\d{4}$/ },
+    { id: 'd mmmm yyyy', re: /^\d{1,2}\s+[A-Za-z]{4,}\s+\d{4}$/ },
+    { id: 'd mmm yyyy', re: /^\d{1,2}\s+[A-Za-z]{3}\s+\d{4}$/ }
+  ];
+  function detectDateFormat(text) {
+    const found = DATE_FORMATS.find(f => f.re.test((text || '').trim()));
+    return found ? found.id : null;
+  }
+  // date: { y, m, d } numbers
+  function formatDate(date, format) {
+    const dd = String(date.d).padStart(2, '0'), mm = String(date.m).padStart(2, '0');
+    const yyyy = String(date.y), yy = yyyy.slice(-2);
+    switch (format) {
+      case 'dd/mm/yyyy': return `${dd}/${mm}/${yyyy}`;
+      case 'dd-mm-yyyy': return `${dd}-${mm}-${yyyy}`;
+      case 'dd.mm.yy': return `${dd}.${mm}.${yy}`;
+      case 'dd/mm/yy': return `${dd}/${mm}/${yy}`;
+      case 'yyyy-mm-dd': return `${yyyy}-${mm}-${dd}`;
+      case 'dth mmmm yyyy': return `${date.d}${ordinalSuffix(date.d)} ${MONTH_NAMES[date.m - 1]} ${yyyy}`;
+      case 'd mmmm yyyy': return `${date.d} ${MONTH_NAMES[date.m - 1]} ${yyyy}`;
+      case 'd mmm yyyy': return `${date.d} ${MONTH_NAMES[date.m - 1].slice(0, 3)} ${yyyy}`;
+      default: return `${dd}.${mm}.${yyyy}`;
+    }
+  }
+
   // Whether a drawing's project (or client) text names the register's: every word of the
   // register's value appears in it, ignoring case and punctuation ("Park West LRD Site 7" is in
   // "Park West Site 7 LRD at Synge Way, Park West, Dublin 12")
@@ -1257,6 +1514,18 @@
     readDocxTitles,
     readDocxDetails,
     readDocxProject,
+    readDocxIssues,
+    editDocxIssue,
+    readXlsxIssues,
+    NUMBERING_SCHEMES,
+    detectNumbering,
+    formatNumbering,
+    nextIssueNumber,
+    nextRevision,
+    revisionFollows,
+    DATE_FORMATS,
+    detectDateFormat,
+    formatDate,
     editDocxProject,
     readXlsxProject,
     namesMatch,
