@@ -48,7 +48,7 @@
     return {
       title: readTitle(text),
       rev: readRevision(text),
-      scale: parsed.scale,
+      scale: parsed.scale || scalesOnSheet(items),
       size: (sizeField.match(SHEET_SIZE_RE) || [])[0] || parsed.size || (page ? sheetSizeOf(page.width, page.height) : '')
     };
   }
@@ -137,6 +137,20 @@
     let scale = at >= 0 ? value.slice(0, at) : sizeMatch ? value.replace(SHEET_SIZE_RE, '') : value;
     scale = scale.replace(/\s*([:@])\s*/g, '$1').replace(/^[\s,;-]+|[\s,;-]+$/g, '');
     return { scale, size: sizeMatch ? sizeMatch[0].toUpperCase() : '' };
+  }
+
+  // For a title block without a scale: every scale written anywhere on the sheet (view titles
+  // like "1 : 50"), largest first, e.g. "1:50/1:20". Not times (11:51:17), references (SECT 31:1)
+  // or gradients (FALL 1:40, RAMP 1:12).
+  const SHEET_SCALE_RE = /(?<![\d.:])1\s*:\s*(\d+(?:\.\d+)?)(?![\d:])/g;
+  const GRADIENT_RE = /\b(?:falls?|gradient|slope|pitch|ramp)\b/i;
+  function scalesOnSheet(items) {
+    const found = new Set();
+    for (const item of items) {
+      if (GRADIENT_RE.test(item.str)) continue;
+      for (const m of item.str.matchAll(SHEET_SCALE_RE)) found.add(Number(m[1]));
+    }
+    return [...found].sort((a, b) => b - a).map(n => `1:${n}`).join('/');
   }
 
   // ISO A sheet from the page size in points, allowing a few percent for plotter margins
