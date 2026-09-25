@@ -154,7 +154,8 @@ td.number{ font-family:Consolas, monospace; white-space:nowrap }
 /* Details read from each drawing's title block, each set shown by its checkbox */
 table.hide-file-titles .col-file-title, table.hide-file-rev .col-file-rev, table.hide-file-scale .col-file-scale{ display:none }
 th.col-file-rev, th.col-file-scale, td.file-rev, td.file-scale, td.file-size{ white-space:nowrap }
-td.file-title.differs{ color:var(--warn) }
+td.file-title.differs, td.file-scale.differs, td.file-size.differs{ color:var(--warn) }
+.register-value{ color:var(--muted); font-size:11px }
 td.file-detail.pending, td.file-detail.none{ color:var(--muted); font-style:italic }
 /* > and < in the headers: copy titles between the register and the files for the selected rows */
 button.title-copy{ margin:0 8px 0 0; padding:0 7px; font-size:12px; font-weight:600; line-height:18px }

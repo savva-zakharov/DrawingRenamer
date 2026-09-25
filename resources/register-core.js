@@ -245,13 +245,18 @@
 
   const CODE_HEADERS = ['DRAWING CODE', 'DRAWING NUMBER', 'DRAWING NO.', 'DRAWING NO', 'DWG. REF.', 'DWG REF'];
   const TITLE_HEADERS = ['DRAWING TITLE', 'TITLE'];
+  const SCALE_HEADERS = ['SCALE', 'SCALES'];
+  const SIZE_HEADERS = ['SIZE', 'SHEET SIZE', 'PAPER SIZE', 'DRAWING SIZE', 'DWG SIZE', 'SHEET'];
 
-  // Columns of a "DRAWING CODE" ... "DRAWING TITLE" header row, or null
+  // Columns of a "DRAWING CODE" ... "DRAWING TITLE" header row, or null. Scale and size columns
+  // are optional (undefined when the sheet has none).
   function headerColumns(cells) {
     const cols = Object.keys(cells).map(Number).sort((a, b) => a - b);
     const code = cols.find(c => CODE_HEADERS.includes(norm(cells[c])));
     const title = cols.find(c => TITLE_HEADERS.includes(norm(cells[c])));
-    return code !== undefined && title !== undefined && title > code ? { code, title } : null;
+    if (code === undefined || title === undefined || title <= code) return null;
+    const after = headers => cols.find(c => c > title && headers.includes(norm(cells[c])));
+    return { code, title, scale: after(SCALE_HEADERS), size: after(SIZE_HEADERS) };
   }
 
   // Drawings on one sheet: rows under a "DRAWING CODE" / "DRAWING TITLE" header, the code joined
@@ -259,10 +264,13 @@
   // without such a header, a row whose first text is a code and whose next text is its title
   function readSheetDrawings(rows) {
     const titles = {};
-    const places = {}; // code => { row, codeCols, titleCol }: where the drawing's cells are
+    const details = {}; // code => { scale, size } ('' where the sheet has no such column)
+    const places = {}; // code => { row, codeCols, titleCol, scaleCol, sizeCol }: where the drawing's cells are
     let issue = null;
     let codeFrom = null;
     let titleCol = null;
+    let scaleCol;
+    let sizeCol;
     // Sheets with header rows only read rows under a header (not the project details above it)
     const hasHeader = rows.some(r => headerColumns(r.cells));
     for (const { row, cells } of rows) {
@@ -271,6 +279,8 @@
       if (header) {
         codeFrom = header.code;
         titleCol = header.title;
+        scaleCol = header.scale;
+        sizeCol = header.size;
         continue;
       }
       // "ISSUE NO:" label followed by the issue number
@@ -286,7 +296,7 @@
         const codeCols = cols.filter(c => c >= codeFrom && c < titleCol);
         code = codeCols.map(c => cells[c].trim()).join('').replace(/\s+/g, '').toUpperCase();
         title = cells[titleCol];
-        place = { row, codeCols, titleCol };
+        place = { row, codeCols, titleCol, scaleCol, sizeCol };
       } else if (!hasHeader) {
         const i = cols.findIndex(c => isLooseCode(cells[c].trim().toUpperCase()));
         if (i >= 0) {
@@ -299,14 +309,17 @@
       if (code && isLooseCode(code) && title && collapse(title) && !(code in titles)) {
         titles[code] = collapse(title);
         places[code] = place;
+        const cellOf = col => (col !== undefined && cells[col] ? collapse(cells[col]) : '');
+        details[code] = { scale: cellOf(place.scaleCol), size: cellOf(place.sizeCol) };
       }
     }
-    return { titles, issue, places };
+    return { titles, details, issue, places };
   }
 
   // parts: { workbook, rels, sharedStrings, styles, sheets: { 'xl/worksheets/sheet1.xml': xml } }
-  // Returns { titles, sheet, issue } for the current register sheet: the one with the highest
-  // issue number, or the last sheet with drawings when there are no issue numbers.
+  // Returns { titles, details, places, sheet, path, issue } for the current register sheet: the
+  // one with the highest issue number, or the last sheet with drawings when there are no issue
+  // numbers. details: { code: { scale, size } }.
   function readXlsxRegister(parts) {
     const sharedStrings = parts.sharedStrings
       ? findElements(parts.sharedStrings, 'si').map(si => stringItemText(si.xml))
@@ -329,15 +342,15 @@
     sheets.forEach((sheet, order) => {
       const found = readSheetDrawings(readSheetRows(parts.sheets[sheet.path], sharedStrings, zeroPad));
       if (!Object.keys(found.titles).length) return;
-      const candidate = { titles: found.titles, places: found.places, sheet: sheet.name, path: sheet.path, issue: found.issue, order };
+      const candidate = { titles: found.titles, details: found.details, places: found.places, sheet: sheet.name, path: sheet.path, issue: found.issue, order };
       if (!best) best = candidate;
       else if (candidate.issue !== null && best.issue !== null) {
         if (candidate.issue >= best.issue) best = candidate;
       } else if (candidate.issue !== null || best.issue === null) best = candidate;
     });
     return best
-      ? { titles: best.titles, places: best.places, sheet: best.sheet, path: best.path, issue: best.issue }
-      : { titles: {}, places: {}, sheet: null, path: null, issue: null };
+      ? { titles: best.titles, details: best.details, places: best.places, sheet: best.sheet, path: best.path, issue: best.issue }
+      : { titles: {}, details: {}, places: {}, sheet: null, path: null, issue: null };
   }
 
   function columnName(index) {
@@ -375,11 +388,12 @@
     return open + cells.join('') + close;
   }
 
-  // Change titles and drawing numbers on the current register sheet of an Excel register.
-  // edits: { titles: { code: newTitle }, numbers: { code: newCode } } (codes as currently in the
-  // register). A code split one field per cell is split the same way again, so a new number must
-  // have the same number of fields. Returns { path, sheet, xml (of that sheet), applied: { titles,
-  // numbers } ({ code: { from, to } }), notFound: [code], errors: [message] }.
+  // Change titles, drawing numbers, scales and sizes on the current register sheet of an Excel
+  // register. edits: { titles: { code: newTitle }, numbers: { code: newCode }, scales: { code:
+  // scale }, sizes: { code: size } } (codes as currently in the register). A code split one field
+  // per cell is split the same way again, so a new number must have the same number of fields.
+  // Returns { path, sheet, xml (of that sheet), applied: { titles, numbers, scales, sizes }
+  // ({ code: { from, to } }), notFound: [code], errors: [message] }.
   function editXlsxRegister(parts, edits) {
     const reg = readXlsxRegister(parts);
     if (!reg.path) throw new Error('No drawings found in the workbook.');
@@ -388,7 +402,7 @@
     const rowCells = {};
     for (const r of readSheetRows(parts.sheets[reg.path], sharedStrings, zeroPad)) rowCells[r.row] = r.cells;
 
-    const applied = { titles: {}, numbers: {} };
+    const applied = { titles: {}, numbers: {}, scales: {}, sizes: {} };
     const notFound = [];
     const errors = [];
     const byRow = {}; // row => { column: text }
@@ -404,6 +418,24 @@
       if (to === reg.titles[code]) continue;
       set(place.row, place.titleCol, to);
       applied.titles[code] = { from: reg.titles[code], to };
+    }
+    for (const [field, colKey, header] of [['scales', 'scaleCol', 'SCALE'], ['sizes', 'sizeCol', 'SIZE']]) {
+      for (const [code, value] of Object.entries(edits[field] || {})) {
+        const place = reg.places[code];
+        if (!place) {
+          notFound.push(code);
+          continue;
+        }
+        if (place[colKey] === undefined) {
+          errors.push(`sheet "${reg.sheet}" has no ${header} column for ${code}`);
+          continue;
+        }
+        const from = reg.details[code][field === 'scales' ? 'scale' : 'size'];
+        const to = collapse(value);
+        if (to === from) continue;
+        set(place.row, place[colKey], to);
+        applied[field][code] = { from, to };
+      }
     }
     for (const [code, number] of Object.entries(edits.numbers || {})) {
       const place = reg.places[code];
@@ -692,7 +724,12 @@
 
   // Replace the text of one paragraph, keeping its paragraph properties and first run's formatting
   function setParagraphText(p, text, opts, rev) {
-    const { open, inner, close } = splitElement(p);
+    let { open, inner, close } = splitElement(p);
+    // An empty paragraph can be written <w:p/>
+    if (open.endsWith('/>')) {
+      open = open.replace(/\s*\/>$/, '>');
+      close = '</w:p>';
+    }
     const children = childElements(inner);
     const pPr = children.find(c => tagName(c) === 'w:pPr') || '';
     const body = children.filter(c => c !== pPr);
@@ -797,7 +834,16 @@
     return editDocxCells(xml, edits, 0, opts);
   }
 
-  // Replace the text of one column (0 = number, 1 = title) in the rows of the given drawings
+  // Apply { drawingNumber: scale } / { drawingNumber: size } to the scale and size columns; as editDocxTitles
+  function editDocxScales(xml, edits, opts = {}) {
+    return editDocxCells(xml, edits, 2, opts);
+  }
+  function editDocxSizes(xml, edits, opts = {}) {
+    return editDocxCells(xml, edits, 3, opts);
+  }
+
+  // Replace the text of one column (0 = number, 1 = title, 2 = scale, 3 = size) in the rows of
+  // the given drawings. A row without that column counts as not found.
   function editDocxCells(xml, edits, column, opts) {
     const rev = makeRevisions(xml, opts.author || 'Drawing Renamer', opts.date || new Date().toISOString().replace(/\.\d+Z$/, 'Z'));
     const applied = {};
@@ -805,6 +851,7 @@
     for (const { token, cells } of registerRows(xml)) {
       if (!(token in edits) || token in applied) continue;
       const target = cells[column];
+      if (!target) continue;
       const from = cellText(target.xml);
       const to = collapse(edits[token]);
       applied[token] = { from, to };
@@ -1059,6 +1106,8 @@
     readRowMarks,
     editDocxTitles,
     editDocxNumbers,
+    editDocxScales,
+    editDocxSizes,
     insertDocxRows,
     moveDocxRows,
     decodeXml
