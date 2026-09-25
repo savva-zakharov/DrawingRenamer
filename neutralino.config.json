@@ -2,6 +2,8 @@
   "$schema": "https://raw.githubusercontent.com/neutralinojs/neutralinojs/main/schemas/neutralino.config.schema.json",
   "applicationId": "com.drawingrenamer",
   "version": "1.0.0",
+  "applicationName": "Drawing Renamer",
+  "description": "Renames AutoCAD PDF drawings from a drawing register",
   "defaultMode": "window",
   "port": 0,
   "documentRoot": "/resources/",
