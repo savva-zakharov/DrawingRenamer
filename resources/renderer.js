@@ -8,6 +8,7 @@ const renameBtn = document.getElementById('rename');
 const folderBtn = document.getElementById('make-folder');
 const wordBtn = document.getElementById('save-word');
 const openRegisterBtn = document.getElementById('open-register');
+const exportRegisterBtn = document.getElementById('export-register');
 const entryBtn = document.getElementById('new-entry');
 const hideEmptyCheckbox = document.getElementById('hide-empty');
 const checkAllCheckbox = document.getElementById('check-all');
@@ -742,6 +743,11 @@ function updateButtons() {
   openRegisterBtn.hidden = !editable;
   openRegisterBtn.textContent = `OPEN IN ${registerAppName().toUpperCase()}`;
   openRegisterBtn.title = `Open ${state.registerPath ? baseName(state.registerPath) : 'the register'} in ${registerAppName()}. Close it there before saving changes from here.`;
+  exportRegisterBtn.hidden = !editable;
+  exportRegisterBtn.disabled = state.busy;
+  exportRegisterBtn.title = state.registerPath
+    ? `Export the register to ${baseName(datedPdfPath())} in this folder with ${registerAppName()}` + (changes ? ' (as last saved: the unsaved changes are left out)' : '')
+    : '';
 
   const which = selected ? `the ${selected} selected drawing${selected === 1 ? '' : 's'}` : 'the selected drawings';
   const copyNote = editable ? '' : '\nTitles can only be changed in a Word or Excel register';
@@ -3320,6 +3326,37 @@ try {
   if (res.exitCode !== 0 || !out.endsWith('OK')) throw new Error(out.replace(/^ERROR:\s*/, '') || (res.stdErr || '').trim() || `PowerShell exited with ${res.exitCode}`);
 }
 
+// The register's PDF in the working folder, named after it with today's date in front
+// (replacing a date it already starts with, e.g. "00-00-00 ")
+function datedPdfPath() {
+  const stem = baseName(state.registerPath).replace(/\.[^.]+$/, '').replace(/^\d{2}-\d{2}-\d{2}\s+/, '');
+  return joinPath(state.targetDir, `${datePrefix()} ${stem}.pdf`);
+}
+
+// Export the register, as last saved, to a dated PDF with Word or Excel
+async function exportRegisterPdf() {
+  if (state.busy || !canEditRegister()) return;
+  const excel = state.registerKind === 'xlsx';
+  const app = registerAppName();
+  const register = state.registerPath;
+  const pdf = datedPdfPath();
+  state.busy = true;
+  updateButtons();
+  try {
+    if (!(excel ? await checkExcelAvailable() : await checkWordAvailable())) throw new Error(`${app} isn't installed`);
+    appendLog(`🖨️ Exporting ${baseName(pdf)}${excel ? ` (sheet "${state.xlsxSheet}")` : ''} with ${app}...`);
+    if (await getStatsOrNull(pdf)) await backupToSS(pdf);
+    if (excel) await exportPdfWithExcel(register, state.xlsxSheet, pdf);
+    else await exportPdfWithWord(register, pdf);
+    appendLog(`✅ Exported ${baseName(pdf)}.`);
+  } catch (err) {
+    appendLog(`❌ Could not export ${baseName(pdf)}: ${err.message || err}`);
+  } finally {
+    state.busy = false;
+    await refresh();
+  }
+}
+
 async function saveToExcel() {
   const edits = pendingTitleEdits();
   const details = pendingDetailEdits();
@@ -3986,6 +4023,7 @@ rowsEl.addEventListener('mousedown', (e) => {
 
 folderBtn.addEventListener('click', makeFolder);
 wordBtn.addEventListener('click', saveToWord);
+exportRegisterBtn.addEventListener('click', exportRegisterPdf);
 openRegisterBtn.addEventListener('click', () => {
   if (state.registerPath) openPath(state.registerPath, baseName(state.registerPath));
 });
