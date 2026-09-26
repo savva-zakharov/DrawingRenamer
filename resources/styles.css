@@ -362,9 +362,20 @@ td.status-cell{ white-space:nowrap }
 .menu button{ display:block; width:100%; margin:0; padding:7px 14px; border:none; background:none; color:var(--fg); text-align:left; font-size:13px; white-space:nowrap }
 .menu button:hover:not(:disabled){ background:var(--accent-soft) }
 .menu button:disabled{ color:var(--muted) }
-.menu .menu-note{ display:block; font-size:11px; color:var(--muted) }
 .menu-sep{ height:1px; margin:4px 0; background:var(--border) }
-.menu-field{ display:flex; align-items:center; justify-content:space-between; gap:10px; padding:7px 14px 2px; margin:0; font-size:13px; color:var(--fg) }
-.menu-field input{ width:64px; padding:3px 6px; font-family:Consolas, monospace; font-size:13px; white-space:pre }
-.menu .menu-note{ padding:2px 14px 7px; white-space:nowrap; font-family:Consolas, monospace }
-.menu .menu-note.error{ color:var(--bad); font-family:inherit }
+/* Options tab */
+#options{ max-height:300px; overflow:auto }
+.options-grid{ display:grid; grid-template-columns:repeat(auto-fit, minmax(320px, 1fr)); gap:8px 32px; color:var(--fg) }
+.options-grid h4{ margin:0 0 6px; font-size:13px }
+.options-grid section h4:not(:first-child){ margin-top:12px }
+.option-row{ display:flex; align-items:center; gap:8px; margin:4px 0 }
+.option-row > label{ flex:none; min-width:150px }
+.app-row > label{ min-width:100px }
+.option-row .short-input{ width:90px; padding:3px 6px }
+.option-row .mono, .option-note.mono{ font-family:Consolas, monospace; white-space:pre }
+.option-row select{ padding:2px 4px }
+.option-row .app-path{ flex:1; min-width:0; padding:3px 6px }
+.option-row button{ flex:none; padding:2px 8px }
+.option-check{ margin:4px 0 }
+.option-note{ margin:0 0 6px; font-size:11px; color:var(--muted) }
+.option-note.error{ color:var(--bad) }

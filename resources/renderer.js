@@ -29,8 +29,29 @@ const tabButtons = [...document.querySelectorAll('nav.tabs [role=tab]')];
 
 PDFJS.workerSrc = 'js/pdfjs/pdf.worker.js';
 
-const SUPERSEDED_DIR = 'SS';
 const DEFAULT_SEPARATOR = ' - ';
+
+// App-wide options (the Options tab), kept in Neutralino's storage. The number–title separator
+// isn't one of them: it belongs to a folder and is kept in its layout file.
+const DEFAULT_SETTINGS = {
+  recursive: false,                 // also scan subfolders on disk
+  apps: { word: '', excel: '', pdf: '' }, // programs to open files with ('' = the system default)
+  fileDate: 'yy-mm-dd',             // date in front of superseded, backed up and exported files
+  ssFolder: 'SS',                   // folder for superseded drawings and backups
+  issueNumbering: 'number',         // new issues, when the register doesn't show a style
+  issueDateFormat: 'dd.mm.yyyy',
+  highlightColor: '#FFFF00'
+};
+let settings = JSON.parse(JSON.stringify(DEFAULT_SETTINGS));
+
+const FILE_DATE_FORMATS = ['yy-mm-dd', 'yyyy-mm-dd', 'yymmdd', 'yyyymmdd', 'dd-mm-yy', 'dd.mm.yy', 'dd-mm-yyyy'];
+// A date at the start of a file name in any of those formats, e.g. "26-09-26 " or "00-00-00 "
+const LEADING_DATE_RE = /^(?:\d{2}|\d{4})[-.]?\d{2}[-.]?(?:\d{4}|\d{2})\s+/;
+
+// The folder superseded drawings and backups go in
+function ssDir() {
+  return settings.ssFolder || DEFAULT_SETTINGS.ssFolder;
+}
 // Saved next to the register: which folder each drawing belongs in, for later runs
 const LAYOUT_FILE = 'drawing-renamer.json';
 
@@ -70,6 +91,8 @@ const state = {
   movedTokens: new Set(), // register numbers of drawings with a pending move
   registerXml: null,     // word/document.xml of a Word register, for previews
   editingToken: null,    // drawing whose title is being edited in the table
+  diskFolders: [],       // subfolders found on disk (recursive scanning)
+  implicitFolders: {},   // token => the subfolder its file was found in, when not put in a folder
   wordAvailable: null,   // whether Word can be driven to export PDFs (checked on first use)
   layoutBroken: false,   // the layout file couldn't be read, so don't overwrite it
   rows: [],
@@ -340,9 +363,38 @@ async function ensureDir(rel) {
 }
 
 // Files in the top folder plus every drawing folder in the layout
+// Every subfolder on disk (not superseded, hidden or temporary ones), for recursive scanning
+async function findSubfolders() {
+  const found = [];
+  const walk = async (dir, depth) => {
+    if (depth > 8 || found.length >= 500) return;
+    let entries;
+    try {
+      entries = await Neutralino.filesystem.readDirectory(absPath(dir));
+    } catch (e) {
+      return;
+    }
+    for (const { entry, type } of entries) {
+      // The default superseded folder is skipped too, in case the option was changed after files went in it
+      if (type !== 'DIRECTORY' || /^[.~$]/.test(entry) || [ssDir(), DEFAULT_SETTINGS.ssFolder].some(n => n.toLowerCase() === entry.toLowerCase())) continue;
+      const rel = relJoin(dir, entry);
+      found.push(rel);
+      await walk(rel, depth + 1);
+    }
+  };
+  await walk('', 1);
+  return found;
+}
+
+// The layout's folders, and with recursive scanning every subfolder on disk
+function drawingFolders() {
+  return settings.recursive ? withAncestors([...state.layout.folders, ...state.diskFolders]) : state.layout.folders;
+}
+
 async function scanFiles() {
   const files = [];
-  for (const dir of ['', ...state.layout.folders]) {
+  state.diskFolders = settings.recursive ? await findSubfolders() : [];
+  for (const dir of ['', ...drawingFolders()]) {
     let names;
     try {
       names = await listFiles(absPath(dir));
@@ -370,9 +422,10 @@ async function loadLayout() {
     const folders = Array.isArray(data.folders) ? data.folders.filter(f => typeof f === 'string') : [];
     const assignments = {};
     for (const [token, folder] of Object.entries(data.assignments || {})) {
-      if (typeof folder !== 'string' || !folder) continue;
+      if (typeof folder !== 'string') continue;
+      // '' keeps a drawing found in a subfolder (recursive scanning) in the top folder
       assignments[token] = folder;
-      if (!folders.includes(folder)) folders.push(folder);
+      if (folder && !folders.includes(folder)) folders.push(folder);
     }
     const titleEdits = {};
     for (const [token, title] of Object.entries(data.titleEdits || {})) {
@@ -483,8 +536,17 @@ async function saveLayout() {
   }
 }
 
+// A drawing's folder: the one it was put in ('' for the top folder), or with recursive scanning
+// the subfolder its file was found in
 function folderOf(token) {
-  return state.layout.assignments[token] || '';
+  if (token in state.layout.assignments) return state.layout.assignments[token];
+  return state.implicitFolders[token] || '';
+}
+
+// Back to the top folder: a drawing found in a subfolder is put there explicitly ('')
+function clearAssignment(token) {
+  if (state.implicitFolders[token]) state.layout.assignments[token] = '';
+  else delete state.layout.assignments[token];
 }
 
 // --------------------
@@ -528,7 +590,7 @@ function matchExistingCase(folder) {
   let result = '';
   for (const part of folder.split('/')) {
     const candidate = relJoin(result, part);
-    result = state.layout.folders.find(f => f.toLowerCase() === candidate.toLowerCase()) || candidate;
+    result = drawingFolders().find(f => f.toLowerCase() === candidate.toLowerCase()) || candidate;
   }
   return result;
 }
@@ -542,7 +604,7 @@ function validateFolderName(input) {
     if (/[:*?"<|]/.test(part)) throw new Error('Folder names can\'t contain : * ? " < |');
     if (part === '.' || part === '..' || /[. ]$/.test(part)) throw new Error('Folder names can\'t end with a dot or space.');
     if (/^(con|prn|aux|nul|com\d|lpt\d)$/i.test(part)) throw new Error(`"${part}" is reserved by Windows.`);
-    if (part.toLowerCase() === SUPERSEDED_DIR.toLowerCase()) throw new Error(`"${SUPERSEDED_DIR}" is used for superseded drawings.`);
+    if (part.toLowerCase() === ssDir().toLowerCase()) throw new Error(`"${ssDir()}" is used for superseded drawings.`);
   }
   return parts.join('/');
 }
@@ -622,7 +684,16 @@ function computeRows(tokenMap, match, files, addedTimes, choices) {
   const existing = new Set(files.map(f => f.rel.toLowerCase()));
 
   const rows = [];
+  state.implicitFolders = {};
   for (const token of Object.keys(state.titles)) {
+    // With recursive scanning, a drawing not put in a folder stays in the subfolder its file is in
+    // (the file picked for it, or else the newest)
+    const found = match.byToken[token];
+    if (settings.recursive && found && !(token in state.layout.assignments)) {
+      const picked = found.find(f => f.rel === choices.get(token)) ||
+        found.slice().sort((a, b) => (addedTimes[b.rel] || 0) - (addedTimes[a.rel] || 0) || a.rel.localeCompare(b.rel))[0];
+      if (picked.dir) state.implicitFolders[token] = picked.dir;
+    }
     const title = state.titles[token];
     const origToken = state.origOf[token];
     const isNew = origToken === undefined;
@@ -781,7 +852,7 @@ const STATUS_LABELS = {
   rename: 'Rename',
   move: 'Move',
   supersede: 'Replace',
-  superseded: 'To SS',
+  get superseded() { return `To ${ssDir()}`; },
   ok: 'Named',
   skip: 'Not used',
   none: 'Missing',
@@ -791,8 +862,8 @@ const STATUS_LABELS = {
 
 const STATUS_TIPS = {
   move: 'Already named; will be moved into its folder',
-  supersede: `Will be renamed; the current file moves to ${SUPERSEDED_DIR}\\`,
-  superseded: `Will be moved to ${SUPERSEDED_DIR}\\ when the replacement is renamed`,
+  get supersede() { return `Will be renamed; the current file moves to ${ssDir()}\\`; },
+  get superseded() { return `Will be moved to ${ssDir()}\\ when the replacement is renamed`; },
   skip: 'Left as it is; pick it with the radio button to use it instead',
   none: 'No file matches this drawing number'
 };
@@ -816,7 +887,7 @@ function makeCheckbox(checked, onClick) {
 // Rows split into the top folder, each drawing folder (in tree order), then files matching nothing
 function sections(rows) {
   const top = { folder: '', rows: [] };
-  const byFolder = new Map(state.layout.folders.slice().sort(compareFolders).map(f => [f, { folder: f, rows: [] }]));
+  const byFolder = new Map(drawingFolders().slice().sort(compareFolders).map(f => [f, { folder: f, rows: [] }]));
   const unmatched = { unmatched: true, rows: [] };
   for (const row of rows) {
     if (row.status === 'unmatched') unmatched.rows.push(row);
@@ -878,7 +949,7 @@ function renderSectionHeader(section, visible, inside) {
   }
 
   // A folder can be dropped from the layout once nothing is assigned to it or stored in it, and it has no subfolders
-  if (section.folder && !section.rows.length && !state.files.some(f => f.dir === section.folder) &&
+  if (section.folder && state.layout.folders.includes(section.folder) && !section.rows.length && !state.files.some(f => f.dir === section.folder) &&
       !state.layout.folders.some(f => f !== section.folder && isInside(f, section.folder))) {
     const btn = document.createElement('button');
     btn.className = 'link';
@@ -946,7 +1017,7 @@ function canReorder() {
 }
 
 function canDragDrawings() {
-  return !!state.registerKind && (canReorder() || state.layout.folders.length > 0);
+  return !!state.registerKind && (canReorder() || drawingFolders().length > 0);
 }
 
 function clearDropMarks() {
@@ -1059,7 +1130,7 @@ function parentFolder(folder) {
 function setDrawingFolder(token, folder) {
   if (folderOf(token) === folder) return false;
   if (folder) state.layout.assignments[token] = folder;
-  else delete state.layout.assignments[token];
+  else clearAssignment(token);
   appendLog(`📁 ${token} will go ${folder ? 'into ' + displayPath(folder) : 'to the top folder'} when you press RENAME.`);
   return true;
 }
@@ -1271,7 +1342,7 @@ function renderRow(row, newFiles, alt, depth) {
 
   let target = row.targetRel ? displayPath(row.targetRel) : '';
   if (row.status === 'ok') target = '(already named)';
-  else if (row.status === 'superseded') target = displayPath(relJoin(relJoin(row.dir, SUPERSEDED_DIR), supersededName(row.file)));
+  else if (row.status === 'superseded') target = displayPath(relJoin(relJoin(row.dir, ssDir()), supersededName(row.file)));
   else if (row.status === 'skip' || row.status === 'none') target = '';
   // Stacked, the new name goes under the current one, with what changes marked
   const canAdd = row.status === 'unmatched' && state.registerKind === 'docx';
@@ -1864,6 +1935,7 @@ function switchTab(name) {
     renderRevisionData(true);
     loadFileDetails();
   }
+  if (name === 'options') renderOptions();
 }
 
 function el(tag, text, cls) {
@@ -2195,17 +2267,19 @@ function issueRows() {
   return selectedRows().filter(r => r.token && r.rel && !r.isNew && state.registerIssues.marks[r.origToken] && !seen.has(r.origToken) && seen.add(r.origToken));
 }
 
+const SCHEME_LABELS = { number: '1, 2, 3', ordinal: '1st, 2nd, 3rd', letter: 'A, B, C' };
+
 function revisionChoices() {
   const issueNo = headerField('issueNo');
   const date = headerField('date');
   if (!state.revisionUi) state.revisionUi = { mode: 'new', scheme: null, dateFormat: null, highlight: null, color: null, marks: {} };
   const ui = state.revisionUi;
-  if (!ui.scheme) ui.scheme = (issueNo && RegisterCore.detectNumbering(issueNo.value)) || 'number';
-  if (!ui.dateFormat) ui.dateFormat = (date && RegisterCore.detectDateFormat(date.value)) || 'dd.mm.yyyy';
+  if (!ui.scheme) ui.scheme = (issueNo && RegisterCore.detectNumbering(issueNo.value)) || settings.issueNumbering;
+  if (!ui.dateFormat) ui.dateFormat = (date && RegisterCore.detectDateFormat(date.value)) || settings.issueDateFormat;
   // Highlight the issue column when the register already highlights its latest one, in that colour
   const inUse = state.registerIssues && state.registerIssues.highlight;
   if (ui.highlight === null) ui.highlight = !!inUse;
-  if (!ui.color) ui.color = '#' + (inUse || 'FFFF00');
+  if (!ui.color) ui.color = inUse ? '#' + inUse : settings.highlightColor;
   return ui;
 }
 
@@ -2281,7 +2355,7 @@ function renderRevisionData(force = false) {
   // Issue number and date formats
   const dl = el('dl');
   if (issueNo) {
-    const schemeLabels = { number: '1, 2, 3', ordinal: '1st, 2nd, 3rd', letter: 'A, B, C' };
+    const schemeLabels = SCHEME_LABELS;
     const detected = RegisterCore.detectNumbering(issueNo.value);
     const dd = el('dd');
     const sel = select(RegisterCore.NUMBERING_SCHEMES.map(sc => [sc, schemeLabels[sc] + (sc === detected ? ' (in use)' : '')]), ui.scheme, v => { ui.scheme = v; renderRevisionData(true); });
@@ -2461,7 +2535,7 @@ function render(newFiles) {
   }
   rowsEl.textContent = '';
   fileDetailCells.clear();
-  const showHeaders = state.layout.folders.length > 0;
+  const showHeaders = drawingFolders().length > 0;
   state.displayKeys = [];
   let dataRows = 0;
 
@@ -2710,7 +2784,7 @@ async function refresh() {
     }
     if (await pruneResetFolders()) {
       await saveLayout();
-      state.files = state.files.filter(f => !f.dir || state.layout.folders.includes(f.dir));
+      state.files = state.files.filter(f => !f.dir || drawingFolders().includes(f.dir));
     }
     rebuild(newFiles);
     loadFileDetails();
@@ -2744,7 +2818,7 @@ async function stopWatching() {
 async function syncWatchers() {
   if (state.pollTimer) return;
   const wanted = [];
-  for (const dir of ['', ...state.layout.folders]) {
+  for (const dir of ['', ...drawingFolders()]) {
     const stats = await getStatsOrNull(absPath(dir));
     if (stats && stats.isDirectory) wanted.push(dir);
   }
@@ -2828,7 +2902,7 @@ function askForFolder(count, current) {
     count === 1 ? 'Put 1 drawing in folder' : `Put ${count} drawings in folder`;
   const list = document.getElementById('folder-list');
   list.textContent = '';
-  for (const f of state.layout.folders) {
+  for (const f of drawingFolders()) {
     const opt = document.createElement('option');
     opt.value = displayPath(f);
     list.appendChild(opt);
@@ -2877,7 +2951,7 @@ async function makeFolder() {
   if (result.action === 'cancel') return;
 
   if (result.action === 'remove') {
-    for (const token of tokens) delete state.layout.assignments[token];
+    for (const token of tokens) clearAssignment(token);
     appendLog(`📁 ${tokens.length} drawing(s) will go back to the top folder when you press RENAME.`);
   } else {
     const folder = matchExistingCase(result.folder);
@@ -2895,9 +2969,18 @@ async function makeFolder() {
 // --------------------
 
 // Today's date as YY-MM-DD, matching the register's file naming
-function datePrefix(date = new Date()) {
+function datePrefix(date = new Date(), format = settings.fileDate) {
   const pad = n => String(n).padStart(2, '0');
-  return `${pad(date.getFullYear() % 100)}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+  const yy = pad(date.getFullYear() % 100), yyyy = String(date.getFullYear()), mm = pad(date.getMonth() + 1), dd = pad(date.getDate());
+  switch (format) {
+    case 'yyyy-mm-dd': return `${yyyy}-${mm}-${dd}`;
+    case 'yymmdd': return `${yy}${mm}${dd}`;
+    case 'yyyymmdd': return `${yyyy}${mm}${dd}`;
+    case 'dd-mm-yy': return `${dd}-${mm}-${yy}`;
+    case 'dd.mm.yy': return `${dd}.${mm}.${yy}`;
+    case 'dd-mm-yyyy': return `${dd}-${mm}-${yyyy}`;
+    default: return `${yy}-${mm}-${dd}`;
+  }
 }
 
 function supersededName(file) {
@@ -2907,7 +2990,7 @@ function supersededName(file) {
 // Move a file into the SS (superseded) folder next to it, prefixed with today's date,
 // adding " (2)", " (3)"... if that name is taken there
 async function supersede(file) {
-  const ssRel = relJoin(file.dir, SUPERSEDED_DIR);
+  const ssRel = relJoin(file.dir, ssDir());
   await ensureDir(ssRel);
 
   const stem = supersededName(file.name).replace(/\.pdf$/i, '');
@@ -2938,7 +3021,7 @@ async function renameSelected() {
       // Keep using the renamed file, so leftover older copies don't try to replace it
       if (row.group) state.choices.set(row.token, row.targetRel);
       // Renamed files shouldn't be highlighted as new arrivals
-      state.knownFiles.add(row.targetRel);
+      if (state.knownFiles) state.knownFiles.add(row.targetRel);
     } catch (err) {
       appendLog(`❌ Failed to rename ${displayPath(row.rel)}: ${err.message || err}`);
     }
@@ -2967,15 +3050,15 @@ async function isOpenInWord(docxPath) {
 
 // Copy a file into the top folder's SS folder with today's date in front, before it's overwritten
 async function backupToSS(filePath) {
-  await ensureDir(SUPERSEDED_DIR);
+  await ensureDir(ssDir());
   const name = baseName(filePath);
   const dot = name.lastIndexOf('.');
   const stem = supersededName(name.slice(0, dot));
   const ext = name.slice(dot);
   let dest = stem + ext;
-  for (let n = 2; await getStatsOrNull(absPath(relJoin(SUPERSEDED_DIR, dest))); n++) dest = `${stem} (${n})${ext}`;
-  await Neutralino.filesystem.copy(filePath, absPath(relJoin(SUPERSEDED_DIR, dest)));
-  appendLog(`📦 Backed up ${name} → ${SUPERSEDED_DIR}\\${dest}`);
+  for (let n = 2; await getStatsOrNull(absPath(relJoin(ssDir(), dest))); n++) dest = `${stem} (${n})${ext}`;
+  await Neutralino.filesystem.copy(filePath, absPath(relJoin(ssDir(), dest)));
+  appendLog(`📦 Backed up ${name} → ${ssDir()}\\${dest}`);
 }
 
 // PowerShell -EncodedCommand takes base64 of UTF-16LE
@@ -3125,7 +3208,7 @@ async function askWordOptions(edits, additions, numbers, movedCount, details = [
   exportBox.disabled = !wordOk;
   exportBox.checked = wordOk;
   document.getElementById('word-export-note').textContent = wordOk
-    ? ((await getStatsOrNull(pdfTarget)) ? `Overwrites ${baseName(pdfTarget)} (a dated copy of the old one goes to ${SUPERSEDED_DIR}\\).` : `Creates ${baseName(pdfTarget)}.`)
+    ? ((await getStatsOrNull(pdfTarget)) ? `Overwrites ${baseName(pdfTarget)} (a dated copy of the old one goes to ${ssDir()}\\).` : `Creates ${baseName(pdfTarget)}.`)
       + (excel && state.xlsxSheet ? ` Only sheet "${state.xlsxSheet}" is exported.` : '')
     : `Microsoft ${registerAppName()} isn't available, so export the PDF from ${registerAppName()} yourself.`;
   document.getElementById('word-backup-note').textContent =
@@ -3388,7 +3471,7 @@ try {
 // The register's PDF in the working folder, named after it with today's date in front
 // (replacing a date it already starts with, e.g. "00-00-00 ")
 function datedPdfPath() {
-  const stem = baseName(state.registerPath).replace(/\.[^.]+$/, '').replace(/^\d{2}-\d{2}-\d{2}\s+/, '');
+  const stem = baseName(state.registerPath).replace(/\.[^.]+$/, '').replace(LEADING_DATE_RE, '');
   return joinPath(state.targetDir, `${datePrefix()} ${stem}.pdf`);
 }
 
@@ -3731,9 +3814,6 @@ function openMenu() {
   const open = menuItem('open-folder');
   open.disabled = !state.targetDir;
   open.title = state.targetDir ? displayPath(state.targetDir) : 'Load a register first';
-  separatorInput.value = state.layout.separator;
-  separatorInput.disabled = !loaded;
-  showSeparatorPreview(state.layout.separator);
   menuEl.hidden = false;
   menuBtn.setAttribute('aria-expanded', 'true');
 }
@@ -3790,12 +3870,153 @@ async function setSeparator(sep) {
 
 separatorInput.addEventListener('input', () => showSeparatorPreview(separatorInput.value));
 separatorInput.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') {
-    setSeparator(separatorInput.value);
-    closeMenu();
-  }
+  if (e.key === 'Enter') setSeparator(separatorInput.value);
 });
 separatorInput.addEventListener('change', () => setSeparator(separatorInput.value));
+
+// ---------- options ----------
+const optFileDate = document.getElementById('opt-file-date');
+const optSsFolder = document.getElementById('opt-ss-folder');
+const optSsNote = document.getElementById('opt-ss-note');
+const optRecursive = document.getElementById('opt-recursive');
+const optIssueNumbering = document.getElementById('opt-issue-numbering');
+const optIssueDate = document.getElementById('opt-issue-date');
+const optHighlight = document.getElementById('opt-highlight');
+const APP_NAMES = { word: 'Word', excel: 'Excel', pdf: 'PDF viewer' };
+
+function fillSelect(sel, options, value) {
+  sel.textContent = '';
+  for (const [v, label] of options) {
+    const opt = el('option', label);
+    opt.value = v;
+    opt.selected = v === value;
+    sel.appendChild(opt);
+  }
+}
+
+// Why a superseded folder name can't be used, or null
+function ssFolderProblem(name) {
+  if (!name) return 'Enter a folder name.';
+  if (/[\\/:*?"<>|]/.test(name)) return 'Folder names can\'t contain \\ / : * ? " < > |';
+  if (/[. ]$/.test(name) || /^(con|prn|aux|nul|com\d|lpt\d)$/i.test(name)) return 'Windows doesn\'t allow that folder name.';
+  if (state.layout.folders.some(f => f.split('/').some(p => p.toLowerCase() === name.toLowerCase()))) return 'A drawing folder already has that name.';
+  return null;
+}
+
+// Shows the current options (the separator is this folder's)
+function renderOptions() {
+  const today = new Date();
+  const loaded = !!state.registerPath;
+  separatorInput.value = state.layout.separator;
+  separatorInput.disabled = !loaded;
+  separatorInput.title = loaded ? '' : 'Load a register first: the separator is saved with its folder';
+  showSeparatorPreview(state.layout.separator);
+  fillSelect(optFileDate, FILE_DATE_FORMATS.map(f => [f, `${f.toUpperCase()}  (${datePrefix(today, f)})`]), settings.fileDate);
+  optSsFolder.value = ssDir();
+  optSsNote.classList.remove('error');
+  optSsNote.textContent = `e.g. ${ssDir()}\\${datePrefix(today)} PA-001${state.layout.separator}Masterplan.pdf`;
+  optRecursive.checked = settings.recursive;
+  fillSelect(optIssueNumbering, RegisterCore.NUMBERING_SCHEMES.map(sc => [sc, SCHEME_LABELS[sc]]), settings.issueNumbering);
+  const parts = todayParts();
+  fillSelect(optIssueDate, RegisterCore.DATE_FORMATS.map(f => [f.id, RegisterCore.formatDate(parts, f.id)]), settings.issueDateFormat);
+  optHighlight.value = settings.highlightColor.toLowerCase();
+  for (const row of document.querySelectorAll('.app-row')) {
+    const input = row.querySelector('.app-path');
+    input.value = settings.apps[row.dataset.app];
+    input.title = input.value || `Opens with the program Windows uses for ${APP_NAMES[row.dataset.app] === 'PDF viewer' ? 'PDFs' : APP_NAMES[row.dataset.app] + ' files'}`;
+    row.querySelector('.app-clear').disabled = !input.value;
+  }
+}
+
+async function loadSettings() {
+  try {
+    const data = JSON.parse(await Neutralino.storage.getData('settings'));
+    const apps = data.apps && typeof data.apps === 'object' ? data.apps : {};
+    settings = {
+      recursive: data.recursive === true,
+      apps: Object.fromEntries(Object.keys(DEFAULT_SETTINGS.apps).map(k => [k, typeof apps[k] === 'string' ? apps[k] : ''])),
+      fileDate: FILE_DATE_FORMATS.includes(data.fileDate) ? data.fileDate : DEFAULT_SETTINGS.fileDate,
+      ssFolder: typeof data.ssFolder === 'string' && data.ssFolder && !/[\\/:*?"<>|]/.test(data.ssFolder) ? data.ssFolder : DEFAULT_SETTINGS.ssFolder,
+      issueNumbering: RegisterCore.NUMBERING_SCHEMES.includes(data.issueNumbering) ? data.issueNumbering : DEFAULT_SETTINGS.issueNumbering,
+      issueDateFormat: RegisterCore.DATE_FORMATS.some(f => f.id === data.issueDateFormat) ? data.issueDateFormat : DEFAULT_SETTINGS.issueDateFormat,
+      highlightColor: /^#[0-9a-f]{6}$/i.test(data.highlightColor || '') ? data.highlightColor.toUpperCase() : DEFAULT_SETTINGS.highlightColor
+    };
+  } catch (e) {
+    // nothing saved yet: the defaults
+  }
+  renderOptions();
+}
+
+async function setOption(key, value, message) {
+  settings[key] = value;
+  try {
+    await Neutralino.storage.setData('settings', JSON.stringify(settings));
+  } catch (err) {
+    appendLog(`❌ Could not save the options: ${err.message || err}`);
+  }
+  if (message) appendLog(`⚙️ ${message}`);
+  renderOptions();
+}
+
+optFileDate.addEventListener('change', async () => {
+  await setOption('fileDate', optFileDate.value, `Dated files now start with ${optFileDate.value.toUpperCase()}, e.g. ${datePrefix(new Date(), optFileDate.value)}.`);
+  if (state.match) rebuild();
+});
+optSsFolder.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') optSsFolder.blur();
+  if (e.key === 'Escape') {
+    optSsFolder.value = ssDir();
+    optSsFolder.blur();
+  }
+});
+optSsFolder.addEventListener('change', async () => {
+  const name = optSsFolder.value.trim();
+  if (name === ssDir()) return renderOptions();
+  const problem = ssFolderProblem(name);
+  if (problem) {
+    optSsNote.textContent = problem;
+    optSsNote.classList.add('error');
+    return;
+  }
+  const old = ssDir();
+  await setOption('ssFolder', name, `Superseded drawings and backups now go in ${name}\\; the ones already in ${old}\\ stay there.`);
+  await refresh();
+});
+optRecursive.addEventListener('change', async () => {
+  await setOption('recursive', optRecursive.checked, optRecursive.checked ? 'Scanning subfolders on disk too.' : 'Scanning only the top folder and drawing folders.');
+  // Files found in the subfolders aren't new, so they aren't logged or flashed as new
+  state.knownFiles = null;
+  await refresh();
+});
+optIssueNumbering.addEventListener('change', () => setOption('issueNumbering', optIssueNumbering.value, `New issues are numbered ${SCHEME_LABELS[optIssueNumbering.value]} when the register doesn't show a style.`));
+optIssueDate.addEventListener('change', () => setOption('issueDateFormat', optIssueDate.value, `New issues are dated like ${RegisterCore.formatDate(todayParts(), optIssueDate.value)} when the register doesn't show a format.`));
+optHighlight.addEventListener('change', () => setOption('highlightColor', optHighlight.value.toUpperCase(), `New issues are highlighted in ${optHighlight.value.toUpperCase()} when the register doesn't already highlight them.`));
+
+for (const row of document.querySelectorAll('.app-row')) {
+  const app = row.dataset.app;
+  const input = row.querySelector('.app-path');
+  const setApp = (path) => {
+    const apps = { ...settings.apps, [app]: path.trim().replace(/^"(.*)"$/, '$1') };
+    return setOption('apps', apps, apps[app] ? `${APP_NAMES[app]} files now open with ${apps[app]}.` : `${APP_NAMES[app]} files now open with the system default.`);
+  };
+  input.addEventListener('change', () => setApp(input.value));
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') input.blur();
+  });
+  row.querySelector('.app-clear').addEventListener('click', () => setApp(''));
+  row.querySelector('.app-browse').addEventListener('click', async () => {
+    try {
+      const picked = await Neutralino.os.showOpenDialog(`Open ${APP_NAMES[app] === 'PDF viewer' ? 'PDFs' : APP_NAMES[app] + ' files'} with`, {
+        filters: [{ name: 'Programs', extensions: ['exe'] }, { name: 'All files', extensions: ['*'] }]
+      });
+      if (picked && picked.length) await setApp(picked[0]);
+    } catch (err) {
+      appendLog(`❌ Could not choose a program: ${err.message || err}`);
+    }
+  });
+}
+
+loadSettings();
 
 // ---------- discard unsaved register changes ----------
 function unsavedRegisterChanges() {
@@ -3864,8 +4085,24 @@ function openFile(rel) {
   return openPath(absPath(rel), displayPath(rel));
 }
 
+// The program chosen in the Options tab for a file's type, or '' for the system default
+function appFor(filePath) {
+  const ext = (filePath.match(/\.([^.\\/]+)$/) || [])[1] || '';
+  if (/^doc[xm]?$/i.test(ext)) return settings.apps.word;
+  if (/^xls[xmb]?$/i.test(ext)) return settings.apps.excel;
+  if (/^pdf$/i.test(ext)) return settings.apps.pdf;
+  return '';
+}
+
 async function openPath(filePath, shown) {
+  const app = appFor(filePath);
   try {
+    if (app) {
+      const res = await runPowerShell(`try { Start-Process -FilePath ${psString(app)} -ArgumentList ${psString('"' + filePath + '"')} -ErrorAction Stop; 'OK' } catch { 'ERROR: ' + $_.Exception.Message; exit 1 }`);
+      const out = (res.stdOut || '').trim();
+      if (res.exitCode !== 0 || !out.endsWith('OK')) throw new Error(`${out.replace(/^ERROR:\s*/, '') || `${baseName(app)} didn't start`} (set in Options)`);
+      return;
+    }
     if (typeof NL_OS !== 'undefined' && NL_OS !== 'Windows') await Neutralino.os.open(filePath);
     else await Neutralino.os.execCommand(`explorer.exe "${filePath.replace(/\//g, '\\')}"`, { background: true });
   } catch (err) {
@@ -3901,6 +4138,7 @@ async function resetFolders() {
   }
   if (answer !== 'YES') return;
   state.layout.assignments = {};
+  for (const token of Object.keys(state.implicitFolders)) state.layout.assignments[token] = '';
   state.layout.foldersToRemove = folders;
   appendLog(`📁 Took ${assigned} drawing(s) out of their folders; files move to the top folder when you press RENAME.`);
   await saveLayout();
@@ -3937,7 +4175,7 @@ async function pruneResetFolders() {
           await Neutralino.filesystem.remove(absPath(folder));
           appendLog(`📁 Removed empty folder ${displayPath(folder)}.`);
         } else {
-          appendLog(`📁 ${displayPath(folder)} is no longer a drawing folder; it still holds other files (e.g. ${SUPERSEDED_DIR}), so it was left on disk.`);
+          appendLog(`📁 ${displayPath(folder)} is no longer a drawing folder; it still holds other files (e.g. ${ssDir()}), so it was left on disk.`);
         }
       } else {
         appendLog(`📁 Removed folder ${displayPath(folder)} from the layout.`);

@@ -48,3 +48,6 @@ neutralinojs.log
 resources/js/pdfjs/
 target/
 resources/js/jszip/
+
+# Neutralino storage (the app's options)
+.storage/
