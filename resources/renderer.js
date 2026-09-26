@@ -252,7 +252,9 @@ async function readFileDetails(filePath, worker) {
       // The viewport has y downwards; title block parsing wants y upwards
       return {
         str: i.str, x: m[4], y: viewport.height - m[5], h: Math.hypot(m[2], m[3]) || 1,
-        rotated: Math.abs(m[1]) > Math.abs(m[0]) * 0.05
+        rotated: Math.abs(m[1]) > Math.abs(m[0]) * 0.05,
+        // Reading direction, y upwards: sheets plotted sideways on the page are turned to read
+        dx: m[0], dy: -m[1]
       };
     });
     return RegisterCore.readTitleBlock(items, { width: viewport.width, height: viewport.height });
