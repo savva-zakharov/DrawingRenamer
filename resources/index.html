@@ -57,12 +57,13 @@
         <label class="inline" title="Read the title printed in each drawing's title block"><input type="checkbox" id="show-file-titles" /> Show in-file titles</label>
         <label class="inline" title="Read the revision from each drawing's title block"><input type="checkbox" id="show-file-rev" /> Revision</label>
         <label class="inline" title="Read the scale and sheet size from each drawing's title block"><input type="checkbox" id="show-file-scale" /> Scale &amp; size</label>
+        <label class="inline" title="Read the project and client from each drawing's title block and compare them with the register's"><input type="checkbox" id="show-file-project" /> Project &amp; client</label>
         <label class="inline" title="Show the register and in-file titles, and the current and new file names, one above the other with their differences marked"><input type="checkbox" id="stack-compare" /> Stack comparisons</label>
       </div>
     </header>
 
     <main id="table-wrap">
-      <table id="drawings" class="hide-file-titles hide-file-rev hide-file-scale">
+      <table id="drawings" class="hide-file-titles hide-file-rev hide-file-scale hide-file-project">
         <thead>
           <tr>
             <th class="col-drag"></th>
@@ -73,6 +74,8 @@
             <th class="col-file-rev">Rev</th>
             <th class="col-file-scale"><button id="details-from-files" class="title-copy">&lt;</button>Scale</th>
             <th class="col-file-scale">Size</th>
+            <th class="col-file-project">Project<div class="stacked-only stack-label">Client</div></th>
+            <th class="col-file-project unstacked-only">Client</th>
             <th>Current file<div class="stacked-only stack-label">→ New name</div></th>
             <th class="unstacked-only">New name</th>
             <th class="col-status">Status</th>
