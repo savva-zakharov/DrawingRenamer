@@ -1295,14 +1295,17 @@ function renderRow(row, newFiles, alt, depth) {
     if (!row.chosen) tr.classList.add('not-chosen');
   }
 
-  // Double-clicking the row opens its file, except where double-clicking edits (titles, numbers);
-  // right-clicking it offers the file, its source model or CAD file, and its folder
+  // Right-clicking the row offers to copy the text clicked, and with a file to open it, its source
+  // model or CAD file, or its folder
+  tr.addEventListener('contextmenu', (e) => {
+    if (e.target.closest('input')) return;
+    const copy = copyTarget(e.target);
+    if (!copy && !row.rel) return;
+    e.preventDefault();
+    openRowMenu(e.clientX, e.clientY, row, copy);
+  });
+  // Double-clicking the row opens its file, except where double-clicking edits (titles, numbers)
   if (row.rel) {
-    tr.addEventListener('contextmenu', (e) => {
-      if (e.target.closest('input')) return;
-      e.preventDefault();
-      openRowMenu(e.clientX, e.clientY, row);
-    });
     tr.addEventListener('dblclick', (e) => {
       if (e.target.closest('input, button, label, select, a, .editable')) return;
       window.getSelection().removeAllRanges();
@@ -4144,7 +4147,52 @@ function rowMenuItem(label, detail, onClick) {
 }
 
 // The source file entry: what the drawing's title block says, reading the file first if needed
-function renderRowMenu(row) {
+// The text of the table cell (or stacked line) at `target`, and its column's name, for copying;
+// null when there's nothing to copy. Badges, buttons and the new name's arrow are left out.
+function copyTarget(target) {
+  const td = target.closest('td');
+  if (!td || !td.closest('#rows') || td.classList.contains('pending')) return null;
+  const line = target.closest('.stack-top, .stack-bottom');
+  const part = line && td.contains(line) ? line : td;
+  if (part.classList.contains('pending') || part.classList.contains('none') || td.classList.contains('missing')) return null;
+  const clone = part.cloneNode(true);
+  for (const node of clone.querySelectorAll('button, input, .status-icon, .reordered')) node.remove();
+  const text = clone.textContent.replace(/^\s*→\s*/, '').replace(/\s+/g, ' ').trim();
+  if (!text) return null;
+  // The column's name from its header: the stacked line's own label for a bottom line. Matched by
+  // position among the shown columns, as stacked rows leave out cells the header only hides.
+  const shown = list => [...list].filter(c => getComputedStyle(c).display !== 'none');
+  const th = shown(tableEl.querySelector('thead tr').children)[shown(td.parentElement.children).indexOf(td)];
+  let label = '';
+  if (th) {
+    const head = th.cloneNode(true);
+    for (const node of head.querySelectorAll(`button, ${stackCheckbox.checked ? '.unstacked-only' : '.stacked-only'}`)) node.remove();
+    const sub = head.querySelector('.stack-label');
+    if (sub) sub.remove();
+    label = (part.classList.contains('stack-bottom') && sub ? sub.textContent : head.textContent).replace(/^\s*→\s*/, '').trim();
+  }
+  return { label, text };
+}
+
+async function copyText(text, label) {
+  try {
+    if (typeof Neutralino !== 'undefined' && Neutralino.clipboard) await Neutralino.clipboard.writeText(text);
+    else await navigator.clipboard.writeText(text);
+    appendLog(`📋 Copied ${label ? label.toLowerCase() + ' ' : ''}"${text}".`);
+  } catch (err) {
+    appendLog(`❌ Could not copy: ${err.message || err}`);
+  }
+}
+
+function renderRowMenu(row, copy) {
+  const items = [];
+  if (copy) {
+    const copyItem = rowMenuItem(`Copy ${copy.label || 'text'}`, copy.text, () => copyText(copy.text, copy.label));
+    copyItem.title = copy.text;
+    items.push(copyItem);
+  }
+  if (!row.rel) return rowMenu.replaceChildren(...items);
+  if (items.length) items.push(el('div', undefined, 'menu-sep'));
   const entry = state.fileDetails.get(absPath(row.rel));
   const sources = entry && entry.details ? entry.details.sources || [] : null;
   let source;
@@ -4154,6 +4202,7 @@ function renderRowMenu(row) {
   else source = rowMenuItem(`Open source file (${baseName(sources[0].replace(/\\/g, '/'))})`, sources[0], () => openSourceFile(sources));
   if (sources && sources.length) source.title = sources[0];
   rowMenu.replaceChildren(
+    ...items,
     rowMenuItem('Open drawing', displayPath(row.rel), () => openFile(row.rel)),
     source,
     el('div', undefined, 'menu-sep'),
@@ -4161,14 +4210,15 @@ function renderRowMenu(row) {
   );
 }
 
-async function openRowMenu(x, y, row) {
+async function openRowMenu(x, y, row, copy = null) {
   rowMenuRow = row;
-  renderRowMenu(row);
+  renderRowMenu(row, copy);
   rowMenu.hidden = false;
   // Kept inside the window
   const { width, height } = rowMenu.getBoundingClientRect();
   rowMenu.style.left = `${Math.max(4, Math.min(x, window.innerWidth - width - 4))}px`;
   rowMenu.style.top = `${Math.max(4, Math.min(y, window.innerHeight - height - 4))}px`;
+  if (!row.rel) return;
   const filePath = absPath(row.rel);
   if (state.fileDetails.has(filePath) || !/\.pdf$/i.test(row.rel)) return;
   let details = null;
@@ -4179,7 +4229,7 @@ async function openRowMenu(x, y, row) {
   } catch (e) {
     state.fileDetails.set(filePath, { stamp: '', details: { sources: [] } });
   }
-  if (!rowMenu.hidden && rowMenuRow === row) renderRowMenu(row);
+  if (!rowMenu.hidden && rowMenuRow === row) renderRowMenu(row, copy);
 }
 
 function closeRowMenu() {
