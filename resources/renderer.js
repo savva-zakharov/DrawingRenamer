@@ -31,18 +31,28 @@ PDFJS.workerSrc = 'js/pdfjs/pdf.worker.js';
 
 const DEFAULT_SEPARATOR = ' - ';
 
-// App-wide options (the Options tab), kept in Neutralino's storage. The number–title separator
-// isn't one of them: it belongs to a folder and is kept in its layout file.
+// App-wide options (the Options tab), about this computer rather than a project: kept in
+// Neutralino's storage
 const DEFAULT_SETTINGS = {
+  apps: { word: '', excel: '', pdf: '' } // programs to open files with ('' = the system default)
+};
+let settings = JSON.parse(JSON.stringify(DEFAULT_SETTINGS));
+
+// A folder's naming and numbering options (the Options tab), kept in its layout file with the
+// number–title separator; these are the defaults for a folder that hasn't set them
+const DEFAULT_FOLDER_OPTIONS = {
   recursive: false,                 // also scan subfolders on disk
-  apps: { word: '', excel: '', pdf: '' }, // programs to open files with ('' = the system default)
   fileDate: 'yy-mm-dd',             // date in front of superseded, backed up and exported files
   ssFolder: 'SS',                   // folder for superseded drawings and backups
   issueNumbering: 'number',         // new issues, when the register doesn't show a style
   issueDateFormat: 'dd.mm.yyyy',
   highlightColor: '#FFFF00'
 };
-let settings = JSON.parse(JSON.stringify(DEFAULT_SETTINGS));
+
+function folderOption(key) {
+  const value = state.layout.options && state.layout.options[key];
+  return value !== undefined ? value : DEFAULT_FOLDER_OPTIONS[key];
+}
 
 const FILE_DATE_FORMATS = ['yy-mm-dd', 'yyyy-mm-dd', 'yymmdd', 'yyyymmdd', 'dd-mm-yy', 'dd.mm.yy', 'dd-mm-yyyy'];
 // A date at the start of a file name in any of those formats, e.g. "26-09-26 " or "00-00-00 "
@@ -50,7 +60,7 @@ const LEADING_DATE_RE = /^(?:\d{2}|\d{4})[-.]?\d{2}[-.]?(?:\d{4}|\d{2})\s+/;
 
 // The folder superseded drawings and backups go in
 function ssDir() {
-  return settings.ssFolder || DEFAULT_SETTINGS.ssFolder;
+  return folderOption('ssFolder');
 }
 // Saved next to the register: which folder each drawing belongs in, for later runs
 const LAYOUT_FILE = 'drawing-renamer.json';
@@ -85,7 +95,7 @@ const state = {
   // { register number: mark }, header: { label: value }, highlight: 'RRGGBB' or null, register }
   // (header: the Issue No / Date edits it made; highlight: the colour to highlight the issue column
   // with; register: the file name of the register it's for)
-  layout: { folders: [], assignments: {}, titleEdits: {}, detailEdits: {}, projectEdits: {}, issueEdit: null, numberEdits: {}, numberHistory: {}, newEntries: [], moves: [], foldersToRemove: [], separator: DEFAULT_SEPARATOR },
+  layout: { folders: [], assignments: {}, titleEdits: {}, detailEdits: {}, projectEdits: {}, issueEdit: null, numberEdits: {}, numberHistory: {}, newEntries: [], moves: [], foldersToRemove: [], separator: DEFAULT_SEPARATOR, options: {} },
   drag: null,            // what's being dragged: { kind: 'drawing', token } or { kind: 'folder', folder }
   origOf: {},            // drawing number shown => number in the register (for renumbered drawings)
   movedTokens: new Set(), // register numbers of drawings with a pending move
@@ -376,7 +386,7 @@ async function findSubfolders() {
     }
     for (const { entry, type } of entries) {
       // The default superseded folder is skipped too, in case the option was changed after files went in it
-      if (type !== 'DIRECTORY' || /^[.~$]/.test(entry) || [ssDir(), DEFAULT_SETTINGS.ssFolder].some(n => n.toLowerCase() === entry.toLowerCase())) continue;
+      if (type !== 'DIRECTORY' || /^[.~$]/.test(entry) || [ssDir(), DEFAULT_FOLDER_OPTIONS.ssFolder].some(n => n.toLowerCase() === entry.toLowerCase())) continue;
       const rel = relJoin(dir, entry);
       found.push(rel);
       await walk(rel, depth + 1);
@@ -388,12 +398,12 @@ async function findSubfolders() {
 
 // The layout's folders, and with recursive scanning every subfolder on disk
 function drawingFolders() {
-  return settings.recursive ? withAncestors([...state.layout.folders, ...state.diskFolders]) : state.layout.folders;
+  return folderOption('recursive') ? withAncestors([...state.layout.folders, ...state.diskFolders]) : state.layout.folders;
 }
 
 async function scanFiles() {
   const files = [];
-  state.diskFolders = settings.recursive ? await findSubfolders() : [];
+  state.diskFolders = folderOption('recursive') ? await findSubfolders() : [];
   for (const dir of ['', ...drawingFolders()]) {
     let names;
     try {
@@ -414,7 +424,7 @@ function layoutPath() {
 }
 
 async function loadLayout() {
-  state.layout = { folders: [], assignments: {}, titleEdits: {}, detailEdits: {}, projectEdits: {}, issueEdit: null, numberEdits: {}, numberHistory: {}, newEntries: [], moves: [], foldersToRemove: [], separator: DEFAULT_SEPARATOR };
+  state.layout = { folders: [], assignments: {}, titleEdits: {}, detailEdits: {}, projectEdits: {}, issueEdit: null, numberEdits: {}, numberHistory: {}, newEntries: [], moves: [], foldersToRemove: [], separator: DEFAULT_SEPARATOR, options: {} };
   state.layoutBroken = false;
   if (!(await getStatsOrNull(layoutPath()))) return;
   try {
@@ -481,12 +491,26 @@ async function loadLayout() {
       .map(m => ({ token: m.token, after: m.after }));
     const foldersToRemove = (Array.isArray(data.foldersToRemove) ? data.foldersToRemove : []).filter(f => typeof f === 'string' && folders.includes(f));
     const separator = typeof data.separator === 'string' && !separatorProblem(data.separator) ? data.separator : DEFAULT_SEPARATOR;
-    state.layout = { folders: withAncestors(folders), assignments, titleEdits, detailEdits, projectEdits, issueEdit, otherDrafts: drafts, numberEdits, numberHistory, newEntries, moves, foldersToRemove, separator };
+    const options = validFolderOptions(data.options);
+    state.layout = { folders: withAncestors(folders), assignments, titleEdits, detailEdits, projectEdits, issueEdit, otherDrafts: drafts, numberEdits, numberHistory, newEntries, moves, foldersToRemove, separator, options };
     appendLog(`📁 Loaded folder layout from ${LAYOUT_FILE} (${folders.length} folders).`);
   } catch (err) {
     state.layoutBroken = true;
     appendLog(`⚠️ Could not read ${LAYOUT_FILE}; folder changes won't be saved until it's fixed: ${err.message || err}`);
   }
+}
+
+// The folder options a layout file sets (any it doesn't, or can't be used, are left to the defaults)
+function validFolderOptions(data) {
+  const o = data && typeof data === 'object' ? data : {};
+  const options = {};
+  if (typeof o.recursive === 'boolean') options.recursive = o.recursive;
+  if (FILE_DATE_FORMATS.includes(o.fileDate)) options.fileDate = o.fileDate;
+  if (typeof o.ssFolder === 'string' && o.ssFolder && !/[\\/:*?"<>|]/.test(o.ssFolder)) options.ssFolder = o.ssFolder;
+  if (RegisterCore.NUMBERING_SCHEMES.includes(o.issueNumbering)) options.issueNumbering = o.issueNumbering;
+  if (RegisterCore.DATE_FORMATS.some(f => f.id === o.issueDateFormat)) options.issueDateFormat = o.issueDateFormat;
+  if (/^#[0-9a-f]{6}$/i.test(o.highlightColor || '')) options.highlightColor = o.highlightColor.toUpperCase();
+  return options;
 }
 
 // The layout file's registerDrafts: this register's drafts beside the other registers' (empty ones left out)
@@ -507,7 +531,7 @@ async function saveLayout() {
   // Keep assignments in register order so the file is easy to read
   const assignments = {};
   for (const token of Object.keys(state.tokenMap)) {
-    if (state.layout.assignments[token]) assignments[token] = state.layout.assignments[token];
+    if (token in state.layout.assignments) assignments[token] = state.layout.assignments[token];
   }
   for (const [token, folder] of Object.entries(state.layout.assignments)) {
     if (!(token in assignments)) assignments[token] = folder; // drawings no longer in the register
@@ -516,6 +540,8 @@ async function saveLayout() {
     version: 1,
     register: baseName(state.registerPath),
     separator: state.layout.separator,
+    // Naming and numbering options set in the Options tab
+    options: state.layout.options,
     folders: state.layout.folders,
     assignments,
     // Changes made in the app that haven't been saved into the Word register yet
@@ -689,7 +715,7 @@ function computeRows(tokenMap, match, files, addedTimes, choices) {
     // With recursive scanning, a drawing not put in a folder stays in the subfolder its file is in
     // (the file picked for it, or else the newest)
     const found = match.byToken[token];
-    if (settings.recursive && found && !(token in state.layout.assignments)) {
+    if (folderOption('recursive') && found && !(token in state.layout.assignments)) {
       const picked = found.find(f => f.rel === choices.get(token)) ||
         found.slice().sort((a, b) => (addedTimes[b.rel] || 0) - (addedTimes[a.rel] || 0) || a.rel.localeCompare(b.rel))[0];
       if (picked.dir) state.implicitFolders[token] = picked.dir;
@@ -2274,12 +2300,12 @@ function revisionChoices() {
   const date = headerField('date');
   if (!state.revisionUi) state.revisionUi = { mode: 'new', scheme: null, dateFormat: null, highlight: null, color: null, marks: {} };
   const ui = state.revisionUi;
-  if (!ui.scheme) ui.scheme = (issueNo && RegisterCore.detectNumbering(issueNo.value)) || settings.issueNumbering;
-  if (!ui.dateFormat) ui.dateFormat = (date && RegisterCore.detectDateFormat(date.value)) || settings.issueDateFormat;
+  if (!ui.scheme) ui.scheme = (issueNo && RegisterCore.detectNumbering(issueNo.value)) || folderOption('issueNumbering');
+  if (!ui.dateFormat) ui.dateFormat = (date && RegisterCore.detectDateFormat(date.value)) || folderOption('issueDateFormat');
   // Highlight the issue column when the register already highlights its latest one, in that colour
   const inUse = state.registerIssues && state.registerIssues.highlight;
   if (ui.highlight === null) ui.highlight = !!inUse;
-  if (!ui.color) ui.color = inUse ? '#' + inUse : settings.highlightColor;
+  if (!ui.color) ui.color = inUse ? '#' + inUse : folderOption('highlightColor');
   return ui;
 }
 
@@ -2878,6 +2904,7 @@ async function load() {
     state.picked.clear();
     state.choices.clear();
     await loadLayout();
+    renderOptions();
     appendLog(`📚 Reading ${REGISTER_KIND_NAMES[state.registerKind]} register: ${registerPath} ...`);
     if (state.registerKind !== 'docx' && await findWordTwin()) {
       appendLog(`ℹ️ A Word version of this register is next to it; load it (or the folder) to edit titles.`);
@@ -2969,7 +2996,7 @@ async function makeFolder() {
 // --------------------
 
 // Today's date as YY-MM-DD, matching the register's file naming
-function datePrefix(date = new Date(), format = settings.fileDate) {
+function datePrefix(date = new Date(), format = folderOption('fileDate')) {
   const pad = n => String(n).padStart(2, '0');
   const yy = pad(date.getFullYear() % 100), yyyy = String(date.getFullYear()), mm = pad(date.getMonth() + 1), dd = pad(date.getDate());
   switch (format) {
@@ -3911,15 +3938,20 @@ function renderOptions() {
   separatorInput.disabled = !loaded;
   separatorInput.title = loaded ? '' : 'Load a register first: the separator is saved with its folder';
   showSeparatorPreview(state.layout.separator);
-  fillSelect(optFileDate, FILE_DATE_FORMATS.map(f => [f, `${f.toUpperCase()}  (${datePrefix(today, f)})`]), settings.fileDate);
+  fillSelect(optFileDate, FILE_DATE_FORMATS.map(f => [f, `${f.toUpperCase()}  (${datePrefix(today, f)})`]), folderOption('fileDate'));
   optSsFolder.value = ssDir();
   optSsNote.classList.remove('error');
   optSsNote.textContent = `e.g. ${ssDir()}\\${datePrefix(today)} PA-001${state.layout.separator}Masterplan.pdf`;
-  optRecursive.checked = settings.recursive;
-  fillSelect(optIssueNumbering, RegisterCore.NUMBERING_SCHEMES.map(sc => [sc, SCHEME_LABELS[sc]]), settings.issueNumbering);
+  optRecursive.checked = folderOption('recursive');
+  fillSelect(optIssueNumbering, RegisterCore.NUMBERING_SCHEMES.map(sc => [sc, SCHEME_LABELS[sc]]), folderOption('issueNumbering'));
   const parts = todayParts();
-  fillSelect(optIssueDate, RegisterCore.DATE_FORMATS.map(f => [f.id, RegisterCore.formatDate(parts, f.id)]), settings.issueDateFormat);
-  optHighlight.value = settings.highlightColor.toLowerCase();
+  fillSelect(optIssueDate, RegisterCore.DATE_FORMATS.map(f => [f.id, RegisterCore.formatDate(parts, f.id)]), folderOption('issueDateFormat'));
+  optHighlight.value = folderOption('highlightColor').toLowerCase();
+  // This folder's options need a folder
+  for (const control of [optRecursive, optFileDate, optSsFolder, optIssueNumbering, optIssueDate, optHighlight]) {
+    control.disabled = !loaded;
+    control.title = loaded ? '' : 'Load a register first: this is saved with its folder';
+  }
   for (const row of document.querySelectorAll('.app-row')) {
     const input = row.querySelector('.app-path');
     input.value = settings.apps[row.dataset.app];
@@ -3933,17 +3965,21 @@ async function loadSettings() {
     const data = JSON.parse(await Neutralino.storage.getData('settings'));
     const apps = data.apps && typeof data.apps === 'object' ? data.apps : {};
     settings = {
-      recursive: data.recursive === true,
-      apps: Object.fromEntries(Object.keys(DEFAULT_SETTINGS.apps).map(k => [k, typeof apps[k] === 'string' ? apps[k] : ''])),
-      fileDate: FILE_DATE_FORMATS.includes(data.fileDate) ? data.fileDate : DEFAULT_SETTINGS.fileDate,
-      ssFolder: typeof data.ssFolder === 'string' && data.ssFolder && !/[\\/:*?"<>|]/.test(data.ssFolder) ? data.ssFolder : DEFAULT_SETTINGS.ssFolder,
-      issueNumbering: RegisterCore.NUMBERING_SCHEMES.includes(data.issueNumbering) ? data.issueNumbering : DEFAULT_SETTINGS.issueNumbering,
-      issueDateFormat: RegisterCore.DATE_FORMATS.some(f => f.id === data.issueDateFormat) ? data.issueDateFormat : DEFAULT_SETTINGS.issueDateFormat,
-      highlightColor: /^#[0-9a-f]{6}$/i.test(data.highlightColor || '') ? data.highlightColor.toUpperCase() : DEFAULT_SETTINGS.highlightColor
+      apps: Object.fromEntries(Object.keys(DEFAULT_SETTINGS.apps).map(k => [k, typeof apps[k] === 'string' ? apps[k] : '']))
     };
   } catch (e) {
     // nothing saved yet: the defaults
   }
+  renderOptions();
+}
+
+// Saved with this folder's layout; a default value is left out of the file
+async function setFolderOption(key, value, message) {
+  if (!state.registerPath) return;
+  if (value === DEFAULT_FOLDER_OPTIONS[key]) delete state.layout.options[key];
+  else state.layout.options[key] = value;
+  await saveLayout();
+  if (message) appendLog(`⚙️ ${message}`);
   renderOptions();
 }
 
@@ -3959,7 +3995,7 @@ async function setOption(key, value, message) {
 }
 
 optFileDate.addEventListener('change', async () => {
-  await setOption('fileDate', optFileDate.value, `Dated files now start with ${optFileDate.value.toUpperCase()}, e.g. ${datePrefix(new Date(), optFileDate.value)}.`);
+  await setFolderOption('fileDate', optFileDate.value, `Dated files now start with ${optFileDate.value.toUpperCase()}, e.g. ${datePrefix(new Date(), optFileDate.value)}.`);
   if (state.match) rebuild();
 });
 optSsFolder.addEventListener('keydown', (e) => {
@@ -3979,18 +4015,18 @@ optSsFolder.addEventListener('change', async () => {
     return;
   }
   const old = ssDir();
-  await setOption('ssFolder', name, `Superseded drawings and backups now go in ${name}\\; the ones already in ${old}\\ stay there.`);
+  await setFolderOption('ssFolder', name, `Superseded drawings and backups now go in ${name}\\; the ones already in ${old}\\ stay there.`);
   await refresh();
 });
 optRecursive.addEventListener('change', async () => {
-  await setOption('recursive', optRecursive.checked, optRecursive.checked ? 'Scanning subfolders on disk too.' : 'Scanning only the top folder and drawing folders.');
+  await setFolderOption('recursive', optRecursive.checked, optRecursive.checked ? 'Scanning subfolders on disk too.' : 'Scanning only the top folder and drawing folders.');
   // Files found in the subfolders aren't new, so they aren't logged or flashed as new
   state.knownFiles = null;
   await refresh();
 });
-optIssueNumbering.addEventListener('change', () => setOption('issueNumbering', optIssueNumbering.value, `New issues are numbered ${SCHEME_LABELS[optIssueNumbering.value]} when the register doesn't show a style.`));
-optIssueDate.addEventListener('change', () => setOption('issueDateFormat', optIssueDate.value, `New issues are dated like ${RegisterCore.formatDate(todayParts(), optIssueDate.value)} when the register doesn't show a format.`));
-optHighlight.addEventListener('change', () => setOption('highlightColor', optHighlight.value.toUpperCase(), `New issues are highlighted in ${optHighlight.value.toUpperCase()} when the register doesn't already highlight them.`));
+optIssueNumbering.addEventListener('change', () => setFolderOption('issueNumbering', optIssueNumbering.value, `New issues are numbered ${SCHEME_LABELS[optIssueNumbering.value]} when the register doesn't show a style.`));
+optIssueDate.addEventListener('change', () => setFolderOption('issueDateFormat', optIssueDate.value, `New issues are dated like ${RegisterCore.formatDate(todayParts(), optIssueDate.value)} when the register doesn't show a format.`));
+optHighlight.addEventListener('change', () => setFolderOption('highlightColor', optHighlight.value.toUpperCase(), `New issues are highlighted in ${optHighlight.value.toUpperCase()} when the register doesn't already highlight them.`));
 
 for (const row of document.querySelectorAll('.app-row')) {
   const app = row.dataset.app;

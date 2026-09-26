@@ -49,9 +49,9 @@
       <div class="tab-panel" data-panel="options" role="tabpanel" hidden>
         <div id="options" class="options-grid">
           <section>
-            <h4>File names</h4>
+            <h4>File names <span class="muted">(this folder)</span></h4>
             <div class="option-row">
-              <label for="separator-input">Number–title separator <span class="muted">(this folder)</span></label>
+              <label for="separator-input">Number–title separator</label>
               <input id="separator-input" class="short-input mono" autocomplete="off" spellcheck="false" />
             </div>
             <div id="separator-preview" class="option-note mono"></div>
@@ -67,10 +67,10 @@
             <div id="opt-ss-note" class="option-note"></div>
           </section>
           <section>
-            <h4>Scanning</h4>
+            <h4>Scanning <span class="muted">(this folder)</span></h4>
             <label class="inline option-check"><input type="checkbox" id="opt-recursive" /> Include subfolders on disk</label>
             <div class="option-note">Also finds drawings in any subfolder (not the superseded ones); they stay where they are unless put in another folder</div>
-            <h4>New issues</h4>
+            <h4>New issues <span class="muted">(this folder)</span></h4>
             <div class="option-note">Used when the register doesn't already show a style</div>
             <div class="option-row">
               <label for="opt-issue-numbering">Issue numbering</label>
@@ -86,7 +86,7 @@
             </div>
           </section>
           <section>
-            <h4>Open files with</h4>
+            <h4>Open files with <span class="muted">(all folders)</span></h4>
             <div class="option-note">Leave blank to use the program Windows opens them with</div>
             <div class="option-row app-row" data-app="word">
               <label for="opt-app-word">Word registers</label>
@@ -106,7 +106,7 @@
               <button class="app-browse" title="Choose the program">Browse…</button>
               <button class="app-clear" title="Use the system default">✕</button>
             </div>
-            <div class="option-note">These options apply to every folder; the separator is saved with this folder.</div>
+            <div class="option-note">"This folder" options are saved in the folder's drawing-renamer.json; the others are kept by the app for every folder.</div>
           </section>
         </div>
       </div>
