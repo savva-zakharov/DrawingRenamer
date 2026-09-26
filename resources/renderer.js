@@ -857,7 +857,9 @@ function renderSectionHeader(section, visible, inside) {
   if (section.unmatched) name.textContent = 'Files not in the register';
   else if (section.folder) {
     name.textContent = '📁 ' + folderLeaf(section.folder);
-    name.title = displayPath(section.folder);
+    name.title = `${displayPath(section.folder)}\nDouble-click to rename`;
+    name.classList.add('editable');
+    name.addEventListener('dblclick', () => startFolderRename(name, section.folder));
     td.style.paddingLeft = `${8 + (depth - 1) * 22}px`;
   } else name.textContent = `📂 ${baseName(state.targetDir)} (top folder)`;
   td.appendChild(name);
@@ -890,6 +892,44 @@ function renderSectionHeader(section, visible, inside) {
     td.appendChild(btn);
   }
   rowsEl.appendChild(tr);
+}
+
+// Edit a folder's name in place: Enter or leaving the box renames it, Escape cancels
+function startFolderRename(nameEl, folder) {
+  if (state.busy || state.editingToken) return;
+  state.editingToken = `folder:${folder}`;
+  const input = document.createElement('input');
+  input.className = 'title-input folder-input';
+  input.value = folderLeaf(folder);
+  input.spellcheck = false;
+  nameEl.replaceChildren('📁 ', input);
+  input.focus();
+  input.select();
+
+  let finished = false;
+  const finish = async (save) => {
+    if (finished) return;
+    let name = null;
+    if (save && input.value.trim() !== folderLeaf(folder)) {
+      try {
+        name = validateFolderName(input.value);
+        if (name.includes('/')) throw new Error('Enter just the folder\'s name; drag the folder to move it into another one.');
+      } catch (err) {
+        appendLog(`❌ ${err.message} ${displayPath(folder)} wasn't renamed.`);
+        name = null;
+      }
+    }
+    finished = true;
+    state.editingToken = null;
+    if (name) await renameFolder(folder, name);
+    // Redrawn even when the rename was refused (e.g. the name is taken)
+    render(new Set());
+  };
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') finish(true);
+    if (e.key === 'Escape') finish(false);
+  });
+  input.addEventListener('blur', () => finish(true));
 }
 
 // --------------------
@@ -1062,8 +1102,22 @@ async function moveFolder(folder, parent) {
     appendLog(`❌ ${displayPath(folder)} can't go inside itself.`);
     return;
   }
-  if (state.layout.folders.some(f => f.toLowerCase() === dest.toLowerCase()) || await getStatsOrNull(absPath(dest))) {
-    appendLog(`❌ There's already a folder called ${displayPath(dest)}; ${displayPath(folder)} wasn't moved.`);
+  await relocateFolder(folder, dest, 'moved');
+}
+
+// Rename a folder where it is, on disk straight away like moving it
+async function renameFolder(folder, name) {
+  const dest = relJoin(parentFolder(folder), name);
+  if (dest === folder || state.busy) return;
+  await relocateFolder(folder, dest, 'renamed');
+}
+
+// Give a folder a new path: its subfolders, drawing assignments and files go with it
+async function relocateFolder(folder, dest, verb) {
+  // Only a change of case may reuse the folder's own name
+  const sameName = dest.toLowerCase() === folder.toLowerCase();
+  if (state.layout.folders.some(f => f !== folder && f.toLowerCase() === dest.toLowerCase()) || (!sameName && await getStatsOrNull(absPath(dest)))) {
+    appendLog(`❌ There's already a folder called ${displayPath(dest)}; ${displayPath(folder)} wasn't ${verb}.`);
     return;
   }
   state.busy = true;
@@ -1082,12 +1136,13 @@ async function moveFolder(folder, parent) {
           state.watchers.delete(dir);
         }
       }
-      if (parent) await ensureDir(parent);
+      if (parentFolder(dest)) await ensureDir(parentFolder(dest));
       await Neutralino.filesystem.move(absPath(folder), absPath(dest));
     }
     const remap = f => (f && isInside(f, folder) ? dest + f.slice(folder.length) : f);
     const remapRel = rel => (rel.startsWith(folder + '/') ? dest + rel.slice(folder.length) : rel);
     state.layout.folders = withAncestors(state.layout.folders.map(remap));
+    state.layout.foldersToRemove = (state.layout.foldersToRemove || []).map(remap);
     for (const token of Object.keys(state.layout.assignments)) {
       state.layout.assignments[token] = remap(state.layout.assignments[token]);
     }
@@ -1097,9 +1152,9 @@ async function moveFolder(folder, parent) {
     state.unchecked = new Set([...state.unchecked].map(remapRel));
     state.picked = new Set([...state.picked].map(remapRel));
     await saveLayout();
-    appendLog(`📁 Moved folder ${displayPath(folder)} → ${displayPath(dest)}${stats ? '' : ' (it had no files yet)'}.`);
+    appendLog(`📁 ${verb === 'renamed' ? 'Renamed' : 'Moved'} folder ${displayPath(folder)} → ${displayPath(dest)}${stats ? '' : ' (it had no files yet)'}.`);
   } catch (err) {
-    appendLog(`❌ Could not move ${displayPath(folder)}: ${err.message || err}. Close any window showing files in it and try again.`);
+    appendLog(`❌ Could not ${verb === 'renamed' ? 'rename' : 'move'} ${displayPath(folder)}: ${err.message || err}. Close any window showing files in it and try again.`);
   } finally {
     state.busy = false;
     await refresh();

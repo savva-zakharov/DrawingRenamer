@@ -277,6 +277,9 @@ label.choice input{ margin-top:3px; flex:none }
 /* Folder sections */
 tbody tr.section td{ background:var(--section-bg); border-top:1px solid var(--section-line); border-bottom:1px solid var(--section-line); padding:6px 8px }
 .section-name{ font-weight:600 }
+.section-name.editable{ cursor:text }
+.section-name.editable:hover{ outline:1px dashed var(--editable-outline); outline-offset:2px }
+input.folder-input{ width:auto; min-width:220px; font-weight:600 }
 .section-count{ margin-left:10px; font-size:12px }
 button.link{ margin-left:12px; padding:0; border:none; background:none; color:var(--accent); font-size:12px; text-decoration:underline }
 .status.move{ background:var(--accent-soft); color:var(--accent) }
