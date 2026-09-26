@@ -38,6 +38,7 @@ const tabButtons = [...document.querySelectorAll('nav.tabs [role=tab]')];
 PDFJS.workerSrc = 'js/pdfjs/pdf.worker.js';
 
 const DEFAULT_SEPARATOR = ' - ';
+const DEFAULT_TEMPLATE = `{number}${DEFAULT_SEPARATOR}{title}`;
 
 // App-wide options (the Options tab), about this computer rather than a project: kept in
 // Neutralino's storage
@@ -104,7 +105,7 @@ const state = {
   // { register number: mark }, header: { label: value }, highlight: 'RRGGBB' or null, register }
   // (header: the Issue No / Date edits it made; highlight: the colour to highlight the issue column
   // with; register: the file name of the register it's for)
-  layout: { folders: [], assignments: {}, titleEdits: {}, detailEdits: {}, projectEdits: {}, issueEdit: null, numberEdits: {}, numberHistory: {}, newEntries: [], moves: [], foldersToRemove: [], separator: DEFAULT_SEPARATOR, options: {} },
+  layout: { folders: [], assignments: {}, titleEdits: {}, detailEdits: {}, projectEdits: {}, issueEdit: null, numberEdits: {}, numberHistory: {}, newEntries: [], moves: [], foldersToRemove: [], nameTemplate: DEFAULT_TEMPLATE, options: {} },
   drag: null,            // what's being dragged: { kind: 'drawing', token } or { kind: 'folder', folder }
   origOf: {},            // drawing number shown => number in the register (for renumbered drawings)
   movedTokens: new Set(), // register numbers of drawings with a pending move
@@ -447,7 +448,7 @@ function layoutPath() {
 }
 
 async function loadLayout() {
-  state.layout = { folders: [], assignments: {}, titleEdits: {}, detailEdits: {}, projectEdits: {}, issueEdit: null, numberEdits: {}, numberHistory: {}, newEntries: [], moves: [], foldersToRemove: [], separator: DEFAULT_SEPARATOR, options: {} };
+  state.layout = { folders: [], assignments: {}, titleEdits: {}, detailEdits: {}, projectEdits: {}, issueEdit: null, numberEdits: {}, numberHistory: {}, newEntries: [], moves: [], foldersToRemove: [], nameTemplate: DEFAULT_TEMPLATE, options: {} };
   state.layoutBroken = false;
   if (!(await getStatsOrNull(layoutPath()))) return;
   try {
@@ -513,9 +514,11 @@ async function loadLayout() {
       .filter(m => m && numberRe.test(m.token) && (m.after === '' || numberRe.test(m.after)))
       .map(m => ({ token: m.token, after: m.after }));
     const foldersToRemove = (Array.isArray(data.foldersToRemove) ? data.foldersToRemove : []).filter(f => typeof f === 'string' && folders.includes(f));
+    // Older layouts kept only a number–title separator: their pattern is number, separator, title
     const separator = typeof data.separator === 'string' && !separatorProblem(data.separator) ? data.separator : DEFAULT_SEPARATOR;
+    const nameTemplate = typeof data.nameTemplate === 'string' && !templateProblem(data.nameTemplate) ? data.nameTemplate : `{number}${separator}{title}`;
     const options = validFolderOptions(data.options);
-    state.layout = { folders: withAncestors(folders), assignments, titleEdits, detailEdits, projectEdits, issueEdit, otherDrafts: drafts, numberEdits, numberHistory, newEntries, moves, foldersToRemove, separator, options };
+    state.layout = { folders: withAncestors(folders), assignments, titleEdits, detailEdits, projectEdits, issueEdit, otherDrafts: drafts, numberEdits, numberHistory, newEntries, moves, foldersToRemove, nameTemplate, options };
     appendLog(`📁 Loaded folder layout from ${LAYOUT_FILE} (${folders.length} folders).`);
   } catch (err) {
     state.layoutBroken = true;
@@ -562,7 +565,8 @@ async function saveLayout() {
   const data = {
     version: 1,
     register: baseName(state.registerPath),
-    separator: state.layout.separator,
+    // The pattern for new file names ({number}, {title}, {rev}, {filerev})
+    nameTemplate: state.layout.nameTemplate,
     // Naming and numbering options set in the Options tab
     options: state.layout.options,
     folders: state.layout.folders,
@@ -661,8 +665,79 @@ function validateFolderName(input) {
 // --------------------
 // 4️⃣ Match files to register entries (exact token match, first register entry wins)
 // --------------------
-function newNameFor(token, tokenMap) {
-  return `${token}${state.layout.separator}${sanitizeFilename(tokenMap[token])}.pdf`;
+// A drawing's new file name from the folder's pattern. `fileRel` is the file whose title block
+// gives {filerev}.
+function newNameFor(token, tokenMap, fileRel = null, template = state.layout.nameTemplate) {
+  return fillTemplate(template, {
+    number: token,
+    title: sanitizeFilename(tokenMap[token] || ''),
+    rev: sanitizeFilename(registerRevision(token)),
+    filerev: sanitizeFilename(fileRevision(fileRel))
+  }) + '.pdf';
+}
+
+const TEMPLATE_FIELDS = { number: 'Number', title: 'Title', rev: 'Revision (register)', filerev: 'Revision (drawing)' };
+const TEMPLATE_PRESETS = [
+  ['{number} - {title}', 'Number - Title'],
+  ['{number} {title}', 'Number Title'],
+  ['{number}_{title}', 'Number_Title'],
+  ['{number} - {rev} - {title}', 'Number - Revision - Title'],
+  ['{number}-{rev}-{title}', 'Number-Revision-Title'],
+  ['{number}_{rev}_{title}', 'Number_Revision_Title'],
+  ['{number}_{rev}', 'Number_Revision'],
+  ['{number}', 'Number']
+];
+
+// Fills a pattern's fields. A field with no value (e.g. no revision yet) is left out with the text
+// before it, so "{number} - {rev} - {title}" gives "PA-001 - Masterplan", not "PA-001 -  - Masterplan".
+function fillTemplate(template, values) {
+  const parts = template.split(/(\{[a-z]+\})/i); // text, field, text, field, …, text
+  let out = parts[0];
+  let any = false;
+  for (let i = 1; i < parts.length; i += 2) {
+    const value = values[parts[i].slice(1, -1).toLowerCase()] || '';
+    if (!value) continue;
+    if (i > 1 && any) out += parts[i - 1];
+    out += value;
+    any = true;
+  }
+  out += parts[parts.length - 1];
+  // Windows doesn't allow names ending in a space or dot
+  return out.replace(/\s+/g, ' ').trim().replace(/[. ]+$/, '');
+}
+
+// Why a pattern can't be used, or null
+function templateProblem(template) {
+  if (!template.trim()) return 'Enter a pattern.';
+  const unknown = (template.match(/\{[^}]*\}?/g) || []).find(f => !/^\{[a-z]+\}$/i.test(f) || !(f.slice(1, -1).toLowerCase() in TEMPLATE_FIELDS));
+  if (unknown) return `${unknown} isn't a field; use ${Object.keys(TEMPLATE_FIELDS).map(f => `{${f}}`).join(', ')}.`;
+  if (!/\{number\}/i.test(template)) return 'The pattern needs {number}: files are matched to the register by their number.';
+  if (/[\\/:*?"<>|]/.test(template.replace(/\{[a-z]+\}/gi, ''))) return 'File names can\'t contain \\ / : * ? " < > |';
+  return null;
+}
+
+function templateUses(field) {
+  return new RegExp(`\\{${field}\\}`, 'i').test(state.layout.nameTemplate);
+}
+
+// The drawing's latest revision in the register: the staged issue's mark, else the last one
+// issued; '' for a new entry, a register that ticks issues, or one never issued
+function registerRevision(token) {
+  const orig = state.origOf[token];
+  const info = state.registerIssues;
+  if (orig === undefined || !info) return '';
+  const real = m => m && /[A-Za-z0-9]/.test(m);
+  const staged = pendingIssue();
+  if (staged && real(staged.marks[orig])) return staged.marks[orig].trim();
+  const marks = info.marks[orig] || [];
+  for (let i = marks.length - 1; i >= 0; i--) if (real(marks[i])) return marks[i].trim();
+  return '';
+}
+
+// The revision in a file's title block, once read
+function fileRevision(rel) {
+  const entry = rel && state.fileDetails.get(absPath(rel));
+  return (entry && entry.details && entry.details.rev) || '';
 }
 
 // Why a separator can't be used, or null if it's fine
@@ -756,7 +831,10 @@ function computeRows(tokenMap, match, files, addedTimes, choices) {
       rows.push({ key: '#' + token, token, origToken, title, edited, renumbered, moved, isNew, registerTitle, folder, status: 'none' });
       continue;
     }
-    const newName = newNameFor(token, state.titles);
+    // {filerev} comes from the file picked for the drawing, or else the newest
+    const nameFile = matches.find(f => f.rel === choices.get(token)) ||
+      matches.slice().sort((a, b) => (addedTimes[b.rel] || 0) - (addedTimes[a.rel] || 0) || a.rel.localeCompare(b.rel))[0];
+    const newName = newNameFor(token, state.titles, nameFile.rel);
     const targetRel = relJoin(folder, newName);
     // The file already sitting at the target path, if any
     const occupant = matches.find(f => f.rel === targetRel) ||
@@ -1736,7 +1814,7 @@ const DETAIL_COLUMNS = { number: 'col-file-number', title: 'col-file-title', rev
 
 // Title blocks are read while any detail column is shown, or the Project data or Revisions tab is open
 function fileDetailsShown() {
-  return fileDetailCheckboxes.some(([cb]) => cb.checked) || onlyWarningsCheckbox.checked ||
+  return fileDetailCheckboxes.some(([cb]) => cb.checked) || onlyWarningsCheckbox.checked || templateUses('filerev') ||
     ['project', 'revisions', 'warnings'].includes(state.activeTab);
 }
 
@@ -2065,6 +2143,10 @@ function switchTab(name) {
     loadFileDetails();
   }
   if (name === 'options') renderOptions();
+  if (name === 'names') {
+    renderNames(true);
+    loadFileDetails();
+  }
   if (name === 'warnings') {
     renderWarnings();
     loadFileDetails();
@@ -3019,6 +3101,7 @@ async function load() {
     state.choices.clear();
     await loadLayout();
     renderOptions();
+    renderNames(true);
     appendLog(`📚 Reading ${REGISTER_KIND_NAMES[state.registerKind]} register: ${registerPath} ...`);
     if (state.registerKind !== 'docx' && await findWordTwin()) {
       appendLog(`ℹ️ A Word version of this register is next to it; load it (or the folder) to edit titles.`);
@@ -3986,35 +4069,86 @@ menuEl.addEventListener('click', (e) => {
   if (item.dataset.action === 'open-folder') openFolderInExplorer();
 });
 
-// ---------- number-title separator ----------
-const separatorInput = document.getElementById('separator-input');
-const separatorPreview = document.getElementById('separator-preview');
+// ---------- file name pattern (File names tab) ----------
+const templateInput = document.getElementById('name-template');
+const presetSelect = document.getElementById('name-preset');
+const nameNote = document.getElementById('name-note');
+const namePreview = document.getElementById('name-preview');
 
-function showSeparatorPreview(sep) {
-  const problem = separatorProblem(sep);
-  separatorPreview.classList.toggle('error', !!problem);
-  if (problem) {
-    separatorPreview.textContent = problem;
+// The tab: the pattern (unless it's being typed in, when `force` isn't set), and a preview of the
+// names the pattern being typed would give
+function renderNames(force = false) {
+  if (state.activeTab !== 'names') return;
+  const loaded = !!state.registerPath;
+  if (force || document.activeElement !== templateInput) templateInput.value = state.layout.nameTemplate;
+  for (const control of [templateInput, presetSelect, ...document.querySelectorAll('.name-fields button')]) control.disabled = !loaded;
+  const template = templateInput.value;
+  fillSelect(presetSelect, [...(TEMPLATE_PRESETS.some(([t]) => t === template) ? [] : [['', 'Custom']]), ...TEMPLATE_PRESETS], template);
+  const problem = templateProblem(template);
+  nameNote.classList.toggle('error', !!problem);
+  nameNote.textContent = problem || (template !== state.layout.nameTemplate
+    ? 'Press Enter to use this pattern.'
+    : 'A field with no value (e.g. no revision yet) is left out with the text before it. The register revision is the latest issued, or the staged issue\'s; the drawing\'s is read from its title block.');
+  if (!loaded) {
+    namePreview.className = 'muted';
+    namePreview.textContent = 'No register loaded.';
     return;
   }
-  const token = Object.keys(state.titles)[0] || 'PA-001';
-  const title = state.titles[token] || 'Masterplan';
-  separatorPreview.textContent = `${token}${sep}${sanitizeFilename(title)}.pdf`;
+  const rows = state.rows.filter(r => r.token && r.rel && (!r.group || r.chosen) && r.status !== 'none');
+  if (!rows.length) {
+    namePreview.className = 'muted';
+    namePreview.textContent = 'No drawings with files to preview.';
+    return;
+  }
+  namePreview.className = '';
+  const newName = r => problem ? '' : newNameFor(r.token, state.titles, r.rel, template);
+  const changing = rows.filter(r => newName(r).toLowerCase() !== r.file.toLowerCase()).length;
+  const table = el('table', undefined, 'name-preview');
+  for (const r of rows.slice(0, 8)) {
+    const tr = el('tr');
+    const name = newName(r);
+    tr.append(el('td', r.file), el('td', '→', 'arrow'), el('td', name || '—', name.toLowerCase() === r.file.toLowerCase() ? 'same' : ''));
+    table.appendChild(tr);
+  }
+  namePreview.replaceChildren(
+    el('div', problem ? '' : `${changing} of ${rows.length} file${rows.length === 1 ? '' : 's'} would be renamed${template !== state.layout.nameTemplate ? ' with this pattern' : ''}.`, 'option-note'),
+    table
+  );
+  if (templateUses('filerev') && rows.some(r => !state.fileDetails.has(absPath(r.rel)))) namePreview.prepend(el('div', 'Reading title blocks for the drawings\' revisions…', 'option-note'));
 }
 
-async function setSeparator(sep) {
-  if (separatorProblem(sep) || sep === state.layout.separator) return;
-  state.layout.separator = sep;
-  appendLog(`✏️ File names now use "${sep}" between the drawing number and title; files named the old way show as Rename.`);
+async function setNameTemplate(template) {
+  if (!state.registerPath || templateProblem(template) || template === state.layout.nameTemplate) return renderNames(true);
+  state.layout.nameTemplate = template;
+  appendLog(`✏️ New file names now follow "${template}.pdf"; files named another way show as Rename.`);
   await saveLayout();
   rebuild();
+  loadFileDetails();
+  renderNames(true);
 }
 
-separatorInput.addEventListener('input', () => showSeparatorPreview(separatorInput.value));
-separatorInput.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') setSeparator(separatorInput.value);
+templateInput.addEventListener('input', () => renderNames());
+templateInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') setNameTemplate(templateInput.value);
+  if (e.key === 'Escape') renderNames(true);
 });
-separatorInput.addEventListener('change', () => setSeparator(separatorInput.value));
+templateInput.addEventListener('change', () => setNameTemplate(templateInput.value));
+presetSelect.addEventListener('change', () => {
+  if (presetSelect.value) setNameTemplate(presetSelect.value);
+});
+for (const btn of document.querySelectorAll('.name-fields button')) {
+  // Puts the field where the cursor is in the pattern
+  btn.addEventListener('mousedown', (e) => e.preventDefault());
+  btn.addEventListener('click', () => {
+    const field = `{${btn.dataset.field}}`;
+    const start = templateInput.selectionStart ?? templateInput.value.length;
+    const end = templateInput.selectionEnd ?? start;
+    templateInput.value = templateInput.value.slice(0, start) + field + templateInput.value.slice(end);
+    templateInput.focus();
+    templateInput.setSelectionRange(start + field.length, start + field.length);
+    renderNames();
+  });
+}
 
 // ---------- warnings ----------
 const WARNING_KINDS = {
@@ -4063,8 +4197,11 @@ let warningsTimer = null;
 function scheduleWarningsUpdate() {
   clearTimeout(warningsTimer);
   warningsTimer = setTimeout(() => {
-    if (onlyWarningsCheckbox.checked) render(new Set());
+    // New names that use the drawing's revision change as it's read
+    if (templateUses('filerev')) rebuild();
+    else if (onlyWarningsCheckbox.checked) render(new Set());
     else renderWarnings();
+    renderNames();
   }, 300);
 }
 
@@ -4234,18 +4371,14 @@ function ssFolderProblem(name) {
   return null;
 }
 
-// Shows the current options (the separator is this folder's)
+// Shows the current options
 function renderOptions() {
   const today = new Date();
   const loaded = !!state.registerPath;
-  separatorInput.value = state.layout.separator;
-  separatorInput.disabled = !loaded;
-  separatorInput.title = loaded ? '' : 'Load a register first: the separator is saved with its folder';
-  showSeparatorPreview(state.layout.separator);
   fillSelect(optFileDate, FILE_DATE_FORMATS.map(f => [f, `${f.toUpperCase()}  (${datePrefix(today, f)})`]), folderOption('fileDate'));
   optSsFolder.value = ssDir();
   optSsNote.classList.remove('error');
-  optSsNote.textContent = `e.g. ${ssDir()}\\${datePrefix(today)} PA-001${state.layout.separator}Masterplan.pdf`;
+  optSsNote.textContent = `e.g. ${ssDir()}\\${datePrefix(today)} ${newNameFor(Object.keys(state.titles)[0] || 'PA-001', { 'PA-001': 'Masterplan', ...state.titles })}`;
   optRecursive.checked = folderOption('recursive');
   fillSelect(optIssueNumbering, RegisterCore.NUMBERING_SCHEMES.map(sc => [sc, SCHEME_LABELS[sc]]), folderOption('issueNumbering'));
   const parts = todayParts();

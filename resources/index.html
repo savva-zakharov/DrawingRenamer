@@ -21,6 +21,7 @@
         <button role="tab" data-tab="drawings" aria-selected="true">Drawings</button>
         <button role="tab" data-tab="project" aria-selected="false">Project data</button>
         <button role="tab" data-tab="revisions" aria-selected="false">Revisions</button>
+        <button role="tab" data-tab="names" aria-selected="false">File names</button>
         <button role="tab" data-tab="warnings" aria-selected="false">Warnings</button>
         <button role="tab" data-tab="options" aria-selected="false">Options</button>
       </nav>
@@ -56,18 +57,42 @@
       <div class="tab-panel" data-panel="revisions" role="tabpanel" hidden>
         <div id="revision-data" class="muted">No register loaded.</div>
       </div>
+      <div class="tab-panel" data-panel="names" role="tabpanel" hidden>
+        <div id="names" class="names-grid">
+          <section>
+            <h4>New file names <span class="muted">(this folder)</span></h4>
+            <div class="option-row">
+              <label for="name-template">Pattern</label>
+              <input id="name-template" class="template-input mono" spellcheck="false" autocomplete="off" />
+              <span class="muted">.pdf</span>
+            </div>
+            <div class="option-row name-fields">
+              <label>Insert</label>
+              <button data-field="number" title="The drawing number (needed to match files to the register)">Number</button>
+              <button data-field="title" title="The register title">Title</button>
+              <button data-field="rev" title="The latest revision in the register, or the staged issue's">Revision (register)</button>
+              <button data-field="filerev" title="The revision in the drawing's title block">Revision (drawing)</button>
+            </div>
+            <div class="option-row">
+              <label for="name-preset">Presets</label>
+              <select id="name-preset"></select>
+            </div>
+            <div id="name-note" class="option-note"></div>
+          </section>
+          <section>
+            <h4>Preview</h4>
+            <div id="name-preview" class="muted">No register loaded.</div>
+          </section>
+        </div>
+      </div>
       <div class="tab-panel" data-panel="warnings" role="tabpanel" hidden>
         <div id="warnings" class="muted">No register loaded.</div>
       </div>
       <div class="tab-panel" data-panel="options" role="tabpanel" hidden>
         <div id="options" class="options-grid">
           <section>
-            <h4>File names <span class="muted">(this folder)</span></h4>
-            <div class="option-row">
-              <label for="separator-input">Number–title separator</label>
-              <input id="separator-input" class="short-input mono" autocomplete="off" spellcheck="false" />
-            </div>
-            <div id="separator-preview" class="option-note mono"></div>
+            <h4>Dated files <span class="muted">(this folder)</span></h4>
+            <div class="option-note">The pattern for new drawing names is in the File names tab</div>
             <div class="option-row">
               <label for="opt-file-date">Date in front of file names</label>
               <select id="opt-file-date"></select>
