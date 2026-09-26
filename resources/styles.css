@@ -222,7 +222,7 @@ mark.diff{ background:var(--diff-bg); color:inherit; border-radius:2px; padding:
 .stack-bottom mark.diff{ background:var(--diff-add-bg) }
 table.hide-file-titles .title-text mark.diff{ background:none; padding:0 }
 .register-line.none{ color:var(--muted); font-style:italic }
-.toolbar{ flex-wrap:nowrap }
+.toolbar{ flex-wrap:wrap; row-gap:6px }
 .toolbar #summary{ flex:1 1 auto; min-width:0 }
 .toolbar label.inline, .toolbar #watching{ flex:none; white-space:nowrap }
 .toolbar .actions{ flex:none; display:flex; gap:8px; margin-left:8px }
@@ -384,7 +384,6 @@ td.status-cell{ white-space:nowrap }
 .status-icon{ margin-left:5px; color:var(--warn); font-size:13px; cursor:help; vertical-align:middle }
 
 /* More-actions menu */
-.menu-wrap{ position:relative; display:inline-flex }
 #menu-btn{ padding:6px 10px; font-size:15px; line-height:1 }
 .menu{ position:absolute; top:calc(100% + 4px); left:0; z-index:20; min-width:270px; padding:4px 0; background:var(--bg); border:1px solid var(--border); border-radius:5px; box-shadow:0 6px 20px var(--dialog-shadow) }
 .menu[hidden]{ display:none }
