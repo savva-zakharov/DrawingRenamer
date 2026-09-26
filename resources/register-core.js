@@ -1761,16 +1761,6 @@
     }
   }
 
-  // Whether a drawing's project (or client) text names the register's: every word of the
-  // register's value appears in it, ignoring case and punctuation ("Park West LRD Site 7" is in
-  // "Park West Site 7 LRD at Synge Way, Park West, Dublin 12")
-  function namesMatch(registerValue, drawingValue) {
-    const words = v => (v || '').toUpperCase().replace(/[^A-Z0-9]+/g, ' ').trim().split(' ').filter(Boolean);
-    const want = words(registerValue);
-    const have = new Set(words(drawingValue));
-    return want.length > 0 && want.every(w => have.has(w));
-  }
-
   // Scale and size cells of each drawing row: { token: { scale, size } }
   function readDocxDetails(xml) {
     const details = {};
@@ -1812,7 +1802,6 @@
     formatDate,
     editDocxProject,
     readXlsxProject,
-    namesMatch,
     readRowMarks,
     editDocxTitles,
     editDocxNumbers,
