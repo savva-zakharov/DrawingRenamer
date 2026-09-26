@@ -237,6 +237,14 @@ tr.new td.file{ animation:flash 1.5s ease-out }
 
 .log-header{ display:flex; align-items:center; justify-content:space-between; margin-bottom:4px }
 .log-header button{ padding:2px 8px; font-size:12px }
+/* The log starts collapsed to its header, which shows the latest line */
+.log-header button.log-toggle{ display:flex; align-items:center; gap:6px; flex:1; min-width:0; padding:2px 4px; border:none; background:none; color:var(--fg); text-align:left }
+.log-toggle h3{ margin:0 }
+.log-toggle .chevron{ display:inline-block; width:10px; color:var(--muted); transition:transform .15s }
+.log-toggle[aria-expanded="true"] .chevron{ transform:rotate(90deg) }
+#log-latest{ flex:1; min-width:0; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; color:var(--muted); font-family:Consolas, monospace; font-weight:normal }
+.log-toggle[aria-expanded="true"] #log-latest{ visibility:hidden }
+.log-header{ gap:8px }
 #log{ white-space:pre-wrap; background:var(--code-bg); color:var(--code-fg); padding:8px; height:140px; overflow:auto; border-radius:4px; border:1px solid var(--border); font-family:Consolas, monospace; font-size:12px }
 
 /* Several files matching one drawing: bracket them and dim the ones not being used */

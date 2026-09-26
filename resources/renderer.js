@@ -89,6 +89,18 @@ function appendLog(text) {
   const time = new Date().toLocaleTimeString();
   logEl.textContent += `[${time}] ${text}\n`;
   logEl.scrollTop = logEl.scrollHeight;
+  // Collapsed, the header shows the latest line (its first line, for a message over several)
+  const latest = document.getElementById('log-latest');
+  latest.textContent = `[${time}] ${text.split('\n')[0]}`;
+  latest.title = text;
+}
+
+function setLogExpanded(expanded) {
+  const toggle = document.getElementById('toggle-log');
+  toggle.setAttribute('aria-expanded', String(expanded));
+  toggle.title = expanded ? 'Hide the log' : 'Show the log';
+  logEl.hidden = !expanded;
+  if (expanded) logEl.scrollTop = logEl.scrollHeight;
 }
 
 Neutralino.init();
@@ -3780,4 +3792,6 @@ renameBtn.addEventListener('click', renameSelected);
 
 document.getElementById('clear-log').addEventListener('click', () => {
   logEl.textContent = '';
+  document.getElementById('log-latest').textContent = '';
 });
+document.getElementById('toggle-log').addEventListener('click', () => setLogExpanded(logEl.hidden));

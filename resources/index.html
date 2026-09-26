@@ -87,10 +87,12 @@
 
     <footer>
       <div class="log-header">
-        <h3>Log</h3>
+        <button id="toggle-log" class="log-toggle" aria-expanded="false" aria-controls="log" title="Show the log">
+          <span class="chevron" aria-hidden="true">▸</span><h3>Log</h3><span id="log-latest"></span>
+        </button>
         <button id="clear-log">Clear</button>
       </div>
-      <div id="log"></div>
+      <div id="log" hidden></div>
     </footer>
 
     <dialog id="folder-dialog">
