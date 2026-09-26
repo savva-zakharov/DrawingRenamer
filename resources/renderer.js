@@ -1822,7 +1822,8 @@ function renderDrawingValues(parent, title, field, registerValue) {
     const li = el('li');
     let mark;
     if (registerValue) {
-      const ok = RegisterCore.namesMatch(registerValue, value);
+      // The wording must be the same; only case (drawings often use capitals) and spacing may differ
+      const ok = sameTitle(registerValue, value);
       mark = el('span', ok ? '✓ ' : '⚠ ', ok ? 'ok' : 'warn');
       li.title = (ok ? 'Matches' : "Doesn't match") + ` the register's "${registerValue}"\n` + drawings.join('\n');
     } else {
@@ -1936,7 +1937,8 @@ function projectWarnings(row) {
 function projectFieldProblem(field, value) {
   const name = field === 'project' ? 'Project' : 'Client';
   const registerValue = registerProjectValue(field);
-  if (registerValue) return RegisterCore.namesMatch(registerValue, value) ? '' : `${name} "${value}" doesn't match the register's "${registerValue}"`;
+  // The wording must be the same; only case (drawings often use capitals) and spacing may differ
+  if (registerValue) return sameTitle(registerValue, value) ? '' : `${name} "${value}" doesn't match the register's "${registerValue}"`;
   const values = drawingValues(field);
   return values.length > 1 && values[0].value.toUpperCase() !== value.toUpperCase()
     ? `${name} "${value}" differs from most drawings' "${values[0].value}"` : '';
