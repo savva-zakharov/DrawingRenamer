@@ -105,7 +105,7 @@ const state = {
   // { register number: mark }, header: { label: value }, highlight: 'RRGGBB' or null, register }
   // (header: the Issue No / Date edits it made; highlight: the colour to highlight the issue column
   // with; register: the file name of the register it's for)
-  layout: { folders: [], assignments: {}, titleEdits: {}, detailEdits: {}, projectEdits: {}, issueEdit: null, numberEdits: {}, numberHistory: {}, newEntries: [], moves: [], foldersToRemove: [], nameTemplate: DEFAULT_TEMPLATE, options: {} },
+  layout: { folders: [], assignments: {}, titleEdits: {}, detailEdits: {}, projectEdits: {}, issueEdit: null, numberEdits: {}, numberHistory: {}, newEntries: [], moves: [], foldersToRemove: [], nameTemplate: DEFAULT_TEMPLATE, options: {}, ignoredWarnings: [] },
   drag: null,            // what's being dragged: { kind: 'drawing', token } or { kind: 'folder', folder }
   origOf: {},            // drawing number shown => number in the register (for renumbered drawings)
   movedTokens: new Set(), // register numbers of drawings with a pending move
@@ -448,7 +448,7 @@ function layoutPath() {
 }
 
 async function loadLayout() {
-  state.layout = { folders: [], assignments: {}, titleEdits: {}, detailEdits: {}, projectEdits: {}, issueEdit: null, numberEdits: {}, numberHistory: {}, newEntries: [], moves: [], foldersToRemove: [], nameTemplate: DEFAULT_TEMPLATE, options: {} };
+  state.layout = { folders: [], assignments: {}, titleEdits: {}, detailEdits: {}, projectEdits: {}, issueEdit: null, numberEdits: {}, numberHistory: {}, newEntries: [], moves: [], foldersToRemove: [], nameTemplate: DEFAULT_TEMPLATE, options: {}, ignoredWarnings: [] };
   state.layoutBroken = false;
   if (!(await getStatsOrNull(layoutPath()))) return;
   try {
@@ -518,7 +518,8 @@ async function loadLayout() {
     const separator = typeof data.separator === 'string' && !separatorProblem(data.separator) ? data.separator : DEFAULT_SEPARATOR;
     const nameTemplate = typeof data.nameTemplate === 'string' && !templateProblem(data.nameTemplate) ? data.nameTemplate : `{number}${separator}{title}`;
     const options = validFolderOptions(data.options);
-    state.layout = { folders: withAncestors(folders), assignments, titleEdits, detailEdits, projectEdits, issueEdit, otherDrafts: drafts, numberEdits, numberHistory, newEntries, moves, foldersToRemove, nameTemplate, options };
+    const ignoredWarnings = (Array.isArray(data.ignoredWarnings) ? data.ignoredWarnings : []).filter(k => typeof k === 'string');
+    state.layout = { folders: withAncestors(folders), assignments, titleEdits, detailEdits, projectEdits, issueEdit, otherDrafts: drafts, numberEdits, numberHistory, newEntries, moves, foldersToRemove, nameTemplate, options, ignoredWarnings };
     appendLog(`📁 Loaded folder layout from ${LAYOUT_FILE} (${folders.length} folders).`);
   } catch (err) {
     state.layoutBroken = true;
@@ -580,6 +581,8 @@ async function saveLayout() {
     numberHistory: state.layout.numberHistory,
     moves: state.layout.moves,
     foldersToRemove: state.layout.foldersToRemove,
+    // Warnings ignored in the Warnings tab: drawing|kind|text (a changed warning shows again)
+    ignoredWarnings: state.layout.ignoredWarnings,
     newEntries: state.layout.newEntries
   };
   try {
@@ -929,7 +932,7 @@ function rowShown() {
     return words.every(w => text.includes(w));
   };
   const byToken = new Map();
-  const passes = r => (!words.length || matchesText(r)) && (!onlyWarnings || rowWarnings(r).length > 0);
+  const passes = r => (!words.length || matchesText(r)) && (!onlyWarnings || activeWarnings(r).length > 0);
   if (words.length || onlyWarnings) {
     for (const r of state.rows) if (r.token && passes(r)) byToken.set(r.token, true);
   }
@@ -2313,7 +2316,7 @@ function projectFieldProblem(field, value) {
 }
 
 function renderProjectWarning(span, row) {
-  const problems = projectWarnings(row);
+  const problems = projectWarnings(row).filter(text => !ignoredText(row, text));
   span.hidden = !problems.length;
   span.textContent = problems.length ? '⚠' : '';
   span.title = problems.join('\n');
@@ -2473,7 +2476,7 @@ function revisionWarnings(row) {
 }
 
 function renderRevisionWarning(div, row) {
-  const problems = revisionWarnings(row);
+  const problems = revisionWarnings(row).filter(text => !ignoredText(row, text));
   div.hidden = !problems.length;
   div.textContent = problems.length ? '⚠ revision' : '';
   div.title = problems.join('\n');
@@ -4192,6 +4195,38 @@ function rowWarnings(row) {
   return warnings;
 }
 
+// Ignored warnings (the Warnings tab's Ignore): kept per folder, by drawing, kind and text, so a
+// warning whose values change shows again
+function warningKey(row, w) {
+  return `${row.token || row.rel}|${w.kind}|${w.text}`;
+}
+
+function isIgnored(row, w) {
+  return state.layout.ignoredWarnings.includes(warningKey(row, w));
+}
+
+// For the Status column, whose warnings are the same texts without their kind
+function ignoredText(row, text) {
+  const id = `${row.token || row.rel}|`;
+  return state.layout.ignoredWarnings.some(k => k.startsWith(id) && k.endsWith(`|${text}`));
+}
+
+function activeWarnings(row) {
+  return rowWarnings(row).filter(w => !isIgnored(row, w));
+}
+
+async function setIgnored(row, w, ignore) {
+  const key = warningKey(row, w);
+  const list = state.layout.ignoredWarnings.filter(k => k !== key);
+  if (ignore) list.push(key);
+  state.layout.ignoredWarnings = list;
+  appendLog(ignore ? `🙈 Ignoring for ${row.token || displayPath(row.rel)}: ${w.text}` : `👁 No longer ignoring for ${row.token || displayPath(row.rel)}: ${w.text}`);
+  await saveLayout();
+  render(new Set()); // the counts, Status column icons and "Only with warnings"
+}
+
+let showIgnoredWarnings = false;
+
 let warningsTimer = null;
 // As title blocks arrive: the Warnings tab, and the table when it only shows drawings with warnings
 function scheduleWarningsUpdate() {
@@ -4205,8 +4240,11 @@ function scheduleWarningsUpdate() {
   }, 300);
 }
 
-function warningsList() {
-  return state.rows.map(row => ({ row, warnings: rowWarnings(row) })).filter(w => w.warnings.length);
+// Drawings with warnings not ignored, and with `withIgnored` the ignored ones too (marked ignored)
+function warningsList(withIgnored = false) {
+  return state.rows
+    .map(row => ({ row, warnings: rowWarnings(row).map(w => ({ ...w, ignored: isIgnored(row, w) })).filter(w => withIgnored || !w.ignored) }))
+    .filter(w => w.warnings.length);
 }
 
 // Shows a drawing's row in the table, flashing it; the filter is cleared if it hides it
@@ -4228,6 +4266,7 @@ function revealRow(row) {
 function renderWarnings() {
   const all = state.registerPath ? warningsList() : [];
   const total = all.reduce((n, w) => n + w.warnings.length, 0);
+  const ignoredCount = state.registerPath ? warningsList(true).reduce((n, w) => n + w.warnings.filter(x => x.ignored).length, 0) : 0;
   const tab = tabButtons.find(b => b.dataset.tab === 'warnings');
   tab.textContent = total ? `Warnings (${total})` : 'Warnings';
   if (state.activeTab !== 'warnings') return;
@@ -4268,6 +4307,18 @@ function renderWarnings() {
   if (read < pdfs.size) notes.push(`reading title blocks… ${read} of ${pdfs.size}`);
   if (missing) notes.push(`${missing} register drawing${missing === 1 ? ' has' : 's have'} no file (not counted)`);
   if (notes.length) head.appendChild(el('span', notes.join(' · '), 'muted'));
+  if (ignoredCount) {
+    const toggle = el('label', undefined, 'show-ignored');
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = showIgnoredWarnings;
+    cb.addEventListener('change', () => {
+      showIgnoredWarnings = cb.checked;
+      renderWarnings();
+    });
+    toggle.append(cb, `Show ${ignoredCount} ignored`);
+    head.appendChild(toggle);
+  }
   const exportBtn = el('button', 'Export CSV…', 'export');
   exportBtn.disabled = !total;
   exportBtn.title = 'Save the warnings as a spreadsheet file';
@@ -4275,9 +4326,11 @@ function renderWarnings() {
   head.appendChild(exportBtn);
   warningsEl.appendChild(head);
 
-  const shown = all.map(w => ({ ...w, warnings: w.warnings.filter(x => warningKindsShown.has(x.kind)) })).filter(w => w.warnings.length);
+  const shown = (showIgnoredWarnings ? warningsList(true) : all)
+    .map(w => ({ ...w, warnings: w.warnings.filter(x => warningKindsShown.has(x.kind)) })).filter(w => w.warnings.length);
   if (!shown.length) {
-    warningsEl.appendChild(el('p', total ? 'No warnings of the kinds ticked.' : read < pdfs.size ? 'None so far.' : 'Everything read matches the register and the file names.', 'muted'));
+    warningsEl.appendChild(el('p', total ? 'No warnings of the kinds ticked.' : read < pdfs.size ? 'None so far.'
+      : ignoredCount ? 'No warnings apart from the ignored ones.' : 'Everything read matches the register and the file names.', 'muted'));
   } else {
     const table = el('table', undefined, 'warnings-list');
     for (const { row, warnings } of shown) {
@@ -4291,8 +4344,11 @@ function renderWarnings() {
       const what = el('td');
       const ul = el('ul');
       for (const w of warnings) {
-        const li = el('li');
-        li.append(el('span', WARNING_KINDS[w.kind], 'kind'), w.text);
+        const li = el('li', undefined, w.ignored ? 'ignored' : '');
+        const btn = el('button', w.ignored ? 'Restore' : 'Ignore', 'ignore-warning');
+        btn.title = w.ignored ? 'Count this warning again' : 'Hide this warning and leave it out of the counts (until what it says changes)';
+        btn.addEventListener('click', () => setIgnored(row, w, !w.ignored));
+        li.append(el('span', WARNING_KINDS[w.kind], 'kind'), el('span', w.text, 'warning-text'), btn);
         ul.appendChild(li);
       }
       what.appendChild(ul);

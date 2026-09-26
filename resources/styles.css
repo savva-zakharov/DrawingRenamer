@@ -203,6 +203,13 @@ table.warnings-list td.drawing button{ padding:0; border:none; background:none; 
 table.warnings-list td.drawing button:hover{ text-decoration:underline }
 table.warnings-list td.drawing .muted{ display:block; max-width:360px; overflow:hidden; text-overflow:ellipsis; font-size:11px }
 table.warnings-list ul{ margin:0; padding:0; list-style:none }
+table.warnings-list li{ display:flex; align-items:baseline; gap:0; padding:1px 0 }
+table.warnings-list .warning-text{ flex:1; min-width:0 }
+table.warnings-list li.ignored{ color:var(--muted) }
+table.warnings-list li.ignored .kind{ color:var(--muted) }
+button.ignore-warning{ flex:none; margin:0 0 0 8px; padding:0 6px; font-size:11px; line-height:16px; visibility:hidden }
+table.warnings-list li:hover button.ignore-warning, table.warnings-list li.ignored button.ignore-warning, button.ignore-warning:focus{ visibility:visible }
+.warnings-head .show-ignored{ display:flex; align-items:center; gap:4px; margin:0; font-size:12px; color:var(--muted) }
 table.warnings-list .kind{ display:inline-block; min-width:70px; margin-right:6px; color:var(--warn); font-size:11px; text-transform:uppercase; letter-spacing:.03em }
 tr.flash td{ animation:flash 1.5s ease-out }
 
