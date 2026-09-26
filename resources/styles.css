@@ -330,6 +330,9 @@ tr.section .drag-handle{ color:var(--section-handle) }
 
 /* Files matched by an ISO code with its fields in a different order */
 .reordered{ margin-top:3px; font-size:11px; color:var(--warn); white-space:nowrap; cursor:help }
+/* Beside the status badge: the title block's project or client doesn't match */
+td.status-cell{ white-space:nowrap }
+.status-icon{ margin-left:5px; color:var(--warn); font-size:13px; cursor:help; vertical-align:middle }
 
 /* More-actions menu */
 .menu-wrap{ position:relative; display:inline-flex }

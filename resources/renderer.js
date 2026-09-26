@@ -1146,8 +1146,8 @@ function renderRow(row, newFiles, alt, depth) {
   if (showDrawing) renderTitle(titleTd, row);
   const detailTds = { title: cell(tr, ''), rev: cell(tr, ''), scale: cell(tr, ''), size: cell(tr, '') };
   renderFileDetails(detailTds, row);
-  // The status cell's revision warning is added below; it updates with the title block too
-  const detailEntry = { tds: detailTds, row, warn: null };
+  // The status cell's revision and project warnings are added below; they update with the title block too
+  const detailEntry = { tds: detailTds, row, warn: null, projectWarn: null };
   if (row.rel) {
     if (!fileDetailCells.has(row.rel)) fileDetailCells.set(row.rel, []);
     fileDetailCells.get(row.rel).push(detailEntry);
@@ -1185,13 +1185,19 @@ function renderRow(row, newFiles, alt, depth) {
     targetTd.appendChild(add);
   }
 
-  const statusTd = cell(tr, '');
+  const statusTd = cell(tr, '', 'status-cell');
   const badge = document.createElement('span');
   badge.className = 'status ' + row.status;
   badge.textContent = STATUS_LABELS[row.status];
   const tip = row.reason || STATUS_TIPS[row.status];
   if (tip) badge.title = tip;
   statusTd.appendChild(badge);
+  if (row.rel) {
+    detailEntry.projectWarn = document.createElement('span');
+    detailEntry.projectWarn.className = 'status-icon';
+    statusTd.appendChild(detailEntry.projectWarn);
+    renderProjectWarning(detailEntry.projectWarn, row);
+  }
   if (row.reordered) {
     const warn = document.createElement('div');
     warn.className = 'reordered';
@@ -1599,6 +1605,8 @@ async function loadFileDetails() {
           renderFileDetails(tds, row);
           if (warn) renderRevisionWarning(warn, row);
         }
+        // Without a register value, a drawing is checked against the others, so all may change
+        renderProjectWarnings();
         renderProjectData();
         renderRevisionData();
       }
@@ -1739,6 +1747,7 @@ async function setProjectEdit(field, value) {
   await saveLayout();
   updateButtons();
   renderProjectData(true);
+  renderProjectWarnings();
 }
 
 // The register's header fields, each an input when the register can be written to
@@ -1793,18 +1802,58 @@ function renderProjectFields(section) {
   section.appendChild(dl);
 }
 
+// The register's project or client (including unsaved edits), or '' when it doesn't have one
+function registerProjectValue(key) {
+  const project = state.registerProject;
+  if (!project) return '';
+  const field = project.fields.find(f => f.key === key);
+  return field ? projectValue(field) : key === 'client' ? project.client : '';
+}
+
+// A drawing's project and client problems for the table's Status column: a title block value that
+// doesn't match the register's, or, when the register has none, differs from most drawings'.
+// Empty until the title block has been read.
+function projectWarnings(row) {
+  const entry = row.rel && state.fileDetails.get(absPath(row.rel));
+  const details = entry && entry.details;
+  if (!details) return [];
+  const problems = [];
+  for (const [field, name] of [['project', 'Project'], ['client', 'Client']]) {
+    const value = details[field];
+    if (!value) continue;
+    const registerValue = registerProjectValue(field);
+    if (registerValue) {
+      if (!RegisterCore.namesMatch(registerValue, value)) problems.push(`${name} "${value}" doesn't match the register's "${registerValue}"`);
+      continue;
+    }
+    const values = drawingValues(field);
+    if (values.length > 1 && values[0].value.toUpperCase() !== value.toUpperCase()) {
+      problems.push(`${name} "${value}" differs from most drawings' "${values[0].value}"`);
+    }
+  }
+  return problems;
+}
+
+function renderProjectWarning(span, row) {
+  const problems = projectWarnings(row);
+  span.hidden = !problems.length;
+  span.textContent = problems.length ? '⚠' : '';
+  span.title = problems.join('\n');
+}
+
+function renderProjectWarnings() {
+  for (const cells of fileDetailCells.values()) {
+    for (const { row, projectWarn } of cells) if (projectWarn) renderProjectWarning(projectWarn, row);
+  }
+}
+
 // What the drawings' title blocks say, marked against the register (including unsaved edits)
 function renderProjectDrawings(section) {
   const project = state.registerProject;
   const pdfs = new Set(state.rows.filter(r => r.rel && /\.pdf$/i.test(r.rel)).map(r => r.rel));
   const read = [...pdfs].filter(rel => state.fileDetails.has(absPath(rel))).length;
-  const registerOf = key => {
-    if (!project) return '';
-    const field = project.fields.find(f => f.key === key);
-    return field ? projectValue(field) : key === 'client' ? project.client : '';
-  };
-  renderDrawingValues(section, 'Project', 'project', registerOf('project'));
-  renderDrawingValues(section, 'Client', 'client', registerOf('client'));
+  renderDrawingValues(section, 'Project', 'project', registerProjectValue('project'));
+  renderDrawingValues(section, 'Client', 'client', registerProjectValue('client'));
   section.appendChild(el('p', read < pdfs.size
     ? `Reading title blocks… ${read} of ${pdfs.size} drawings`
     : `From the title blocks of ${pdfs.size} drawing${pdfs.size === 1 ? '' : 's'}. Hover a value to see which.`, 'muted'));
