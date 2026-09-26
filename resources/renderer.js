@@ -38,7 +38,7 @@ const DEFAULT_SEPARATOR = ' - ';
 // App-wide options (the Options tab), about this computer rather than a project: kept in
 // Neutralino's storage
 const DEFAULT_SETTINGS = {
-  apps: { word: '', excel: '', pdf: '' } // programs to open files with ('' = the system default)
+  apps: { word: '', excel: '', pdf: '', revit: '', autocad: '' } // programs to open files with ('' = the system default)
 };
 let settings = JSON.parse(JSON.stringify(DEFAULT_SETTINGS));
 
@@ -3919,7 +3919,7 @@ const optRecursive = document.getElementById('opt-recursive');
 const optIssueNumbering = document.getElementById('opt-issue-numbering');
 const optIssueDate = document.getElementById('opt-issue-date');
 const optHighlight = document.getElementById('opt-highlight');
-const APP_NAMES = { word: 'Word', excel: 'Excel', pdf: 'PDF viewer' };
+const APP_NAMES = { word: 'Word files', excel: 'Excel files', pdf: 'PDFs', revit: 'Revit models', autocad: 'AutoCAD drawings' };
 
 function fillSelect(sel, options, value) {
   sel.textContent = '';
@@ -3965,7 +3965,7 @@ function renderOptions() {
   for (const row of document.querySelectorAll('.app-row')) {
     const input = row.querySelector('.app-path');
     input.value = settings.apps[row.dataset.app];
-    input.title = input.value || `Opens with the program Windows uses for ${APP_NAMES[row.dataset.app] === 'PDF viewer' ? 'PDFs' : APP_NAMES[row.dataset.app] + ' files'}`;
+    input.title = input.value || `Opens with the program Windows uses for ${APP_NAMES[row.dataset.app]}`;
     row.querySelector('.app-clear').disabled = !input.value;
   }
 }
@@ -4043,7 +4043,7 @@ for (const row of document.querySelectorAll('.app-row')) {
   const input = row.querySelector('.app-path');
   const setApp = (path) => {
     const apps = { ...settings.apps, [app]: path.trim().replace(/^"(.*)"$/, '$1') };
-    return setOption('apps', apps, apps[app] ? `${APP_NAMES[app]} files now open with ${apps[app]}.` : `${APP_NAMES[app]} files now open with the system default.`);
+    return setOption('apps', apps, apps[app] ? `${APP_NAMES[app]} now open with ${apps[app]}.` : `${APP_NAMES[app]} now open with the system default.`);
   };
   input.addEventListener('change', () => setApp(input.value));
   input.addEventListener('keydown', (e) => {
@@ -4052,7 +4052,7 @@ for (const row of document.querySelectorAll('.app-row')) {
   row.querySelector('.app-clear').addEventListener('click', () => setApp(''));
   row.querySelector('.app-browse').addEventListener('click', async () => {
     try {
-      const picked = await Neutralino.os.showOpenDialog(`Open ${APP_NAMES[app] === 'PDF viewer' ? 'PDFs' : APP_NAMES[app] + ' files'} with`, {
+      const picked = await Neutralino.os.showOpenDialog(`Open ${APP_NAMES[app]} with`, {
         filters: [{ name: 'Programs', extensions: ['exe'] }, { name: 'All files', extensions: ['*'] }]
       });
       if (picked && picked.length) await setApp(picked[0]);
@@ -4224,6 +4224,8 @@ function appFor(filePath) {
   if (/^doc[xm]?$/i.test(ext)) return settings.apps.word;
   if (/^xls[xmb]?$/i.test(ext)) return settings.apps.excel;
   if (/^pdf$/i.test(ext)) return settings.apps.pdf;
+  if (/^(rvt|rfa|rte)$/i.test(ext)) return settings.apps.revit;
+  if (/^(dwg|dxf)$/i.test(ext)) return settings.apps.autocad;
   return '';
 }
 
