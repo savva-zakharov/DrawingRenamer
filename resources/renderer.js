@@ -7,6 +7,7 @@ const watchingEl = document.getElementById('watching');
 const renameBtn = document.getElementById('rename');
 const folderBtn = document.getElementById('make-folder');
 const wordBtn = document.getElementById('save-word');
+const openRegisterBtn = document.getElementById('open-register');
 const entryBtn = document.getElementById('new-entry');
 const hideEmptyCheckbox = document.getElementById('hide-empty');
 const checkAllCheckbox = document.getElementById('check-all');
@@ -738,6 +739,9 @@ function updateButtons() {
   wordBtn.textContent = changes ? `${saveButtonLabel()} (${changes})` : saveButtonLabel();
   wordBtn.title = `Write edited titles and numbers into the ${registerAppName()} register`;
   wordBtn.disabled = state.busy || changes === 0;
+  openRegisterBtn.hidden = !editable;
+  openRegisterBtn.textContent = `OPEN IN ${registerAppName().toUpperCase()}`;
+  openRegisterBtn.title = `Open ${state.registerPath ? baseName(state.registerPath) : 'the register'} in ${registerAppName()}. Close it there before saving changes from here.`;
 
   const which = selected ? `the ${selected} selected drawing${selected === 1 ? '' : 's'}` : 'the selected drawings';
   const copyNote = editable ? '' : '\nTitles can only be changed in a Word or Excel register';
@@ -3759,13 +3763,16 @@ async function discardRegisterChanges() {
 }
 
 // ---------- open a file in its default app ----------
-async function openFile(rel) {
-  const filePath = absPath(rel);
+function openFile(rel) {
+  return openPath(absPath(rel), displayPath(rel));
+}
+
+async function openPath(filePath, shown) {
   try {
     if (typeof NL_OS !== 'undefined' && NL_OS !== 'Windows') await Neutralino.os.open(filePath);
     else await Neutralino.os.execCommand(`explorer.exe "${filePath.replace(/\//g, '\\')}"`, { background: true });
   } catch (err) {
-    appendLog(`❌ Could not open ${displayPath(rel)}: ${err.message || err}`);
+    appendLog(`❌ Could not open ${shown}: ${err.message || err}`);
   }
 }
 
@@ -3979,6 +3986,9 @@ rowsEl.addEventListener('mousedown', (e) => {
 
 folderBtn.addEventListener('click', makeFolder);
 wordBtn.addEventListener('click', saveToWord);
+openRegisterBtn.addEventListener('click', () => {
+  if (state.registerPath) openPath(state.registerPath, baseName(state.registerPath));
+});
 entryBtn.addEventListener('click', () => openEntryDialog(null));
 renameBtn.addEventListener('click', renameSelected);
 
