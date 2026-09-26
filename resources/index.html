@@ -12,6 +12,7 @@
         <button role="tab" data-tab="drawings" aria-selected="true">Drawings</button>
         <button role="tab" data-tab="project" aria-selected="false">Project data</button>
         <button role="tab" data-tab="revisions" aria-selected="false">Revisions</button>
+        <button role="tab" data-tab="options" aria-selected="false">Options</button>
       </nav>
       <div class="tab-panel" data-panel="drawings" role="tabpanel">
       <div class="row">
@@ -32,12 +33,6 @@
               <button role="menuitem" data-action="discard">Discard unsaved register changes</button>
               <div class="menu-sep"></div>
               <button role="menuitem" data-action="open-folder">Open folder in Explorer</button>
-              <div class="menu-sep"></div>
-              <label class="menu-field" for="separator-input">
-                Number–title separator
-                <input id="separator-input" autocomplete="off" spellcheck="false" />
-              </label>
-              <div id="separator-preview" class="menu-note"></div>
             </div>
           </span>
         </span>
@@ -50,6 +45,70 @@
       </div>
       <div class="tab-panel" data-panel="revisions" role="tabpanel" hidden>
         <div id="revision-data" class="muted">No register loaded.</div>
+      </div>
+      <div class="tab-panel" data-panel="options" role="tabpanel" hidden>
+        <div id="options" class="options-grid">
+          <section>
+            <h4>File names</h4>
+            <div class="option-row">
+              <label for="separator-input">Number–title separator <span class="muted">(this folder)</span></label>
+              <input id="separator-input" class="short-input mono" autocomplete="off" spellcheck="false" />
+            </div>
+            <div id="separator-preview" class="option-note mono"></div>
+            <div class="option-row">
+              <label for="opt-file-date">Date in front of file names</label>
+              <select id="opt-file-date"></select>
+            </div>
+            <div class="option-note">For superseded drawings, register backups and exported register PDFs</div>
+            <div class="option-row">
+              <label for="opt-ss-folder">Superseded drawings folder</label>
+              <input id="opt-ss-folder" class="short-input" autocomplete="off" spellcheck="false" />
+            </div>
+            <div id="opt-ss-note" class="option-note"></div>
+          </section>
+          <section>
+            <h4>Scanning</h4>
+            <label class="inline option-check"><input type="checkbox" id="opt-recursive" /> Include subfolders on disk</label>
+            <div class="option-note">Also finds drawings in any subfolder (not the superseded ones); they stay where they are unless put in another folder</div>
+            <h4>New issues</h4>
+            <div class="option-note">Used when the register doesn't already show a style</div>
+            <div class="option-row">
+              <label for="opt-issue-numbering">Issue numbering</label>
+              <select id="opt-issue-numbering"></select>
+            </div>
+            <div class="option-row">
+              <label for="opt-issue-date">Issue date format</label>
+              <select id="opt-issue-date"></select>
+            </div>
+            <div class="option-row">
+              <label for="opt-highlight">Issue highlight colour</label>
+              <input type="color" id="opt-highlight" class="highlight-color" />
+            </div>
+          </section>
+          <section>
+            <h4>Open files with</h4>
+            <div class="option-note">Leave blank to use the program Windows opens them with</div>
+            <div class="option-row app-row" data-app="word">
+              <label for="opt-app-word">Word registers</label>
+              <input id="opt-app-word" class="app-path" placeholder="System default" spellcheck="false" />
+              <button class="app-browse" title="Choose the program">Browse…</button>
+              <button class="app-clear" title="Use the system default">✕</button>
+            </div>
+            <div class="option-row app-row" data-app="excel">
+              <label for="opt-app-excel">Excel registers</label>
+              <input id="opt-app-excel" class="app-path" placeholder="System default" spellcheck="false" />
+              <button class="app-browse" title="Choose the program">Browse…</button>
+              <button class="app-clear" title="Use the system default">✕</button>
+            </div>
+            <div class="option-row app-row" data-app="pdf">
+              <label for="opt-app-pdf">PDF drawings</label>
+              <input id="opt-app-pdf" class="app-path" placeholder="System default" spellcheck="false" />
+              <button class="app-browse" title="Choose the program">Browse…</button>
+              <button class="app-clear" title="Use the system default">✕</button>
+            </div>
+            <div class="option-note">These options apply to every folder; the separator is saved with this folder.</div>
+          </section>
+        </div>
       </div>
       <!-- What the table shows; under every tab -->
       <div class="row view-options">
