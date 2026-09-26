@@ -24,6 +24,9 @@ const fileDetailCheckboxes = [[fileNumberCheckbox, 'hide-file-number'], [fileTit
   [fileProjectCheckbox, 'hide-file-project'], [fileClientCheckbox, 'hide-file-client']];
 const tableEl = document.getElementById('drawings');
 const stackCheckbox = document.getElementById('stack-compare');
+const tableFilterInput = document.getElementById('table-filter');
+const onlyWarningsCheckbox = document.getElementById('only-warnings');
+const warningsEl = document.getElementById('warnings');
 const titlesFromFilesBtn = document.getElementById('titles-from-files');
 const titlesFromRegisterBtn = document.getElementById('titles-from-register');
 // Copy the in-file scale or size into the register, one button per column
@@ -153,6 +156,20 @@ Neutralino.events.on('windowClose', () => Neutralino.app.exit());
 // --------------------
 // Path helpers
 // --------------------
+
+// Windows only opens paths of 260 characters or more with the \\?\ prefix (deep project folders,
+// long drawing names), so file calls go through nfs, which adds it to long paths
+function longPath(p) {
+  if (typeof p !== 'string' || p.length < 240 || typeof NL_OS === 'undefined' || NL_OS !== 'Windows' || p.startsWith('\\\\?\\')) return p;
+  const win = p.replace(/\//g, '\\');
+  if (/^[A-Za-z]:\\/.test(win)) return '\\\\?\\' + win;
+  if (win.startsWith('\\\\')) return '\\\\?\\UNC\\' + win.slice(2);
+  return p;
+}
+const PATH_ARGS = { move: 2, copy: 2 }; // how many of a call's first arguments are paths (else 1)
+const nfs = new Proxy({}, {
+  get: (_, name) => (...args) => Neutralino.filesystem[name](...args.map((a, i) => (i < (PATH_ARGS[name] || 1) ? longPath(a) : a)))
+});
 function joinPath(dir, name) {
   return dir.replace(/[\\/]+$/, '') + '/' + name;
 }
@@ -167,14 +184,14 @@ function baseName(filePath) {
 
 async function getStatsOrNull(p) {
   try {
-    return await Neutralino.filesystem.getStats(p);
+    return await nfs.getStats(p);
   } catch (e) {
     return null;
   }
 }
 
 async function listFiles(dir) {
-  const entries = await Neutralino.filesystem.readDirectory(dir);
+  const entries = await nfs.readDirectory(dir);
   return entries.filter(e => e.type === 'FILE').map(e => e.entry);
 }
 
@@ -284,7 +301,7 @@ function transformMatrix(m, n) {
 // with ISO 19650 title blocks) read the same as upright ones.
 // Pass a PDFJS.PDFWorker to reuse it (starting a worker per file is most of the cost).
 async function readFileDetails(filePath, worker) {
-  const data = new Uint8Array(await Neutralino.filesystem.readBinaryFile(filePath));
+  const data = new Uint8Array(await nfs.readBinaryFile(filePath));
   const doc = await PDFJS.getDocument(worker ? { data, worker } : { data });
   try {
     const page = await doc.getPage(1);
@@ -310,7 +327,7 @@ async function readFileDetails(filePath, worker) {
 // 3️⃣ Parse register into token map
 // --------------------
 async function readDocumentXml(docxPath) {
-  const zip = await JSZip.loadAsync(await Neutralino.filesystem.readBinaryFile(docxPath));
+  const zip = await JSZip.loadAsync(await nfs.readBinaryFile(docxPath));
   const part = zip.file('word/document.xml');
   if (!part) throw new Error(`${baseName(docxPath)} doesn't look like a Word document.`);
   return { zip, xml: await part.async('string') };
@@ -332,7 +349,7 @@ async function parseRegister(filePath) {
   }
   state.registerXml = null;
   if (registerKindOf(baseName(filePath)) === 'xlsx') {
-    const zip = await JSZip.loadAsync(await Neutralino.filesystem.readBinaryFile(filePath));
+    const zip = await JSZip.loadAsync(await nfs.readBinaryFile(filePath));
     const parts = await RegisterCore.loadXlsxParts(zip);
     const found = RegisterCore.readXlsxRegister(parts);
     state.registerProject = RegisterCore.readXlsxProject(parts);
@@ -345,7 +362,7 @@ async function parseRegister(filePath) {
     state.registerColumns = { scale: places.some(pl => pl.scaleCol !== undefined), size: places.some(pl => pl.sizeCol !== undefined) };
     return found.titles;
   }
-  const buffer = await Neutralino.filesystem.readBinaryFile(filePath);
+  const buffer = await nfs.readBinaryFile(filePath);
   return RegisterCore.parsePdfText(await extractPdfText(buffer));
 }
 
@@ -373,7 +390,7 @@ async function ensureDir(rel) {
   for (const part of rel.split('/').filter(Boolean)) {
     current = relJoin(current, part);
     const stats = await getStatsOrNull(absPath(current));
-    if (!stats) await Neutralino.filesystem.createDirectory(absPath(current));
+    if (!stats) await nfs.createDirectory(absPath(current));
     else if (!stats.isDirectory) throw new Error(`"${displayPath(current)}" exists but is not a folder`);
   }
 }
@@ -386,7 +403,7 @@ async function findSubfolders() {
     if (depth > 8 || found.length >= 500) return;
     let entries;
     try {
-      entries = await Neutralino.filesystem.readDirectory(absPath(dir));
+      entries = await nfs.readDirectory(absPath(dir));
     } catch (e) {
       return;
     }
@@ -434,7 +451,7 @@ async function loadLayout() {
   state.layoutBroken = false;
   if (!(await getStatsOrNull(layoutPath()))) return;
   try {
-    const data = JSON.parse(await Neutralino.filesystem.readFile(layoutPath()));
+    const data = JSON.parse(await nfs.readFile(layoutPath()));
     const folders = Array.isArray(data.folders) ? data.folders.filter(f => typeof f === 'string') : [];
     const assignments = {};
     for (const [token, folder] of Object.entries(data.assignments || {})) {
@@ -562,7 +579,7 @@ async function saveLayout() {
     newEntries: state.layout.newEntries
   };
   try {
-    await Neutralino.filesystem.writeFile(layoutPath(), JSON.stringify(data, null, 2) + '\n');
+    await nfs.writeFile(layoutPath(), JSON.stringify(data, null, 2) + '\n');
   } catch (err) {
     appendLog(`❌ Could not save ${LAYOUT_FILE}: ${err.message || err}`);
   }
@@ -820,7 +837,29 @@ function renameRows() {
 }
 
 function visibleRows() {
-  return state.rows.filter(r => !(hideEmptyCheckbox.checked && r.status === 'none'));
+  return state.rows.filter(rowShown());
+}
+
+// The table's visibility test: missing drawings (unless hidden), the filter text, and "only with
+// warnings". A drawing's rows are shown together when any of them matches.
+function rowShown() {
+  const words = tableFilterInput.value.toLowerCase().split(/\s+/).filter(Boolean);
+  const onlyWarnings = onlyWarningsCheckbox.checked;
+  const matchesText = r => {
+    const details = r.rel && (state.fileDetails.get(absPath(r.rel)) || {}).details;
+    const text = [r.token, r.title, r.file, r.targetRel, details && details.title, details && details.number].filter(Boolean).join(' ').toLowerCase();
+    return words.every(w => text.includes(w));
+  };
+  const byToken = new Map();
+  const passes = r => (!words.length || matchesText(r)) && (!onlyWarnings || rowWarnings(r).length > 0);
+  if (words.length || onlyWarnings) {
+    for (const r of state.rows) if (r.token && passes(r)) byToken.set(r.token, true);
+  }
+  return r => {
+    if (hideEmptyCheckbox.checked && r.status === 'none') return false;
+    if (!words.length && !onlyWarnings) return true;
+    return r.token ? byToken.has(r.token) : passes(r);
+  };
 }
 
 function updateButtons() {
@@ -1238,7 +1277,7 @@ async function relocateFolder(folder, dest, verb) {
       for (const [dir, id] of [...state.watchers]) {
         if (dir && isInside(dir, folder)) {
           try {
-            await Neutralino.filesystem.removeWatcher(id);
+            await nfs.removeWatcher(id);
           } catch (e) {
             // watcher already gone
           }
@@ -1246,7 +1285,7 @@ async function relocateFolder(folder, dest, verb) {
         }
       }
       if (parentFolder(dest)) await ensureDir(parentFolder(dest));
-      await Neutralino.filesystem.move(absPath(folder), absPath(dest));
+      await nfs.move(absPath(folder), absPath(dest));
     }
     const remap = f => (f && isInside(f, folder) ? dest + f.slice(folder.length) : f);
     const remapRel = rel => (rel.startsWith(folder + '/') ? dest + rel.slice(folder.length) : rel);
@@ -1286,6 +1325,7 @@ async function undoMove(token) {
 
 function renderRow(row, newFiles, alt, depth) {
   const tr = document.createElement('tr');
+  tr.dataset.key = row.key;
   if (row.status === 'none') tr.className = 'no-file';
   if (row.status === 'ok') tr.className = 'named';
   if (alt) tr.classList.add('alt');
@@ -1696,7 +1736,8 @@ const DETAIL_COLUMNS = { number: 'col-file-number', title: 'col-file-title', rev
 
 // Title blocks are read while any detail column is shown, or the Project data or Revisions tab is open
 function fileDetailsShown() {
-  return fileDetailCheckboxes.some(([cb]) => cb.checked) || state.activeTab === 'project' || state.activeTab === 'revisions';
+  return fileDetailCheckboxes.some(([cb]) => cb.checked) || onlyWarningsCheckbox.checked ||
+    ['project', 'revisions', 'warnings'].includes(state.activeTab);
 }
 
 function renderFileDetails(tds, row) {
@@ -1932,7 +1973,11 @@ async function loadFileDetails() {
         const rel = queue.shift();
         const filePath = absPath(rel);
         const stats = await getStatsOrNull(filePath);
-        if (!stats) continue;
+        if (!stats) {
+          // Gone, or can't be opened: shown as unreadable rather than left reading
+          state.fileDetails.set(filePath, { stamp: '', details: null });
+          continue;
+        }
         const stamp = `${stats.size}:${stats.modifiedAt}`;
         const cached = state.fileDetails.get(filePath);
         if (cached && cached.stamp === stamp) continue;
@@ -1953,6 +1998,7 @@ async function loadFileDetails() {
         renderProjectWarnings();
         renderProjectData();
         renderRevisionData();
+        scheduleWarningsUpdate();
       }
     } finally {
       if (worker) worker.destroy();
@@ -2019,6 +2065,10 @@ function switchTab(name) {
     loadFileDetails();
   }
   if (name === 'options') renderOptions();
+  if (name === 'warnings') {
+    renderWarnings();
+    loadFileDetails();
+  }
 }
 
 function el(tag, text, cls) {
@@ -2626,7 +2676,7 @@ function render(newFiles) {
   state.displayKeys = [];
   let dataRows = 0;
 
-  const isVisible = r => !(hideEmptyCheckbox.checked && r.status === 'none');
+  const isVisible = rowShown();
   const all = sections(state.rows);
   for (const section of all) {
     const visible = section.rows.filter(isVisible);
@@ -2662,9 +2712,12 @@ function render(newFiles) {
 
   renderProjectData();
   renderRevisionData();
+  renderWarnings();
   emptyEl.style.display = dataRows ? 'none' : '';
   if (!dataRows) {
-    emptyEl.textContent = state.registerPath ? 'No drawings found in this folder yet.' : 'Choose a drawing register or the folder containing it.';
+    const filtered = tableFilterInput.value.trim() || onlyWarningsCheckbox.checked;
+    emptyEl.textContent = !state.registerPath ? 'Choose a drawing register or the folder containing it.'
+      : filtered && state.rows.length ? 'No drawings match the filter.' : 'No drawings found in this folder yet.';
   }
   updateButtons();
 }
@@ -2892,7 +2945,7 @@ async function stopWatching() {
   state.pollTimer = null;
   for (const id of state.watchers.values()) {
     try {
-      await Neutralino.filesystem.removeWatcher(id);
+      await nfs.removeWatcher(id);
     } catch (e) {
       // watcher already gone
     }
@@ -2912,7 +2965,7 @@ async function syncWatchers() {
   for (const [dir, id] of state.watchers) {
     if (wanted.includes(dir)) continue;
     try {
-      await Neutralino.filesystem.removeWatcher(id);
+      await nfs.removeWatcher(id);
     } catch (e) {
       // watcher already gone
     }
@@ -2921,7 +2974,7 @@ async function syncWatchers() {
   for (const dir of wanted) {
     if (state.watchers.has(dir)) continue;
     try {
-      state.watchers.set(dir, await Neutralino.filesystem.createWatcher(absPath(dir)));
+      state.watchers.set(dir, await nfs.createWatcher(absPath(dir)));
     } catch (err) {
       // Fall back to polling if the native watcher is unavailable
       state.pollTimer = setInterval(refresh, 3000);
@@ -3087,7 +3140,7 @@ async function supersede(file) {
   for (let n = 2; await getStatsOrNull(absPath(relJoin(ssRel, dest))); n++) {
     dest = `${stem} (${n})${ext}`;
   }
-  await Neutralino.filesystem.move(absPath(file.rel), absPath(relJoin(ssRel, dest)));
+  await nfs.move(absPath(file.rel), absPath(relJoin(ssRel, dest)));
   appendLog(`📦 Moved ${displayPath(file.rel)} → ${displayPath(relJoin(ssRel, dest))}`);
 }
 
@@ -3102,7 +3155,7 @@ async function renameSelected() {
     try {
       if (row.folder) await ensureDir(row.folder);
       if (row.status === 'supersede') await supersede(row.occupant);
-      await Neutralino.filesystem.move(absPath(row.rel), absPath(row.targetRel));
+      await nfs.move(absPath(row.rel), absPath(row.targetRel));
       const verb = row.status === 'move' ? '📁 Moved' : '✅ Renamed';
       appendLog(`${verb} ${displayPath(row.rel)} → ${displayPath(row.targetRel)}`);
       renamed++;
@@ -3145,7 +3198,7 @@ async function backupToSS(filePath) {
   const ext = name.slice(dot);
   let dest = stem + ext;
   for (let n = 2; await getStatsOrNull(absPath(relJoin(ssDir(), dest))); n++) dest = `${stem} (${n})${ext}`;
-  await Neutralino.filesystem.copy(filePath, absPath(relJoin(ssDir(), dest)));
+  await nfs.copy(filePath, absPath(relJoin(ssDir(), dest)));
   appendLog(`📦 Backed up ${name} → ${ssDir()}\\${dest}`);
 }
 
@@ -3435,7 +3488,7 @@ async function saveToWord() {
     await backupToSS(docx);
     zip.file('word/document.xml', insert.xml);
     const data = await zip.generateAsync({ type: 'arraybuffer', compression: 'DEFLATE', compressionOptions: { level: 6 } });
-    await Neutralino.filesystem.writeBinaryFile(docx, data);
+    await nfs.writeBinaryFile(docx, data);
 
     const how = options.tracked ? 'as tracked changes' : 'directly';
     for (const [token, { from, to }] of Object.entries(result.applied)) {
@@ -3605,7 +3658,7 @@ async function saveToExcel() {
     if (await isOpenInWord(xlsx)) {
       throw new Error(`${baseName(xlsx)} is open in Excel. Close it there first, then save again.`);
     }
-    const zip = await JSZip.loadAsync(await Neutralino.filesystem.readBinaryFile(xlsx));
+    const zip = await JSZip.loadAsync(await nfs.readBinaryFile(xlsx));
     const parts = await RegisterCore.loadXlsxParts(zip);
     const before = RegisterCore.readXlsxRegister(parts);
     const result = RegisterCore.editXlsxRegister(parts, {
@@ -3652,7 +3705,7 @@ async function saveToExcel() {
     zip.file(result.path, result.xml);
     if (result.styles !== parts.styles) zip.file('xl/styles.xml', result.styles);
     const data = await zip.generateAsync({ type: 'arraybuffer', compression: 'DEFLATE', compressionOptions: { level: 6 } });
-    await Neutralino.filesystem.writeBinaryFile(xlsx, data);
+    await nfs.writeBinaryFile(xlsx, data);
 
     for (const [code, { from, to }] of Object.entries(result.applied.titles)) appendLog(`📝 ${code}: "${from}" → "${to}"`);
     for (const [field, applied] of [['scale', result.applied.scales], ['size', result.applied.sizes]]) {
@@ -3962,6 +4015,195 @@ separatorInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') setSeparator(separatorInput.value);
 });
 separatorInput.addEventListener('change', () => setSeparator(separatorInput.value));
+
+// ---------- warnings ----------
+const WARNING_KINDS = {
+  number: 'Number', title: 'Title', revision: 'Revision', scale: 'Scale', size: 'Size',
+  project: 'Project', client: 'Client', file: 'File'
+};
+const warningKindsShown = new Set(Object.keys(WARNING_KINDS));
+
+// Everything worth checking about a row: its file (conflicts, codes in another order, several
+// files for one drawing, files not in the register) and, once read, what its title block says
+// against the register and file name. [{ kind, text }]
+function rowWarnings(row) {
+  const warnings = [];
+  const add = (kind, text) => warnings.push({ kind, text });
+  if (row.status === 'unmatched') add('file', 'Not in the register');
+  if (row.status === 'conflict') add('file', row.reason || 'A file with the new name already exists');
+  if (row.reordered) add('file', row.reason);
+  if (row.group && row.chosen) {
+    const n = state.rows.filter(r => r.token === row.token && r.rel).length;
+    add('file', `${n} files match this drawing; the one ticked is used`);
+  }
+  // Title blocks of the files not in use aren't checked
+  if (!row.rel || ['skip', 'superseded'].includes(row.status)) return warnings;
+  const entry = state.fileDetails.get(absPath(row.rel));
+  const details = entry && entry.details;
+  if (!details) return warnings;
+  for (const text of fileNumberProblems(row, details.number)) add('number', text);
+  if (row.title && details.title && !sameTitle(details.title, row.title)) add('title', `The title block says "${details.title}"; the register says "${row.title}"`);
+  if (row.token) for (const text of revisionWarnings(row)) add('revision', text);
+  for (const field of ['scale', 'size']) {
+    const value = details[field];
+    const reg = row.token ? registerDetail(row, field) : '';
+    if (row.token && value && detailKey(field, value) !== detailKey(field, reg)) {
+      add(field, `The drawing says ${value}; the register says ${reg || '(blank)'}`);
+    }
+  }
+  for (const field of ['project', 'client']) {
+    const problem = details[field] && projectFieldProblem(field, details[field]);
+    if (problem) add(field, problem);
+  }
+  return warnings;
+}
+
+let warningsTimer = null;
+// As title blocks arrive: the Warnings tab, and the table when it only shows drawings with warnings
+function scheduleWarningsUpdate() {
+  clearTimeout(warningsTimer);
+  warningsTimer = setTimeout(() => {
+    if (onlyWarningsCheckbox.checked) render(new Set());
+    else renderWarnings();
+  }, 300);
+}
+
+function warningsList() {
+  return state.rows.map(row => ({ row, warnings: rowWarnings(row) })).filter(w => w.warnings.length);
+}
+
+// Shows a drawing's row in the table, flashing it; the filter is cleared if it hides it
+function revealRow(row) {
+  const find = () => [...rowsEl.querySelectorAll('tr')].find(tr => tr.dataset.key === row.key);
+  if (!find()) {
+    tableFilterInput.value = '';
+    if (row.status === 'none') hideEmptyCheckbox.checked = false;
+    render(new Set());
+  }
+  const tr = find();
+  if (!tr) return;
+  tr.scrollIntoView({ block: 'center' });
+  tr.classList.remove('flash');
+  void tr.offsetWidth;
+  tr.classList.add('flash');
+}
+
+function renderWarnings() {
+  const all = state.registerPath ? warningsList() : [];
+  const total = all.reduce((n, w) => n + w.warnings.length, 0);
+  const tab = tabButtons.find(b => b.dataset.tab === 'warnings');
+  tab.textContent = total ? `Warnings (${total})` : 'Warnings';
+  if (state.activeTab !== 'warnings') return;
+  if (!state.registerPath) {
+    warningsEl.className = 'muted';
+    warningsEl.textContent = 'No register loaded.';
+    return;
+  }
+  const scrollTop = warningsEl.scrollTop;
+  warningsEl.className = '';
+  warningsEl.textContent = '';
+
+  const pdfs = new Set(state.rows.filter(r => r.rel && /\.pdf$/i.test(r.rel)).map(r => r.rel));
+  const read = [...pdfs].filter(rel => state.fileDetails.has(absPath(rel))).length;
+  const counts = {};
+  for (const w of all) for (const { kind } of w.warnings) counts[kind] = (counts[kind] || 0) + 1;
+
+  const head = el('div', undefined, 'warnings-head');
+  head.appendChild(el('strong', total ? `${total} warning${total === 1 ? '' : 's'} on ${all.length} drawing${all.length === 1 ? '' : 's'}` : 'No warnings'));
+  const kinds = el('span', undefined, 'kinds');
+  for (const [kind, name] of Object.entries(WARNING_KINDS)) {
+    if (!counts[kind]) continue;
+    const label = el('label');
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = warningKindsShown.has(kind);
+    cb.addEventListener('change', () => {
+      if (cb.checked) warningKindsShown.add(kind);
+      else warningKindsShown.delete(kind);
+      renderWarnings();
+    });
+    label.append(cb, `${name} ${counts[kind]}`);
+    kinds.appendChild(label);
+  }
+  head.appendChild(kinds);
+  const missing = state.rows.filter(r => r.status === 'none').length;
+  const notes = [];
+  if (read < pdfs.size) notes.push(`reading title blocks… ${read} of ${pdfs.size}`);
+  if (missing) notes.push(`${missing} register drawing${missing === 1 ? ' has' : 's have'} no file (not counted)`);
+  if (notes.length) head.appendChild(el('span', notes.join(' · '), 'muted'));
+  const exportBtn = el('button', 'Export CSV…', 'export');
+  exportBtn.disabled = !total;
+  exportBtn.title = 'Save the warnings as a spreadsheet file';
+  exportBtn.addEventListener('click', () => exportWarnings(all));
+  head.appendChild(exportBtn);
+  warningsEl.appendChild(head);
+
+  const shown = all.map(w => ({ ...w, warnings: w.warnings.filter(x => warningKindsShown.has(x.kind)) })).filter(w => w.warnings.length);
+  if (!shown.length) {
+    warningsEl.appendChild(el('p', total ? 'No warnings of the kinds ticked.' : read < pdfs.size ? 'None so far.' : 'Everything read matches the register and the file names.', 'muted'));
+  } else {
+    const table = el('table', undefined, 'warnings-list');
+    for (const { row, warnings } of shown) {
+      const tr = el('tr');
+      const who = el('td', undefined, 'drawing');
+      const link = el('button', row.token || 'Not in the register');
+      link.title = 'Show it in the table';
+      link.addEventListener('click', () => revealRow(row));
+      who.appendChild(link);
+      if (row.rel) who.appendChild(el('span', displayPath(row.rel), 'muted'));
+      const what = el('td');
+      const ul = el('ul');
+      for (const w of warnings) {
+        const li = el('li');
+        li.append(el('span', WARNING_KINDS[w.kind], 'kind'), w.text);
+        ul.appendChild(li);
+      }
+      what.appendChild(ul);
+      tr.append(who, what);
+      table.appendChild(tr);
+    }
+    warningsEl.appendChild(table);
+  }
+  warningsEl.scrollTop = scrollTop;
+}
+
+// Saves the warnings as CSV (drawing, file, kind, warning), dated, in the working folder by default
+async function exportWarnings(all) {
+  const quote = v => `"${String(v || '').replace(/"/g, '""')}"`;
+  const lines = [['Drawing', 'File', 'Kind', 'Warning'].map(quote).join(',')];
+  for (const { row, warnings } of all) {
+    for (const w of warnings) lines.push([row.token || '', row.rel ? displayPath(row.rel) : '', WARNING_KINDS[w.kind], w.text].map(quote).join(','));
+  }
+  try {
+    const path = await Neutralino.os.showSaveDialog('Save warnings', {
+      defaultPath: joinPath(state.targetDir, `${datePrefix()} Drawing warnings.csv`),
+      filters: [{ name: 'CSV files', extensions: ['csv'] }]
+    });
+    if (!path) return;
+    const file = /\.csv$/i.test(path) ? path : `${path}.csv`;
+    // With a byte order mark, so Excel reads it as UTF-8
+    await nfs.writeFile(file, '\ufeff' + lines.join('\r\n') + '\r\n');
+    appendLog(`📄 Saved ${lines.length - 1} warning${lines.length === 2 ? '' : 's'} to ${file.replace(/\//g, '\\')}.`);
+  } catch (err) {
+    appendLog(`❌ Could not save the warnings: ${err.message || err}`);
+  }
+}
+
+let filterTimer = null;
+tableFilterInput.addEventListener('input', () => {
+  clearTimeout(filterTimer);
+  filterTimer = setTimeout(() => render(new Set()), 150);
+});
+tableFilterInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && tableFilterInput.value) {
+    tableFilterInput.value = '';
+    render(new Set());
+  }
+});
+onlyWarningsCheckbox.addEventListener('change', () => {
+  render(new Set());
+  if (onlyWarningsCheckbox.checked) loadFileDetails();
+});
 
 // ---------- options ----------
 const optFileDate = document.getElementById('opt-file-date');
@@ -4472,17 +4714,17 @@ async function pruneResetFolders() {
     try {
       const stats = await getStatsOrNull(absPath(folder));
       if (stats && stats.isDirectory) {
-        if (!(await Neutralino.filesystem.readDirectory(absPath(folder))).length) {
+        if (!(await nfs.readDirectory(absPath(folder))).length) {
           const id = state.watchers.get(folder);
           if (id !== undefined) {
             try {
-              await Neutralino.filesystem.removeWatcher(id);
+              await nfs.removeWatcher(id);
             } catch (e) {
               // watcher already gone
             }
             state.watchers.delete(folder);
           }
-          await Neutralino.filesystem.remove(absPath(folder));
+          await nfs.remove(absPath(folder));
           appendLog(`📁 Removed empty folder ${displayPath(folder)}.`);
         } else {
           appendLog(`📁 ${displayPath(folder)} is no longer a drawing folder; it still holds other files (e.g. ${ssDir()}), so it was left on disk.`);

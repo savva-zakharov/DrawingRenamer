@@ -21,6 +21,7 @@
         <button role="tab" data-tab="drawings" aria-selected="true">Drawings</button>
         <button role="tab" data-tab="project" aria-selected="false">Project data</button>
         <button role="tab" data-tab="revisions" aria-selected="false">Revisions</button>
+        <button role="tab" data-tab="warnings" aria-selected="false">Warnings</button>
         <button role="tab" data-tab="options" aria-selected="false">Options</button>
       </nav>
       <div class="tab-panel" data-panel="drawings" role="tabpanel">
@@ -54,6 +55,9 @@
       </div>
       <div class="tab-panel" data-panel="revisions" role="tabpanel" hidden>
         <div id="revision-data" class="muted">No register loaded.</div>
+      </div>
+      <div class="tab-panel" data-panel="warnings" role="tabpanel" hidden>
+        <div id="warnings" class="muted">No register loaded.</div>
       </div>
       <div class="tab-panel" data-panel="options" role="tabpanel" hidden>
         <div id="options" class="options-grid">
@@ -152,6 +156,10 @@
         <label class="inline" title="Read the project from each drawing's title block and compare it with the register's"><input type="checkbox" id="show-file-project" /> Project</label>
         <label class="inline" title="Read the client from each drawing's title block and compare it with the register's"><input type="checkbox" id="show-file-client" /> Client</label>
         <label class="inline" title="Show the register and in-file titles, and the current and new file names, one above the other with their differences marked"><input type="checkbox" id="stack-compare" /> Stack comparisons</label>
+        <span class="table-filter">
+          <label class="inline" title="Show only drawings with a warning (see the Warnings tab)"><input type="checkbox" id="only-warnings" /> Only with warnings</label>
+          <input type="search" id="table-filter" placeholder="Filter by number, title or file…" spellcheck="false" autocomplete="off" />
+        </span>
       </div>
     </header>
 
