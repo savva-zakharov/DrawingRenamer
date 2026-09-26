@@ -3349,6 +3349,7 @@ async function exportRegisterPdf() {
     if (excel) await exportPdfWithExcel(register, state.xlsxSheet, pdf);
     else await exportPdfWithWord(register, pdf);
     appendLog(`✅ Exported ${baseName(pdf)}.`);
+    await openPath(pdf, baseName(pdf));
   } catch (err) {
     appendLog(`❌ Could not export ${baseName(pdf)}: ${err.message || err}`);
   } finally {
