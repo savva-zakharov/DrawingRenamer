@@ -39,6 +39,7 @@ const DEFAULT_SEPARATOR = ' - ';
 // App-wide options (the Options tab), about this computer rather than a project: kept in
 // Neutralino's storage
 const DEFAULT_SETTINGS = {
+  theme: 'system',                  // 'light', 'dark', or 'system' to follow Windows
   apps: { word: '', excel: '', pdf: '', revit: '', autocad: '' } // programs to open files with ('' = the system default)
 };
 let settings = JSON.parse(JSON.stringify(DEFAULT_SETTINGS));
@@ -4008,6 +4009,7 @@ function renderOptions() {
   const parts = todayParts();
   fillSelect(optIssueDate, RegisterCore.DATE_FORMATS.map(f => [f.id, RegisterCore.formatDate(parts, f.id)]), folderOption('issueDateFormat'));
   optHighlight.value = folderOption('highlightColor').toLowerCase();
+  optTheme.value = settings.theme;
   // This folder's options need a folder
   for (const control of [optRecursive, optFileDate, optSsFolder, optIssueNumbering, optIssueDate, optHighlight]) {
     control.disabled = !loaded;
@@ -4026,13 +4028,39 @@ async function loadSettings() {
     const data = JSON.parse(await Neutralino.storage.getData('settings'));
     const apps = data.apps && typeof data.apps === 'object' ? data.apps : {};
     settings = {
+      theme: ['light', 'dark'].includes(data.theme) ? data.theme : 'system',
       apps: Object.fromEntries(Object.keys(DEFAULT_SETTINGS.apps).map(k => [k, typeof apps[k] === 'string' ? apps[k] : '']))
     };
   } catch (e) {
     // nothing saved yet: the defaults
   }
+  applyTheme();
   renderOptions();
 }
+
+// ---------- theme ----------
+const optTheme = document.getElementById('opt-theme');
+const systemDark = window.matchMedia('(prefers-color-scheme: dark)');
+
+// Colours for the chosen theme; the page's head sets them before it's drawn from a copy kept in
+// localStorage, so a chosen theme doesn't flash the other one at startup
+function applyTheme() {
+  const dark = settings.theme === 'dark' || (settings.theme === 'system' && systemDark.matches);
+  document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+  try {
+    localStorage.setItem('theme', settings.theme);
+  } catch (e) {
+    // the head then follows the system until the setting loads
+  }
+}
+
+systemDark.addEventListener('change', () => {
+  if (settings.theme === 'system') applyTheme();
+});
+optTheme.addEventListener('change', async () => {
+  await setOption('theme', optTheme.value, `Theme: ${optTheme.selectedOptions[0].textContent.toLowerCase()}.`);
+  applyTheme();
+});
 
 // Saved with this folder's layout; a default value is left out of the file
 async function setFolderOption(key, value, message) {
