@@ -16,6 +16,7 @@ const fileScaleCheckbox = document.getElementById('show-file-scale');
 // Each shows columns read from the drawings' title blocks (all fields are read in one pass)
 const fileDetailCheckboxes = [[fileTitlesCheckbox, 'hide-file-titles'], [fileRevCheckbox, 'hide-file-rev'], [fileScaleCheckbox, 'hide-file-scale']];
 const tableEl = document.getElementById('drawings');
+const stackCheckbox = document.getElementById('stack-compare');
 const titlesFromFilesBtn = document.getElementById('titles-from-files');
 const titlesFromRegisterBtn = document.getElementById('titles-from-register');
 const detailsFromFilesBtn = document.getElementById('details-from-files');
@@ -838,7 +839,8 @@ function renderSectionHeader(section, visible, inside) {
   }
 
   const td = cell(tr, '');
-  td.colSpan = 9; // includes the in-file detail columns, which may be hidden
+  // Includes the in-file detail columns, which may be hidden; stacked, two fewer columns
+  td.colSpan = stackCheckbox.checked ? 7 : 9;
   const name = document.createElement('span');
   name.className = 'section-name';
   if (section.unmatched) name.textContent = 'Files not in the register';
@@ -1145,8 +1147,11 @@ function renderRow(row, newFiles, alt, depth) {
   if (showDrawing) renderNumber(numberTd, row);
   if (depth) numberTd.style.paddingLeft = `${8 + depth * 22}px`;
   const titleTd = cell(tr, '', 'title');
-  if (showDrawing) renderTitle(titleTd, row);
-  const detailTds = { title: cell(tr, ''), rev: cell(tr, ''), scale: cell(tr, ''), size: cell(tr, '') };
+  // Stacked, the in-file title goes under the register title, in its cell
+  const stacked = stackCheckbox.checked;
+  const titleTop = stacked ? stackPart(titleTd, 'stack-top title') : titleTd;
+  if (showDrawing) renderTitle(titleTop, row);
+  const detailTds = { title: stacked ? stackPart(titleTd, 'stack-bottom') : cell(tr, ''), rev: cell(tr, ''), scale: cell(tr, ''), size: cell(tr, '') };
   renderFileDetails(detailTds, row);
   // The status cell's revision and project warnings are added below; they update with the title block too
   const detailEntry = { tds: detailTds, row, warn: null, projectWarn: null };
@@ -1156,7 +1161,9 @@ function renderRow(row, newFiles, alt, depth) {
   }
 
   const current = row.rel ? displayPath(row.rel) : 'No matching file';
-  const fileTd = cell(tr, row.group ? '' : current, row.rel ? 'file' : 'file missing');
+  const fileTd = cell(tr, '', row.rel ? 'file' : 'file missing');
+  const fileTop = stacked ? stackPart(fileTd, 'stack-top') : fileTd;
+  if (!row.group) fileTop.textContent = current;
   if (row.group) {
     const label = document.createElement('label');
     label.className = 'choice';
@@ -1170,15 +1177,24 @@ function renderRow(row, newFiles, alt, depth) {
       rebuild();
     });
     label.append(radio, document.createTextNode(current));
-    fileTd.appendChild(label);
+    fileTop.appendChild(label);
   }
 
   let target = row.targetRel ? displayPath(row.targetRel) : '';
   if (row.status === 'ok') target = '(already named)';
   else if (row.status === 'superseded') target = displayPath(relJoin(relJoin(row.dir, SUPERSEDED_DIR), supersededName(row.file)));
   else if (row.status === 'skip' || row.status === 'none') target = '';
-  const targetTd = cell(tr, target);
-  if (row.status === 'unmatched' && state.registerKind === 'docx') {
+  // Stacked, the new name goes under the current one, with what changes marked
+  const canAdd = row.status === 'unmatched' && state.registerKind === 'docx';
+  const targetTd = stacked ? stackPart(fileTd, 'stack-bottom') : cell(tr, '');
+  if (!stacked) targetTd.textContent = target;
+  else if (target && row.rel && !row.group && row.status !== 'ok') {
+    const [before, after] = markDifferences(current, target);
+    fileTop.replaceChildren(...before);
+    targetTd.append('→ ', ...after);
+  } else if (target) targetTd.textContent = `→ ${target}`;
+  else if (!canAdd) targetTd.remove();
+  if (canAdd) {
     const add = document.createElement('button');
     add.className = 'link';
     add.textContent = 'Add to register…';
@@ -1220,8 +1236,58 @@ function renderRow(row, newFiles, alt, depth) {
 // --------------------
 // Title editing
 // --------------------
+// A line of a stacked cell
+function stackPart(td, cls) {
+  const div = document.createElement('div');
+  div.className = cls;
+  td.appendChild(div);
+  return div;
+}
+
+// Two versions of a text as nodes, with the words only in the first (before) and only in the
+// second (after) marked; compared ignoring case
+function markDifferences(a, b) {
+  const split = t => t.match(/[A-Za-z0-9]+|[^A-Za-z0-9]+/g) || [];
+  const x = split(a), y = split(b);
+  const same = (i, j) => x[i].toLowerCase() === y[j].toLowerCase();
+  // Longest common subsequence of the words and the separators between them
+  const lcs = Array.from({ length: x.length + 1 }, () => new Uint16Array(y.length + 1));
+  for (let i = x.length - 1; i >= 0; i--) {
+    for (let j = y.length - 1; j >= 0; j--) lcs[i][j] = same(i, j) ? lcs[i + 1][j + 1] + 1 : Math.max(lcs[i + 1][j], lcs[i][j + 1]);
+  }
+  const before = [], after = [];
+  const add = (list, text, changed) => {
+    const last = list[list.length - 1];
+    if (last && last.changed === changed) last.text += text;
+    else list.push({ text, changed });
+  };
+  let i = 0, j = 0;
+  while (i < x.length || j < y.length) {
+    if (i < x.length && j < y.length && same(i, j)) {
+      add(before, x[i++], false);
+      add(after, y[j++], false);
+    } else if (j >= y.length || (i < x.length && lcs[i + 1][j] >= lcs[i][j + 1])) {
+      add(before, x[i++], true);
+    } else {
+      add(after, y[j++], true);
+    }
+  }
+  const nodes = list => list.map(({ text, changed }) => {
+    if (!changed || !text.trim()) return document.createTextNode(text);
+    const mark = document.createElement('mark');
+    mark.className = 'diff';
+    mark.textContent = text;
+    return mark;
+  });
+  return [nodes(before), nodes(after)];
+}
+
 function renderTitle(td, row) {
-  td.textContent = row.title;
+  td.textContent = '';
+  const text = document.createElement('span');
+  text.className = 'title-text';
+  text.textContent = row.title;
+  td.appendChild(text);
   if (row.moved) {
     const badge = document.createElement('button');
     badge.className = 'edit-badge moved';
@@ -1425,10 +1491,13 @@ function fileDetailsShown() {
 
 function renderFileDetails(tds, row) {
   for (const [field, td] of Object.entries(tds)) {
-    td.className = `${DETAIL_COLUMNS[field]} file-detail file-${field}`;
+    td.className = `${DETAIL_COLUMNS[field]} file-detail file-${field}` + (td.tagName === 'DIV' ? ' stack-bottom' : '');
     td.textContent = '';
     td.removeAttribute('title');
   }
+  // Stacked: the register title above, its differences marked once the in-file title is known
+  const titleText = tds.title.tagName === 'DIV' ? tds.title.parentElement.querySelector('.title-text') : null;
+  if (titleText) titleText.textContent = row.title;
   if (!row.rel || !/\.pdf$/i.test(row.rel)) return;
   const entry = state.fileDetails.get(absPath(row.rel));
   if (!entry) {
@@ -1454,6 +1523,11 @@ function renderFileDetails(tds, row) {
   if (row.title && !sameTitle(title, row.title)) {
     tds.title.classList.add('differs');
     tds.title.title = `Differs from the register title: ${row.title}`;
+    if (titleText) {
+      const [before, after] = markDifferences(row.title, title);
+      titleText.replaceChildren(...before);
+      tds.title.replaceChildren(...after);
+    }
   }
 }
 
@@ -3816,6 +3890,14 @@ for (const btn of tabButtons) btn.addEventListener('click', () => switchTab(btn.
 titlesFromFilesBtn.addEventListener('click', () => copyTitles(true));
 titlesFromRegisterBtn.addEventListener('click', () => copyTitles(false));
 detailsFromFilesBtn.addEventListener('click', copyDetails);
+
+// Stacked comparisons: the in-file title's copy button moves into the register title's header
+stackCheckbox.addEventListener('change', () => {
+  const stacked = stackCheckbox.checked;
+  tableEl.classList.toggle('stacked', stacked);
+  document.getElementById(stacked ? 'stacked-file-title-label' : 'file-title-th').prepend(titlesFromFilesBtn);
+  render(new Set());
+});
 
 for (const [cb, hideClass] of fileDetailCheckboxes) {
   cb.addEventListener('change', () => {

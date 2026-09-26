@@ -48,6 +48,8 @@
   --moved-badge-border: #c9b6ef;
   --moved-badge-hover: #e4d8fa;
   --editable-outline: #b9c6d6;
+  --diff-bg: #ffd9d6;
+  --diff-add-bg: #d3f2dc;
   --handle: #a0a0a0;
   --handle-hover: #6b6b6b;
   --section-handle: #8c9bb0;
@@ -102,6 +104,8 @@
     --moved-badge-border: #54447a;
     --moved-badge-hover: #3a2f57;
     --editable-outline: #4a5a70;
+    --diff-bg: #5a2a2a;
+    --diff-add-bg: #1f4a30;
     --handle: #6b7078;
     --handle-hover: #aab0b8;
     --section-handle: #7d8ca0;
@@ -179,6 +183,16 @@ h3{ margin:0; font-size:14px }
 
 .row{ display:flex; align-items:center; gap:8px; flex-wrap:wrap }
 .toolbar{ margin-top:8px }
+.view-options{ margin:8px 0 0; gap:16px }
+.view-options label.inline{ white-space:nowrap }
+
+/* Stack comparisons: each pair of columns shown one above the other in one column */
+table.stacked .unstacked-only, table:not(.stacked) .stacked-only{ display:none }
+th .stack-label{ margin-top:2px; font-weight:normal; color:var(--muted) }
+th .stack-label button.title-copy{ margin:0 6px 0 0 }
+.stack-bottom{ margin-top:2px; color:var(--muted) }
+mark.diff{ background:var(--diff-bg); color:inherit; border-radius:2px; padding:0 1px }
+.stack-bottom mark.diff{ background:var(--diff-add-bg) }
 .toolbar{ flex-wrap:nowrap }
 .toolbar #summary{ flex:1 1 auto; min-width:0 }
 .toolbar label.inline, .toolbar #watching{ flex:none; white-space:nowrap }
@@ -209,9 +223,9 @@ td.number{ font-family:Consolas, monospace; white-space:nowrap }
 /* Details read from each drawing's title block, each set shown by its checkbox */
 table.hide-file-titles .col-file-title, table.hide-file-rev .col-file-rev, table.hide-file-scale .col-file-scale{ display:none }
 th.col-file-rev, th.col-file-scale, td.file-rev, td.file-scale, td.file-size{ white-space:nowrap }
-td.file-title.differs, td.file-scale.differs, td.file-size.differs{ color:var(--warn) }
+.file-title.differs, td.file-scale.differs, td.file-size.differs{ color:var(--warn) }
 .register-value{ color:var(--muted); font-size:11px }
-td.file-detail.pending, td.file-detail.none{ color:var(--muted); font-style:italic }
+.file-detail.pending, .file-detail.none{ color:var(--muted); font-style:italic }
 /* > and < in the headers: copy titles between the register and the files for the selected rows */
 button.title-copy{ margin:0 8px 0 0; padding:0 7px; font-size:12px; font-weight:600; line-height:18px }
 button.title-copy.right{ float:right; margin:0 0 0 8px }
