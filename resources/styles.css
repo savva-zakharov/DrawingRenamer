@@ -1,0 +1,350 @@
+/* Basic styling for the Drawing Renamer UI */
+
+/* Colours: light theme by default, dark when the system is set to dark mode */
+:root{
+  color-scheme: light dark; /* native controls, scrollbars and dialogs follow the theme */
+  --bg: #ffffff;
+  --fg: #222;
+  --muted: #6b6b6b;
+  --border: #dcdcdc;
+  --row-line: #eee;
+  --row-alt: #f7f7f8;
+  --header-bg: #f0f1f3;
+  --named-bg: #f5fbf6;
+  --named-alt: #ebf6ee;
+  --missing-bg: #fdf6f6;
+  --missing-alt: #f9ecec;
+  --missing-fg: #999;
+  --dimmed: #888;
+  --flash: #fff3b0;
+  --code-bg: #0f1113;
+  --code-fg: #eaeaea;
+  --accent: #2b8fff;
+  --accent-soft: #e3f0ff;
+  --primary-fg: #fff;
+  --primary-disabled: #a9cdf5;
+  --secondary: #22b573;
+  --secondary-disabled: #a7dfc3;
+  --ok: #1e8e3e;
+  --ok-soft: #e6f4ea;
+  --warn: #b26a00;
+  --warn-soft: #fff4e0;
+  --bad: #c62828;
+  --bad-soft: #fde7e7;
+  --purple: #6a3fb5;
+  --purple-soft: #efe7fb;
+  --neutral-soft: #f0f0f0;
+  --group-line: #c9d9ee;
+  --section-bg: #e8edf4;
+  --section-line: #cfd8e3;
+  --edit-fg: #7a4b00;
+  --edit-badge-bg: #fff4d6;
+  --edit-badge-border: #f0c36d;
+  --edit-badge-fg: #8a5a00;
+  --edit-badge-hover: #ffe6a6;
+  --new-badge-border: #9bd3a9;
+  --new-badge-hover: #cdebd5;
+  --moved-badge-bg: #f1eafc;
+  --moved-badge-border: #c9b6ef;
+  --moved-badge-hover: #e4d8fa;
+  --editable-outline: #b9c6d6;
+  --handle: #a0a0a0;
+  --handle-hover: #6b6b6b;
+  --section-handle: #8c9bb0;
+  --dialog-shadow: rgba(0,0,0,.2);
+  --backdrop: rgba(0,0,0,.25);
+}
+
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg: #1b1d21;
+    --fg: #e3e5e8;
+    --muted: #9aa0a8;
+    --border: #3a3f46;
+    --row-line: #2c3036;
+    --row-alt: #202328;
+    --header-bg: #25292f;
+    --named-bg: #1a2a1f;
+    --named-alt: #1e3024;
+    --missing-bg: #2a1d1f;
+    --missing-alt: #302124;
+    --missing-fg: #858b93;
+    --dimmed: #7d838b;
+    --flash: #5a4a12;
+    --code-bg: #111316;
+    --code-fg: #d7dade;
+    --accent: #00c9bb;
+    --accent-soft: #1b413e;
+    --primary-fg: #fff;
+    --primary-disabled: #2b4466;
+    --secondary: #22b573;
+    --secondary-disabled: #1d4a35;
+    --ok: #57c27a;
+    --ok-soft: #1c3a26;
+    --warn: #e0a040;
+    --warn-soft: #3a2c12;
+    --bad: #ff6b6b;
+    --bad-soft: #3d1f22;
+    --purple: #b39af0;
+    --purple-soft: #2e2544;
+    --neutral-soft: #2c3036;
+    --group-line: #2f4a6b;
+    --section-bg: #252b33;
+    --section-line: #353c45;
+    --edit-fg: #e6b565;
+    --edit-badge-bg: #3a2e14;
+    --edit-badge-border: #7a5c1f;
+    --edit-badge-fg: #f0c36d;
+    --edit-badge-hover: #4a3a18;
+    --new-badge-border: #2f6b40;
+    --new-badge-hover: #24472e;
+    --moved-badge-bg: #2e2544;
+    --moved-badge-border: #54447a;
+    --moved-badge-hover: #3a2f57;
+    --editable-outline: #4a5a70;
+    --handle: #6b7078;
+    --handle-hover: #aab0b8;
+    --section-handle: #7d8ca0;
+    --dialog-shadow: rgba(0,0,0,.6);
+    --backdrop: rgba(0,0,0,.5);
+  }
+}
+
+*{ box-sizing:border-box }
+
+html,body{
+  height:100%;
+  margin:0;
+  background:var(--bg);
+  color:var(--fg);
+  font-family:Segoe UI, Roboto, Arial, sans-serif;
+  font-size:14px;
+}
+
+/* Header / table / actions / log stacked; only the table scrolls */
+body{ display:flex; flex-direction:column; padding:12px 16px; gap:10px }
+header, footer, .action-bar{ flex:none }
+
+/* Tabs along the top: each shows its own set of controls above the table */
+nav.tabs{ display:flex; gap:2px; border-bottom:1px solid var(--border); margin-bottom:8px }
+nav.tabs button{ padding:6px 14px; border:none; border-bottom:2px solid transparent; margin-bottom:-1px; background:none; color:var(--muted); font-size:13px }
+nav.tabs button[aria-selected="true"]{ border-bottom-color:var(--accent); color:var(--fg); font-weight:600 }
+nav.tabs button:hover{ color:var(--fg) }
+
+/* RENAME and SAVE TO... under the table, left and right */
+.action-bar{ display:flex; align-items:center; gap:8px }
+.action-bar #rename{ margin-left:auto }
+
+/* Project data tab: the register's header fields beside what the drawings say */
+#project-data{ max-height:260px; overflow:auto }
+.project-grid{ display:grid; grid-template-columns:minmax(260px, 1fr) minmax(300px, 1.4fr); gap:8px 32px; color:var(--fg) }
+.project-grid h4{ margin:0 0 6px; font-size:13px }
+.project-grid dl{ display:grid; grid-template-columns:max-content 1fr; gap:3px 12px; margin:0 }
+.project-grid dt{ color:var(--muted) }
+.project-grid dd{ margin:0; display:flex; align-items:center; gap:6px }
+.project-grid dt{ align-self:center }
+input.project-input{ flex:1; min-width:0; max-width:420px; padding:3px 6px; font:inherit }
+input.project-input.edited{ color:var(--edit-fg); border-color:var(--edit-badge-border) }
+.project-values{ margin:0 0 8px; padding:0; list-style:none }
+.project-values li{ margin:2px 0 }
+.project-values .ok{ color:var(--ok) }
+.project-values .warn{ color:var(--warn) }
+@media (max-width:760px){ .project-grid{ grid-template-columns:1fr } }
+
+/* Revisions tab */
+#revision-data{ max-height:300px; overflow:auto }
+.revision-grid{ display:grid; grid-template-columns:minmax(300px, 1fr) minmax(360px, 1.5fr); gap:8px 32px }
+.revision-grid h4{ margin:0 0 6px; font-size:13px }
+.revision-grid p{ margin:0 0 6px }
+.revision-modes{ display:flex; flex-direction:column; gap:3px; margin-bottom:8px }
+.revision-modes label.option{ display:flex; align-items:center; gap:4px }
+.revision-grid dl{ display:grid; grid-template-columns:max-content 1fr; gap:4px 12px; margin:0 0 8px }
+.revision-grid dt{ color:var(--muted); align-self:center }
+.revision-grid dd{ margin:0; display:flex; align-items:center; gap:8px }
+.revision-grid select{ padding:3px 4px; font:inherit }
+.revision-actions{ display:flex; align-items:center; gap:8px; flex-wrap:wrap }
+table.revision-table{ width:100% }
+table.revision-table th{ position:static; text-align:left; font-weight:600; padding:3px 6px; border-bottom:1px solid var(--border); background:none }
+table.revision-table td{ padding:3px 6px; border-bottom:1px solid var(--row-line) }
+table.revision-table td.ok{ color:var(--ok) }
+table.revision-table td.warn{ color:var(--warn) }
+input.mark-input{ width:70px; padding:2px 5px; font:inherit }
+input.highlight-color{ width:34px; height:22px; padding:0 2px; border:1px solid var(--border); background:none; cursor:pointer }
+input.highlight-color:disabled{ opacity:.4; cursor:default }
+@media (max-width:760px){ .revision-grid{ grid-template-columns:1fr } }
+main{ flex:1; min-height:0; overflow:auto; border:1px solid var(--border); border-radius:4px }
+
+h2{ margin:0 0 8px }
+h3{ margin:0; font-size:14px }
+
+.row{ display:flex; align-items:center; gap:8px; flex-wrap:wrap }
+.toolbar{ margin-top:8px }
+.toolbar{ flex-wrap:nowrap }
+.toolbar #summary{ flex:1 1 auto; min-width:0 }
+.toolbar label.inline, .toolbar #watching{ flex:none; white-space:nowrap }
+.toolbar .actions{ flex:none; display:flex; gap:8px; margin-left:8px }
+.toolbar .actions button{ margin:0 }
+#make-folder{ font-weight:600 }
+.muted{ color:var(--muted) }
+label.inline{ display:flex; align-items:center; gap:4px; color:var(--muted) }
+
+input.wide{ flex:1; min-width:240px; padding:6px 8px; font-size:14px }
+button{ padding:6px 10px; font-size:14px; cursor:pointer }
+button:disabled{ cursor:default }
+button.primary{ background:var(--accent); color:var(--primary-fg); border:1px solid var(--accent); border-radius:3px; font-weight:600; padding:6px 18px }
+button.primary:disabled{ background:var(--primary-disabled); border-color:var(--primary-disabled) }
+/* Secondary actions that stage or save register edits */
+button.secondary{ background:var(--secondary); color:var(--primary-fg); border:1px solid var(--secondary); border-radius:3px; font-weight:600; padding:6px 18px }
+button.secondary:disabled{ background:var(--secondary-disabled); border-color:var(--secondary-disabled) }
+
+table{ width:100%; border-collapse:collapse }
+thead th{ position:sticky; top:0; background:var(--header-bg); text-align:left; font-weight:600; padding:6px 8px; border-bottom:1px solid var(--border); z-index:1 }
+tbody td{ padding:5px 8px; border-bottom:1px solid var(--row-line); vertical-align:top; word-break:break-word }
+tbody tr.alt{ background:var(--row-alt) }
+.col-check{ width:32px }
+.col-number{ width:110px; white-space:nowrap }
+.col-status{ width:100px }
+td.number{ font-family:Consolas, monospace; white-space:nowrap }
+
+/* Details read from each drawing's title block, each set shown by its checkbox */
+table.hide-file-titles .col-file-title, table.hide-file-rev .col-file-rev, table.hide-file-scale .col-file-scale{ display:none }
+th.col-file-rev, th.col-file-scale, td.file-rev, td.file-scale, td.file-size{ white-space:nowrap }
+td.file-title.differs, td.file-scale.differs, td.file-size.differs{ color:var(--warn) }
+.register-value{ color:var(--muted); font-size:11px }
+td.file-detail.pending, td.file-detail.none{ color:var(--muted); font-style:italic }
+/* > and < in the headers: copy titles between the register and the files for the selected rows */
+button.title-copy{ margin:0 8px 0 0; padding:0 7px; font-size:12px; font-weight:600; line-height:18px }
+button.title-copy.right{ float:right; margin:0 0 0 8px }
+
+/* Tinted rows keep the same light/dark alternation as the plain rows */
+tbody tr.named{ background:var(--named-bg) }
+tbody tr.named.alt{ background:var(--named-alt) }
+tbody tr.no-file{ background:var(--missing-bg) }
+tbody tr.no-file.alt{ background:var(--missing-alt) }
+tr.no-file td{ color:var(--missing-fg) }
+td.missing{ font-style:italic }
+tr.new td.file{ animation:flash 1.5s ease-out }
+@keyframes flash{ from{ background:var(--flash) } to{ background:transparent } }
+
+.status{ display:inline-block; padding:1px 8px; border-radius:10px; font-size:12px; font-weight:600; white-space:nowrap }
+.status.rename{ background:var(--accent-soft); color:var(--accent) }
+.status.ok{ background:var(--ok-soft); color:var(--ok) }
+.status.none{ background:var(--bad-soft); color:var(--bad) }
+.status.unmatched{ background:var(--warn-soft); color:var(--warn) }
+.status.conflict{ background:var(--bad-soft); color:var(--bad) }
+
+#empty{ padding:24px; text-align:center }
+
+.log-header{ display:flex; align-items:center; justify-content:space-between; margin-bottom:4px }
+.log-header button{ padding:2px 8px; font-size:12px }
+/* The log starts collapsed to its header, which shows the latest line */
+.log-header button.log-toggle{ display:flex; align-items:center; gap:6px; flex:1; min-width:0; padding:2px 4px; border:none; background:none; color:var(--fg); text-align:left }
+.log-toggle h3{ margin:0 }
+.log-toggle .chevron{ display:inline-block; width:10px; color:var(--muted); transition:transform .15s }
+.log-toggle[aria-expanded="true"] .chevron{ transform:rotate(90deg) }
+#log-latest{ flex:1; min-width:0; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; color:var(--muted); font-family:Consolas, monospace; font-weight:normal }
+.log-toggle[aria-expanded="true"] #log-latest{ visibility:hidden }
+.log-header{ gap:8px }
+#log{ white-space:pre-wrap; background:var(--code-bg); color:var(--code-fg); padding:8px; height:140px; overflow:auto; border-radius:4px; border:1px solid var(--border); font-family:Consolas, monospace; font-size:12px }
+
+/* Several files matching one drawing: bracket them and dim the ones not being used */
+tr.group td:first-child{ box-shadow:inset 3px 0 0 var(--accent) }
+tr.group-first td{ border-top:1px solid var(--group-line) }
+tr.group-last td{ border-bottom:1px solid var(--group-line) }
+tr.not-chosen td.file, tr.not-chosen td.file + td{ color:var(--dimmed) }
+label.choice{ display:flex; align-items:flex-start; gap:6px; cursor:pointer; color:inherit; margin:0 }
+label.choice input{ margin-top:3px; flex:none }
+.status.supersede{ background:var(--accent-soft); color:var(--accent) }
+.status.superseded{ background:var(--purple-soft); color:var(--purple) }
+.status.skip{ background:var(--neutral-soft); color:var(--dimmed) }
+
+/* Folder sections */
+tbody tr.section td{ background:var(--section-bg); border-top:1px solid var(--section-line); border-bottom:1px solid var(--section-line); padding:6px 8px }
+.section-name{ font-weight:600 }
+.section-count{ margin-left:10px; font-size:12px }
+button.link{ margin-left:12px; padding:0; border:none; background:none; color:var(--accent); font-size:12px; text-decoration:underline }
+.status.move{ background:var(--accent-soft); color:var(--accent) }
+
+/* Folder name dialog */
+dialog{ background:var(--bg); color:var(--fg); border:1px solid var(--border); border-radius:6px; padding:18px 20px; width:420px; box-shadow:0 8px 30px var(--dialog-shadow) }
+dialog::backdrop{ background:var(--backdrop) }
+dialog h3{ margin:0 0 6px; font-size:16px }
+dialog p{ margin:0 0 12px; font-size:12px }
+dialog input:not([type=checkbox]){ width:100%; padding:6px 8px; font-size:14px }
+#folder-error{ color:var(--bad); font-size:12px; min-height:18px; margin-top:4px }
+.dialog-buttons{ display:flex; flex-direction:row-reverse; gap:8px; margin-top:8px }
+.dialog-buttons button{ margin:0 }
+.dialog-buttons .left{ margin-right:auto }
+
+/* Editable titles (Word register) */
+td.editable{ cursor:text }
+td.editable:hover{ outline:1px dashed var(--editable-outline); outline-offset:-3px }
+td.edited{ color:var(--edit-fg) }
+button.edit-badge{ margin:0 0 0 4px; padding:0 6px; border:1px solid var(--edit-badge-border); border-radius:9px; background:var(--edit-badge-bg); color:var(--edit-badge-fg); font-size:11px; cursor:pointer; white-space:nowrap }
+button.edit-badge:hover{ background:var(--edit-badge-hover) }
+input.title-input{ width:100%; padding:3px 5px; font:inherit }
+#save-word{ font-weight:600 }
+
+/* Save to Word dialog */
+#word-dialog{ width:560px }
+#word-changes{ max-height:220px; overflow:auto; margin:6px 0 10px; padding-left:18px; font-size:13px }
+#word-changes li{ margin-bottom:4px }
+#word-changes del{ color:var(--bad) }
+#word-changes ins{ color:var(--ok); text-decoration:none; font-weight:600 }
+label.option{ display:flex; align-items:center; gap:6px; margin:6px 0 2px; color:var(--fg) }
+p.indent{ margin:0 0 8px 22px }
+
+/* New register entries */
+button.edit-badge.new{ border-color:var(--new-badge-border); background:var(--ok-soft); color:var(--ok) }
+button.edit-badge.new:hover{ background:var(--new-badge-hover) }
+#new-entry{ font-weight:600 }
+#entry-dialog{ width:560px }
+.entry-grid{ display:grid; grid-template-columns:100px 1fr; gap:8px 10px; align-items:center; margin:10px 0 6px }
+.entry-grid > label{ margin:0; color:var(--fg) }
+.entry-row{ display:flex; align-items:center; gap:8px }
+.entry-row input{ flex:1 }
+.entry-row .inline-label{ margin:0; color:var(--fg) }
+#entry-dialog select{ padding:5px 6px; font-size:14px; max-width:100% }
+#entry-after{ width:100% }
+#entry-error{ color:var(--bad); font-size:12px; min-height:18px; margin-top:4px }
+
+/* Renumbered drawings */
+td.number.edited{ color:var(--edit-fg) }
+button.edit-badge.number{ margin:2px 0 0; font-family:Segoe UI, Roboto, Arial, sans-serif }
+input.number-input{ font-family:Consolas, monospace }
+
+/* Reordering the register by dragging rows */
+.col-drag{ width:18px; padding-left:2px !important; padding-right:0 !important }
+td.drag{ padding:5px 0 5px 4px; width:18px }
+.drag-handle{ display:inline-block; cursor:grab; color:var(--handle); font-size:13px; line-height:1; letter-spacing:-1px; user-select:none; padding:2px 2px }
+tr:hover .drag-handle{ color:var(--handle-hover) }
+.drag-handle:active{ cursor:grabbing }
+tr.dragging{ opacity:.45 }
+tr.drop-above td{ box-shadow:inset 0 2px 0 var(--accent) }
+tr.drop-below td{ box-shadow:inset 0 -2px 0 var(--accent) }
+tr.moved .drag-handle{ color:var(--warn) }
+button.edit-badge.moved{ border-color:var(--moved-badge-border); background:var(--moved-badge-bg); color:var(--purple) }
+button.edit-badge.moved:hover{ background:var(--moved-badge-hover) }
+tr.drop-into td{ background:var(--accent-soft) !important; box-shadow:inset 0 0 0 1px var(--accent) }
+tr.section .drag-handle{ color:var(--section-handle) }
+
+/* Files matched by an ISO code with its fields in a different order */
+.reordered{ margin-top:3px; font-size:11px; color:var(--warn); white-space:nowrap; cursor:help }
+/* Beside the status badge: the title block's project or client doesn't match */
+td.status-cell{ white-space:nowrap }
+.status-icon{ margin-left:5px; color:var(--warn); font-size:13px; cursor:help; vertical-align:middle }
+
+/* More-actions menu */
+.menu-wrap{ position:relative; display:inline-flex }
+#menu-btn{ padding:6px 10px; font-size:15px; line-height:1 }
+.menu{ position:absolute; top:calc(100% + 4px); left:0; z-index:20; min-width:270px; padding:4px 0; background:var(--bg); border:1px solid var(--border); border-radius:5px; box-shadow:0 6px 20px var(--dialog-shadow) }
+.menu[hidden]{ display:none }
+.menu button{ display:block; width:100%; margin:0; padding:7px 14px; border:none; background:none; color:var(--fg); text-align:left; font-size:13px; white-space:nowrap }
+.menu button:hover:not(:disabled){ background:var(--accent-soft) }
+.menu button:disabled{ color:var(--muted) }
+.menu .menu-note{ display:block; font-size:11px; color:var(--muted) }
+.menu-sep{ height:1px; margin:4px 0; background:var(--border) }
+.menu-field{ display:flex; align-items:center; justify-content:space-between; gap:10px; padding:7px 14px 2px; margin:0; font-size:13px; color:var(--fg) }
+.menu-field input{ width:64px; padding:3px 6px; font-family:Consolas, monospace; font-size:13px; white-space:pre }
+.menu .menu-note{ padding:2px 14px 7px; white-space:nowrap; font-family:Consolas, monospace }
+.menu .menu-note.error{ color:var(--bad); font-family:inherit }

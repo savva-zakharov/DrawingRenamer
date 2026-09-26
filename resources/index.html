@@ -1,0 +1,165 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Drawing Registrar</title>
+    <link rel="icon" type="image/png" href="icons/appIcon.png" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header>
+      <nav class="tabs" role="tablist">
+        <button role="tab" data-tab="drawings" aria-selected="true">Drawings</button>
+        <button role="tab" data-tab="project" aria-selected="false">Project data</button>
+        <button role="tab" data-tab="revisions" aria-selected="false">Revisions</button>
+      </nav>
+      <div class="tab-panel" data-panel="drawings" role="tabpanel">
+      <div class="row">
+        <input id="register" class="wide" placeholder="Path to the drawing register (.docx or .pdf) or the folder containing it" />
+        <button id="choose">Choose folder...</button>
+        <button id="choose-file">Choose register...</button>
+        <button id="load">Reload</button>
+      </div>
+      <div class="row toolbar">
+        <span class="actions">
+          <button id="new-entry" hidden title="Add a drawing to the Word register">+ NEW ENTRY</button>
+          <button id="make-folder" disabled title="Put the selected drawings in a folder">+ FOLDER</button>
+          <span class="menu-wrap">
+            <button id="menu-btn" title="More actions" aria-haspopup="true" aria-expanded="false">☰</button>
+            <div id="menu" class="menu" role="menu" hidden>
+              <button role="menuitem" data-action="reset-folders">Reset folders</button>
+              <button role="menuitem" data-action="sort">Sort by drawing number</button>
+              <button role="menuitem" data-action="discard">Discard unsaved register changes</button>
+              <div class="menu-sep"></div>
+              <button role="menuitem" data-action="open-folder">Open folder in Explorer</button>
+              <div class="menu-sep"></div>
+              <label class="menu-field" for="separator-input">
+                Number–title separator
+                <input id="separator-input" autocomplete="off" spellcheck="false" />
+              </label>
+              <div id="separator-preview" class="menu-note"></div>
+            </div>
+          </span>
+        </span>
+        <span id="summary" class="muted">No register loaded.</span>
+        <label class="inline"><input type="checkbox" id="hide-empty" /> Hide missing drawings</label>
+        <label class="inline" title="Read the title printed in each drawing's title block"><input type="checkbox" id="show-file-titles" /> Show in-file titles</label>
+        <label class="inline" title="Read the revision from each drawing's title block"><input type="checkbox" id="show-file-rev" /> Revision</label>
+        <label class="inline" title="Read the scale and sheet size from each drawing's title block"><input type="checkbox" id="show-file-scale" /> Scale &amp; size</label>
+        <span id="watching" class="muted"></span>
+      </div>
+      </div>
+      <div class="tab-panel" data-panel="project" role="tabpanel" hidden>
+        <div id="project-data" class="muted">No register loaded.</div>
+      </div>
+      <div class="tab-panel" data-panel="revisions" role="tabpanel" hidden>
+        <div id="revision-data" class="muted">No register loaded.</div>
+      </div>
+    </header>
+
+    <main id="table-wrap">
+      <table id="drawings" class="hide-file-titles hide-file-rev hide-file-scale">
+        <thead>
+          <tr>
+            <th class="col-drag"></th>
+            <th class="col-check"><input type="checkbox" id="check-all" checked title="Select all" /></th>
+            <th class="col-number">Drawing No.</th>
+            <th>Register title<button id="titles-from-register" class="col-file-title title-copy right">&gt;</button></th>
+            <th class="col-file-title"><button id="titles-from-files" class="title-copy">&lt;</button>In-File Title</th>
+            <th class="col-file-rev">Rev</th>
+            <th class="col-file-scale"><button id="details-from-files" class="title-copy">&lt;</button>Scale</th>
+            <th class="col-file-scale">Size</th>
+            <th>Current file</th>
+            <th>New name</th>
+            <th class="col-status">Status</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+      <div id="empty" class="muted">Choose a register PDF or the folder containing it.</div>
+    </main>
+
+    <!-- Always visible under the table -->
+    <div class="action-bar">
+      <button id="save-word" class="secondary" hidden>SAVE TO WORD</button>
+      <button id="rename" class="primary" disabled>RENAME</button>
+    </div>
+
+    <footer>
+      <div class="log-header">
+        <button id="toggle-log" class="log-toggle" aria-expanded="false" aria-controls="log" title="Show the log">
+          <span class="chevron" aria-hidden="true">▸</span><h3>Log</h3><span id="log-latest"></span>
+        </button>
+        <button id="clear-log">Clear</button>
+      </div>
+      <div id="log" hidden></div>
+    </footer>
+
+    <dialog id="folder-dialog">
+      <form>
+        <h3 id="folder-dialog-title">Put drawings in folder</h3>
+        <p class="muted">Folders are created inside the register's folder. Use &gt; or \ for subfolders. Files are moved when you press RENAME.</p>
+        <input id="folder-name" list="folder-list" placeholder="e.g. Plans or Plans > Houses > House 1" autocomplete="off" />
+        <datalist id="folder-list"></datalist>
+        <div id="folder-error"></div>
+        <div class="dialog-buttons">
+          <!-- OK comes first so Enter in the text box means OK; shown right-to-left -->
+          <button type="submit" value="ok" class="primary">OK</button>
+          <button type="submit" value="cancel">Cancel</button>
+          <button type="submit" value="remove" class="left">Remove from folder</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="entry-dialog">
+      <form>
+        <h3 id="entry-dialog-title">New register entry</h3>
+        <p class="muted">Added to the Word register when you press SAVE TO WORD. Until then it's used for matching and renaming.</p>
+        <div class="entry-grid">
+          <label for="entry-number">Drawing No.</label>
+          <input id="entry-number" placeholder="e.g. PA-A-107" autocomplete="off" />
+          <label for="entry-title">Title</label>
+          <input id="entry-title" placeholder="Drawing title" autocomplete="off" />
+          <label for="entry-scale">Scale</label>
+          <div class="entry-row">
+            <input id="entry-scale" placeholder="e.g. 1:100" autocomplete="off" />
+            <label for="entry-size" class="inline-label">Size</label>
+            <select id="entry-size">
+              <option value=""></option>
+              <option>A0</option><option>A1</option><option>A2</option><option>A3</option><option>A4</option>
+            </select>
+          </div>
+          <label for="entry-after">Insert after</label>
+          <select id="entry-after"></select>
+        </div>
+        <label class="option"><input type="checkbox" id="entry-marks" /> <span id="entry-marks-label">Copy the issue marks from the row above</span></label>
+        <div id="entry-error"></div>
+        <div class="dialog-buttons">
+          <button type="submit" value="ok" class="primary">Add</button>
+          <button type="submit" value="cancel">Cancel</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="word-dialog">
+      <form>
+        <h3 id="word-dialog-title">Save title changes to Word</h3>
+        <ul id="word-changes"></ul>
+        <label class="option"><input type="checkbox" id="word-tracked" checked /> Record as tracked changes, so they can be reviewed in Word</label>
+        <label class="option"><input type="checkbox" id="word-export" checked /> <span id="word-export-label">Also update the register PDF using Word</span></label>
+        <p id="word-export-note" class="muted indent"></p>
+        <p id="word-backup-note" class="muted">A dated copy of the Word file is saved in SS first. Close the register in Word before saving.</p>
+        <div class="dialog-buttons">
+          <button type="submit" value="ok" class="primary">Save</button>
+          <button type="submit" value="cancel">Cancel</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script src="js/pdfjs/pdf.js"></script>
+    <script src="js/jszip/jszip.min.js"></script>
+    <script src="register-core.js"></script>
+    <script src="js/neutralino.js"></script>
+    <script src="renderer.js"></script>
+  </body>
+</html>
