@@ -37,7 +37,7 @@
   // --------------------
 
   // Details printed in a drawing's title block, from the text items on its first page:
-  // { title, rev, scale, size, project, client } ('' where not found). Items are { str, x, y, h, rotated } in PDF units
+  // { title, rev, scale, size, project, client, sources } ('' or [] where not found). Items are { str, x, y, h, rotated } in PDF units
   // as the sheet is displayed (rotation applied), y upwards; page is { width, height }. Items may
   // also give their reading direction { dx, dy } (y upwards), so a sheet plotted sideways on the
   // page can be turned to read its title block.
@@ -54,8 +54,34 @@
       client: readLabelled(text, CLIENT_LABEL_RE),
       rev: readRevision(text),
       scale: parsed.scale || scalesOnSheet(items),
-      size: (sizeField.match(SHEET_SIZE_RE) || [])[0] || parsed.size || (page ? sheetSizeOf(page.width, page.height) : '')
+      size: (sizeField.match(SHEET_SIZE_RE) || [])[0] || parsed.size || (page ? sheetSizeOf(page.width, page.height) : ''),
+      sources: sourceFiles(items)
     };
+  }
+
+  // The drawing's source model or CAD file, when the sheet prints its path (Revit and AutoCAD can
+  // add it to the title block): the path as printed, or [] if there isn't one. A path wrapped onto
+  // the next line is joined back with a space, and also without one in case the break was mid-word,
+  // so it gives the ways to try, most likely first.
+  const SOURCE_START_RE = /[A-Za-z]:\\|\\\\[^\\\s]+\\/;
+  const SOURCE_FILE_RE = /(?:[A-Za-z]:\\|\\\\[^\\\s]+\\)[^<>"|?*\r\n]*?\.(?:rvt|rfa|rte|dwg|dxf|dgn|pln|pla|skp|ifc|nwd|nwf|3dm)(?![A-Za-z0-9])/i;
+  function sourceFiles(items) {
+    const strs = items.map(i => i.str).filter(s => s.trim());
+    for (let k = 0; k < strs.length; k++) {
+      if (!SOURCE_START_RE.test(strs[k])) continue;
+      const parts = [strs[k].trim()];
+      for (let n = 1; n <= 3; n++) {
+        const m = SOURCE_FILE_RE.exec(parts.join(' '));
+        if (m) {
+          const spaced = m[0].trim();
+          const joined = SOURCE_FILE_RE.exec(parts.join(''));
+          return parts.length > 1 && joined && joined[0].trim() !== spaced ? [spaced, joined[0].trim()] : [spaced];
+        }
+        if (k + n >= strs.length) break;
+        parts.push(strs[k + n].trim());
+      }
+    }
+    return [];
   }
 
   // A sheet's items and size turned so that its title block reads left to right: the way most of
@@ -1776,6 +1802,7 @@
     DRAWING_NUMBER,
     parsePdfText,
     readTitleBlock,
+    sourceFiles,
     splitScale,
     sheetSizeOf,
     isLooseCode,

@@ -1295,8 +1295,14 @@ function renderRow(row, newFiles, alt, depth) {
     if (!row.chosen) tr.classList.add('not-chosen');
   }
 
-  // Double-clicking the row opens its file, except where double-clicking edits (titles, numbers)
+  // Double-clicking the row opens its file, except where double-clicking edits (titles, numbers);
+  // right-clicking it offers the file, its source model or CAD file, and its folder
   if (row.rel) {
+    tr.addEventListener('contextmenu', (e) => {
+      if (e.target.closest('input')) return;
+      e.preventDefault();
+      openRowMenu(e.clientX, e.clientY, row);
+    });
     tr.addEventListener('dblclick', (e) => {
       if (e.target.closest('input, button, label, select, a, .editable')) return;
       window.getSelection().removeAllRanges();
@@ -4118,6 +4124,93 @@ async function discardRegisterChanges() {
   appendLog(`↩️ Discarded ${pending.summary}.`);
   await saveLayout();
   rebuild();
+}
+
+// ---------- a row's right-click menu ----------
+const rowMenu = document.getElementById('row-menu');
+let rowMenuRow = null;
+
+function rowMenuItem(label, detail, onClick) {
+  const btn = document.createElement('button');
+  btn.setAttribute('role', 'menuitem');
+  btn.append(label);
+  if (detail) btn.appendChild(el('span', detail, 'menu-detail'));
+  if (onClick) btn.addEventListener('click', () => {
+    closeRowMenu();
+    onClick();
+  });
+  else btn.disabled = true;
+  return btn;
+}
+
+// The source file entry: what the drawing's title block says, reading the file first if needed
+function renderRowMenu(row) {
+  const entry = state.fileDetails.get(absPath(row.rel));
+  const sources = entry && entry.details ? entry.details.sources || [] : null;
+  let source;
+  if (!/\.pdf$/i.test(row.rel)) source = rowMenuItem('Open source file', 'Only read from PDF drawings');
+  else if (!sources) source = rowMenuItem('Open source file', 'Reading the drawing…');
+  else if (!sources.length) source = rowMenuItem('Open source file', 'The drawing doesn\'t show its source file');
+  else source = rowMenuItem(`Open source file (${baseName(sources[0].replace(/\\/g, '/'))})`, sources[0], () => openSourceFile(sources));
+  if (sources && sources.length) source.title = sources[0];
+  rowMenu.replaceChildren(
+    rowMenuItem('Open drawing', displayPath(row.rel), () => openFile(row.rel)),
+    source,
+    el('div', undefined, 'menu-sep'),
+    rowMenuItem('Show in Explorer', undefined, () => showInExplorer(absPath(row.rel)))
+  );
+}
+
+async function openRowMenu(x, y, row) {
+  rowMenuRow = row;
+  renderRowMenu(row);
+  rowMenu.hidden = false;
+  // Kept inside the window
+  const { width, height } = rowMenu.getBoundingClientRect();
+  rowMenu.style.left = `${Math.max(4, Math.min(x, window.innerWidth - width - 4))}px`;
+  rowMenu.style.top = `${Math.max(4, Math.min(y, window.innerHeight - height - 4))}px`;
+  const filePath = absPath(row.rel);
+  if (state.fileDetails.has(filePath) || !/\.pdf$/i.test(row.rel)) return;
+  let details = null;
+  try {
+    const stats = await getStatsOrNull(filePath);
+    details = await readFileDetails(filePath);
+    if (stats) state.fileDetails.set(filePath, { stamp: `${stats.size}:${stats.modifiedAt}`, details });
+  } catch (e) {
+    state.fileDetails.set(filePath, { stamp: '', details: { sources: [] } });
+  }
+  if (!rowMenu.hidden && rowMenuRow === row) renderRowMenu(row);
+}
+
+function closeRowMenu() {
+  rowMenu.hidden = true;
+  rowMenuRow = null;
+}
+
+document.addEventListener('mousedown', (e) => {
+  if (!rowMenu.hidden && !rowMenu.contains(e.target)) closeRowMenu();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !rowMenu.hidden) closeRowMenu();
+});
+document.getElementById('table-wrap').addEventListener('scroll', closeRowMenu);
+window.addEventListener('blur', closeRowMenu);
+
+// Opens the first of the drawing's source file paths that exists
+async function openSourceFile(sources) {
+  for (const source of sources) {
+    if (await getStatsOrNull(source)) return openPath(source, baseName(source.replace(/\\/g, '/')));
+  }
+  appendLog(`❌ Couldn't find the source file ${sources[0]} (the path printed on the drawing). It may have moved, or its drive may not be connected.`);
+}
+
+async function showInExplorer(filePath) {
+  try {
+    if (typeof NL_OS !== 'undefined' && NL_OS !== 'Windows') await Neutralino.os.open(dirName(filePath));
+    else await Neutralino.os.execCommand(`explorer.exe /select,"${filePath.replace(/\//g, '\\')}"`, { background: true });
+  } catch (err) {
+    appendLog(`❌ Could not show ${baseName(filePath)} in Explorer: ${err.message || err}`);
+  }
 }
 
 // ---------- open a file in its default app ----------

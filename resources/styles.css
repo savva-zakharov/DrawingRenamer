@@ -363,6 +363,9 @@ td.status-cell{ white-space:nowrap }
 .menu button:hover:not(:disabled){ background:var(--accent-soft) }
 .menu button:disabled{ color:var(--muted) }
 .menu-sep{ height:1px; margin:4px 0; background:var(--border) }
+/* A row's right-click menu, where it was clicked */
+.menu.row-menu{ position:fixed; top:auto; left:auto; min-width:240px; max-width:560px }
+.menu button .menu-detail{ display:block; overflow:hidden; text-overflow:ellipsis; font-size:11px; color:var(--muted) }
 /* Options tab */
 #options{ max-height:300px; overflow:auto }
 .options-grid{ display:grid; grid-template-columns:repeat(auto-fit, minmax(320px, 1fr)); gap:8px 32px; color:var(--fg) }
