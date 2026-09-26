@@ -13,8 +13,9 @@ const checkAllCheckbox = document.getElementById('check-all');
 const fileTitlesCheckbox = document.getElementById('show-file-titles');
 const fileRevCheckbox = document.getElementById('show-file-rev');
 const fileScaleCheckbox = document.getElementById('show-file-scale');
+const fileProjectCheckbox = document.getElementById('show-file-project');
 // Each shows columns read from the drawings' title blocks (all fields are read in one pass)
-const fileDetailCheckboxes = [[fileTitlesCheckbox, 'hide-file-titles'], [fileRevCheckbox, 'hide-file-rev'], [fileScaleCheckbox, 'hide-file-scale']];
+const fileDetailCheckboxes = [[fileTitlesCheckbox, 'hide-file-titles'], [fileRevCheckbox, 'hide-file-rev'], [fileScaleCheckbox, 'hide-file-scale'], [fileProjectCheckbox, 'hide-file-project']];
 const tableEl = document.getElementById('drawings');
 const stackCheckbox = document.getElementById('stack-compare');
 const titlesFromFilesBtn = document.getElementById('titles-from-files');
@@ -839,8 +840,8 @@ function renderSectionHeader(section, visible, inside) {
   }
 
   const td = cell(tr, '');
-  // Includes the in-file detail columns, which may be hidden; stacked, two fewer columns
-  td.colSpan = stackCheckbox.checked ? 7 : 9;
+  // Includes the in-file detail columns, which may be hidden; stacked, three fewer columns
+  td.colSpan = stackCheckbox.checked ? 8 : 11;
   const name = document.createElement('span');
   name.className = 'section-name';
   if (section.unmatched) name.textContent = 'Files not in the register';
@@ -1152,6 +1153,10 @@ function renderRow(row, newFiles, alt, depth) {
   const titleTop = stacked ? stackPart(titleTd, 'stack-top title') : titleTd;
   if (showDrawing) renderTitle(titleTop, row);
   const detailTds = { title: stacked ? stackPart(titleTd, 'stack-bottom') : cell(tr, ''), rev: cell(tr, ''), scale: cell(tr, ''), size: cell(tr, '') };
+  // Stacked, the client goes under the project
+  const projectTd = cell(tr, '', stacked ? 'col-file-project' : '');
+  detailTds.project = stacked ? stackPart(projectTd, 'stack-top') : projectTd;
+  detailTds.client = stacked ? stackPart(projectTd, 'stack-bottom') : cell(tr, '');
   renderFileDetails(detailTds, row);
   // The status cell's revision and project warnings are added below; they update with the title block too
   const detailEntry = { tds: detailTds, row, warn: null, projectWarn: null };
@@ -1482,7 +1487,7 @@ const fileDetailCells = new Map(); // rel => [{ tds: { title, rev, scale, size }
 let fileDetailRun = 0;
 
 const sameTitle = (a, b) => a.replace(/\s+/g, ' ').trim().toLowerCase() === b.replace(/\s+/g, ' ').trim().toLowerCase();
-const DETAIL_COLUMNS = { title: 'col-file-title', rev: 'col-file-rev', scale: 'col-file-scale', size: 'col-file-scale' };
+const DETAIL_COLUMNS = { title: 'col-file-title', rev: 'col-file-rev', scale: 'col-file-scale', size: 'col-file-scale', project: 'col-file-project', client: 'col-file-project' };
 
 // Title blocks are read while any detail column is shown, or the Project data or Revisions tab is open
 function fileDetailsShown() {
@@ -1491,7 +1496,8 @@ function fileDetailsShown() {
 
 function renderFileDetails(tds, row) {
   for (const [field, td] of Object.entries(tds)) {
-    td.className = `${DETAIL_COLUMNS[field]} file-detail file-${field}` + (td.tagName === 'DIV' ? ' stack-bottom' : '');
+    const line = ['stack-top', 'stack-bottom'].find(c => td.classList.contains(c));
+    td.className = `${DETAIL_COLUMNS[field]} file-detail file-${field}` + (line ? ` ${line}` : '');
     td.textContent = '';
     td.removeAttribute('title');
   }
@@ -1502,7 +1508,7 @@ function renderFileDetails(tds, row) {
   const entry = state.fileDetails.get(absPath(row.rel));
   if (!entry) {
     tds.title.textContent = 'Reading…';
-    tds.rev.textContent = tds.scale.textContent = tds.size.textContent = '…';
+    tds.rev.textContent = tds.scale.textContent = tds.size.textContent = tds.project.textContent = tds.client.textContent = '…';
     for (const td of Object.values(tds)) td.classList.add('pending');
     return;
   }
@@ -1513,6 +1519,14 @@ function renderFileDetails(tds, row) {
   }
   const { title, rev, scale, size } = entry.details;
   tds.rev.textContent = rev;
+  for (const field of ['project', 'client']) {
+    const value = entry.details[field] || '';
+    tds[field].textContent = value;
+    const problem = value && projectFieldProblem(field, value);
+    if (problem) tds[field].classList.add('differs');
+    const registerValue = registerProjectValue(field);
+    tds[field].title = problem || (registerValue ? `Matches the register's "${registerValue}"` : '');
+  }
   renderDetailCompare(tds.scale, row, 'scale', scale);
   renderDetailCompare(tds.size, row, 'size', size);
   if (!title) {
@@ -1893,21 +1907,17 @@ function projectWarnings(row) {
   const entry = row.rel && state.fileDetails.get(absPath(row.rel));
   const details = entry && entry.details;
   if (!details) return [];
-  const problems = [];
-  for (const [field, name] of [['project', 'Project'], ['client', 'Client']]) {
-    const value = details[field];
-    if (!value) continue;
-    const registerValue = registerProjectValue(field);
-    if (registerValue) {
-      if (!RegisterCore.namesMatch(registerValue, value)) problems.push(`${name} "${value}" doesn't match the register's "${registerValue}"`);
-      continue;
-    }
-    const values = drawingValues(field);
-    if (values.length > 1 && values[0].value.toUpperCase() !== value.toUpperCase()) {
-      problems.push(`${name} "${value}" differs from most drawings' "${values[0].value}"`);
-    }
-  }
-  return problems;
+  return ['project', 'client'].map(field => details[field] && projectFieldProblem(field, details[field])).filter(Boolean);
+}
+
+// Why a title block's project or client value is flagged, or '' when it isn't
+function projectFieldProblem(field, value) {
+  const name = field === 'project' ? 'Project' : 'Client';
+  const registerValue = registerProjectValue(field);
+  if (registerValue) return RegisterCore.namesMatch(registerValue, value) ? '' : `${name} "${value}" doesn't match the register's "${registerValue}"`;
+  const values = drawingValues(field);
+  return values.length > 1 && values[0].value.toUpperCase() !== value.toUpperCase()
+    ? `${name} "${value}" differs from most drawings' "${values[0].value}"` : '';
 }
 
 function renderProjectWarning(span, row) {
@@ -1917,9 +1927,14 @@ function renderProjectWarning(span, row) {
   span.title = problems.join('\n');
 }
 
+// The status icons, and the project and client cells, which are compared with the register's
+// values or, without them, with the other drawings'
 function renderProjectWarnings() {
   for (const cells of fileDetailCells.values()) {
-    for (const { row, projectWarn } of cells) if (projectWarn) renderProjectWarning(projectWarn, row);
+    for (const { tds, row, projectWarn } of cells) {
+      if (projectWarn) renderProjectWarning(projectWarn, row);
+      if (fileProjectCheckbox.checked) renderFileDetails(tds, row);
+    }
   }
 }
 

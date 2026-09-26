@@ -193,6 +193,8 @@ th .stack-label button.title-copy{ margin:0 6px 0 0 }
 .stack-bottom{ margin-top:2px; color:var(--muted) }
 mark.diff{ background:var(--diff-bg); color:inherit; border-radius:2px; padding:0 1px }
 .stack-bottom mark.diff{ background:var(--diff-add-bg) }
+table.hide-file-titles .title-text mark.diff{ background:none; padding:0 }
+.stack-bottom.file-client:not(.differs):not(.pending){ color:inherit }
 .toolbar{ flex-wrap:nowrap }
 .toolbar #summary{ flex:1 1 auto; min-width:0 }
 .toolbar label.inline, .toolbar #watching{ flex:none; white-space:nowrap }
@@ -221,9 +223,9 @@ tbody tr.alt{ background:var(--row-alt) }
 td.number{ font-family:Consolas, monospace; white-space:nowrap }
 
 /* Details read from each drawing's title block, each set shown by its checkbox */
-table.hide-file-titles .col-file-title, table.hide-file-rev .col-file-rev, table.hide-file-scale .col-file-scale{ display:none }
+table.hide-file-titles .col-file-title, table.hide-file-rev .col-file-rev, table.hide-file-scale .col-file-scale, table.hide-file-project .col-file-project{ display:none }
 th.col-file-rev, th.col-file-scale, td.file-rev, td.file-scale, td.file-size{ white-space:nowrap }
-.file-title.differs, td.file-scale.differs, td.file-size.differs{ color:var(--warn) }
+.file-title.differs, td.file-scale.differs, td.file-size.differs, .file-project.differs, .file-client.differs{ color:var(--warn) }
 .register-value{ color:var(--muted); font-size:11px }
 .file-detail.pending, .file-detail.none{ color:var(--muted); font-style:italic }
 /* > and < in the headers: copy titles between the register and the files for the selected rows */
