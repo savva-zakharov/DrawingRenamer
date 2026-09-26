@@ -194,7 +194,7 @@ th .stack-label button.title-copy{ margin:0 6px 0 0 }
 mark.diff{ background:var(--diff-bg); color:inherit; border-radius:2px; padding:0 1px }
 .stack-bottom mark.diff{ background:var(--diff-add-bg) }
 table.hide-file-titles .title-text mark.diff{ background:none; padding:0 }
-.stack-bottom.file-client:not(.differs):not(.pending){ color:inherit }
+.register-line.none{ color:var(--muted); font-style:italic }
 .toolbar{ flex-wrap:nowrap }
 .toolbar #summary{ flex:1 1 auto; min-width:0 }
 .toolbar label.inline, .toolbar #watching{ flex:none; white-space:nowrap }
