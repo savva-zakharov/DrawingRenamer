@@ -1123,6 +1123,15 @@ function renderRow(row, newFiles, alt, depth) {
     if (!row.chosen) tr.classList.add('not-chosen');
   }
 
+  // Double-clicking the row opens its file, except where double-clicking edits (titles, numbers)
+  if (row.rel) {
+    tr.addEventListener('dblclick', (e) => {
+      if (e.target.closest('input, button, label, select, a, .editable')) return;
+      window.getSelection().removeAllRanges();
+      openFile(row.rel);
+    });
+  }
+
   const dragTd = cell(tr, '', 'drag');
   if (row.token && canDragDrawings()) {
     if (!row.group || row.first) addDragHandle(dragTd, tr, row);
@@ -3747,6 +3756,17 @@ async function discardRegisterChanges() {
   appendLog(`↩️ Discarded ${pending.summary}.`);
   await saveLayout();
   rebuild();
+}
+
+// ---------- open a file in its default app ----------
+async function openFile(rel) {
+  const filePath = absPath(rel);
+  try {
+    if (typeof NL_OS !== 'undefined' && NL_OS !== 'Windows') await Neutralino.os.open(filePath);
+    else await Neutralino.os.execCommand(`explorer.exe "${filePath.replace(/\//g, '\\')}"`, { background: true });
+  } catch (err) {
+    appendLog(`❌ Could not open ${displayPath(rel)}: ${err.message || err}`);
+  }
 }
 
 // ---------- open folder ----------
