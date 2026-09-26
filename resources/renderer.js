@@ -902,6 +902,10 @@ function startFolderRename(nameEl, folder) {
   input.className = 'title-input folder-input';
   input.value = folderLeaf(folder);
   input.spellcheck = false;
+  // As wide as the name (with room to type), growing with it
+  const fit = () => { input.size = Math.max(input.value.length + 2, 12); };
+  fit();
+  input.addEventListener('input', fit);
   nameEl.replaceChildren('📁 ', input);
   input.focus();
   input.select();
