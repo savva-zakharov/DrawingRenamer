@@ -223,8 +223,9 @@ tbody tr.alt{ background:var(--row-alt) }
 td.number{ font-family:Consolas, monospace; white-space:nowrap }
 
 /* Details read from each drawing's title block, each set shown by its checkbox */
-table.hide-file-titles .col-file-title, table.hide-file-rev .col-file-rev, table.hide-file-scale .col-file-scale, table.hide-file-project .col-file-project{ display:none }
-th.col-file-rev, th.col-file-scale, td.file-rev, td.file-scale, td.file-size{ white-space:nowrap }
+table.hide-file-titles .col-file-title, table.hide-file-rev .col-file-rev, table.hide-file-scale .col-file-scale, table.hide-file-size .col-file-size,
+table.hide-file-project .col-file-project, table.hide-file-client .col-file-client{ display:none }
+th.col-file-rev, th.col-file-scale, th.col-file-size, td.file-rev, td.file-scale, td.file-size{ white-space:nowrap }
 .file-title.differs, td.file-scale.differs, td.file-size.differs, .file-project.differs, .file-client.differs{ color:var(--warn) }
 .register-value{ color:var(--muted); font-size:11px }
 .file-detail.pending, .file-detail.none{ color:var(--muted); font-style:italic }

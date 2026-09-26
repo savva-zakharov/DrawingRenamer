@@ -15,14 +15,18 @@ const checkAllCheckbox = document.getElementById('check-all');
 const fileTitlesCheckbox = document.getElementById('show-file-titles');
 const fileRevCheckbox = document.getElementById('show-file-rev');
 const fileScaleCheckbox = document.getElementById('show-file-scale');
+const fileSizeCheckbox = document.getElementById('show-file-size');
 const fileProjectCheckbox = document.getElementById('show-file-project');
+const fileClientCheckbox = document.getElementById('show-file-client');
 // Each shows columns read from the drawings' title blocks (all fields are read in one pass)
-const fileDetailCheckboxes = [[fileTitlesCheckbox, 'hide-file-titles'], [fileRevCheckbox, 'hide-file-rev'], [fileScaleCheckbox, 'hide-file-scale'], [fileProjectCheckbox, 'hide-file-project']];
+const fileDetailCheckboxes = [[fileTitlesCheckbox, 'hide-file-titles'], [fileRevCheckbox, 'hide-file-rev'], [fileScaleCheckbox, 'hide-file-scale'], [fileSizeCheckbox, 'hide-file-size'],
+  [fileProjectCheckbox, 'hide-file-project'], [fileClientCheckbox, 'hide-file-client']];
 const tableEl = document.getElementById('drawings');
 const stackCheckbox = document.getElementById('stack-compare');
 const titlesFromFilesBtn = document.getElementById('titles-from-files');
 const titlesFromRegisterBtn = document.getElementById('titles-from-register');
-const detailsFromFilesBtn = document.getElementById('details-from-files');
+// Copy the in-file scale or size into the register, one button per column
+const detailCopyButtons = { scale: document.getElementById('scales-from-files'), size: document.getElementById('sizes-from-files') };
 const projectDataEl = document.getElementById('project-data');
 const revisionDataEl = document.getElementById('revision-data');
 const tabButtons = [...document.querySelectorAll('nav.tabs [role=tab]')];
@@ -851,10 +855,12 @@ function updateButtons() {
   titlesFromFilesBtn.disabled = titlesFromRegisterBtn.disabled = state.busy || !editable || selected === 0;
   titlesFromFilesBtn.title = `Use the in-file title for ${which}` + copyNote;
   titlesFromRegisterBtn.title = `Put ${which} back to the register title` + copyNote;
-  const detailColumns = state.registerColumns.scale || state.registerColumns.size;
-  detailsFromFilesBtn.disabled = state.busy || !editable || !detailColumns || selected === 0;
-  detailsFromFilesBtn.title = `Use the in-file scale and size for ${which}` +
-    (!editable ? copyNote : !detailColumns ? '\nThe register has no scale or size column' : '');
+  for (const [field, btn] of Object.entries(detailCopyButtons)) {
+    const column = state.registerColumns[field];
+    btn.disabled = state.busy || !editable || !column || selected === 0;
+    btn.title = `Use the in-file ${DETAIL_NAMES[field]} for ${which}` +
+      (!editable ? copyNote : !column ? `\nThe register has no ${DETAIL_NAMES[field]} column` : '');
+  }
 
   const selectable = visibleRows().filter(isSelectable);
   const on = selectable.filter(isSelected).length;
@@ -1334,7 +1340,7 @@ function renderRow(row, newFiles, alt, depth) {
       detailTds[field] = cell(tr, '');
       continue;
     }
-    const td = cell(tr, '', 'col-file-project');
+    const td = cell(tr, '', DETAIL_COLUMNS[field]);
     stackPart(td, 'stack-top register-line');
     detailTds[field] = stackPart(td, 'stack-bottom');
   }
@@ -1668,7 +1674,7 @@ const fileDetailCells = new Map(); // rel => [{ tds: { title, rev, scale, size }
 let fileDetailRun = 0;
 
 const sameTitle = (a, b) => a.replace(/\s+/g, ' ').trim().toLowerCase() === b.replace(/\s+/g, ' ').trim().toLowerCase();
-const DETAIL_COLUMNS = { title: 'col-file-title', rev: 'col-file-rev', scale: 'col-file-scale', size: 'col-file-scale', project: 'col-file-project', client: 'col-file-project' };
+const DETAIL_COLUMNS = { title: 'col-file-title', rev: 'col-file-rev', scale: 'col-file-scale', size: 'col-file-size', project: 'col-file-project', client: 'col-file-client' };
 
 // Title blocks are read while any detail column is shown, or the Project data or Revisions tab is open
 function fileDetailsShown() {
@@ -1823,9 +1829,10 @@ function renderDetailCompare(td, row, field, value) {
 
 // < in the Scale header: the selected drawings' register scale and size become what their files
 // say, as pending register edits
-async function copyDetails() {
-  if (!canEditRegister() || state.editingToken) return;
-  const fields = ['scale', 'size'].filter(f => state.registerColumns[f]);
+// Copies one field (scale or size) from the selected drawings' title blocks into the register
+async function copyDetails(field) {
+  if (!canEditRegister() || state.editingToken || !state.registerColumns[field]) return;
+  const fields = [field];
   const changes = [];
   let unread = 0;
   for (const row of selectedRows().filter(r => r.token)) {
@@ -1846,12 +1853,9 @@ async function copyDetails() {
     await saveLayout();
     appendLog(`✏️ Register ${changes.length === 1 ? 'change' : 'changes'} from the drawings: ${changes.join(', ')} (press ${saveButtonLabel()} to write ${changes.length === 1 ? 'it' : 'them'}).`);
   } else {
-    appendLog('ℹ️ The register already has the scale and size shown in the selected drawings.');
+    appendLog(`ℹ️ The register already has the ${DETAIL_NAMES[field]} shown in the selected drawings.`);
   }
   if (unread) appendLog(`ℹ️ ${plural(unread)} skipped: title block not read${fileDetailsShown() ? ' (yet)' : ''}.`);
-  if (!state.registerColumns.scale || !state.registerColumns.size) {
-    appendLog(`ℹ️ The register has no ${state.registerColumns.scale ? 'size' : 'scale'} column, so only the ${state.registerColumns.scale ? 'scale' : 'size'} can be updated.`);
-  }
   rebuild();
 }
 
@@ -2133,7 +2137,7 @@ function renderProjectWarnings() {
   for (const cells of fileDetailCells.values()) {
     for (const { tds, row, projectWarn } of cells) {
       if (projectWarn) renderProjectWarning(projectWarn, row);
-      if (fileProjectCheckbox.checked) renderFileDetails(tds, row);
+      if (fileProjectCheckbox.checked || fileClientCheckbox.checked) renderFileDetails(tds, row);
     }
   }
 }
@@ -4326,7 +4330,7 @@ for (const btn of tabButtons) btn.addEventListener('click', () => switchTab(btn.
 
 titlesFromFilesBtn.addEventListener('click', () => copyTitles(true));
 titlesFromRegisterBtn.addEventListener('click', () => copyTitles(false));
-detailsFromFilesBtn.addEventListener('click', copyDetails);
+for (const [field, btn] of Object.entries(detailCopyButtons)) btn.addEventListener('click', () => copyDetails(field));
 
 // Stacked comparisons: the in-file title's copy button moves into the register title's header
 stackCheckbox.addEventListener('change', () => {
