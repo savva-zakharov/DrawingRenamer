@@ -840,8 +840,8 @@ function renderSectionHeader(section, visible, inside) {
   }
 
   const td = cell(tr, '');
-  // Includes the in-file detail columns, which may be hidden; stacked, three fewer columns
-  td.colSpan = stackCheckbox.checked ? 8 : 11;
+  // Includes the in-file detail columns, which may be hidden; stacked, two fewer columns
+  td.colSpan = stackCheckbox.checked ? 9 : 11;
   const name = document.createElement('span');
   name.className = 'section-name';
   if (section.unmatched) name.textContent = 'Files not in the register';
@@ -1153,10 +1153,16 @@ function renderRow(row, newFiles, alt, depth) {
   const titleTop = stacked ? stackPart(titleTd, 'stack-top title') : titleTd;
   if (showDrawing) renderTitle(titleTop, row);
   const detailTds = { title: stacked ? stackPart(titleTd, 'stack-bottom') : cell(tr, ''), rev: cell(tr, ''), scale: cell(tr, ''), size: cell(tr, '') };
-  // Stacked, the client goes under the project
-  const projectTd = cell(tr, '', stacked ? 'col-file-project' : '');
-  detailTds.project = stacked ? stackPart(projectTd, 'stack-top') : projectTd;
-  detailTds.client = stacked ? stackPart(projectTd, 'stack-bottom') : cell(tr, '');
+  // Stacked, the drawing's project and client go under the register's
+  for (const field of ['project', 'client']) {
+    if (!stacked) {
+      detailTds[field] = cell(tr, '');
+      continue;
+    }
+    const td = cell(tr, '', 'col-file-project');
+    stackPart(td, 'stack-top register-line');
+    detailTds[field] = stackPart(td, 'stack-bottom');
+  }
   renderFileDetails(detailTds, row);
   // The status cell's revision and project warnings are added below; they update with the title block too
   const detailEntry = { tds: detailTds, row, warn: null, projectWarn: null };
@@ -1504,6 +1510,17 @@ function renderFileDetails(tds, row) {
   // Stacked: the register title above, its differences marked once the in-file title is known
   const titleText = tds.title.tagName === 'DIV' ? tds.title.parentElement.querySelector('.title-text') : null;
   if (titleText) titleText.textContent = row.title;
+  // Stacked: the register's project and client above the drawing's
+  const registerLines = {};
+  for (const field of ['project', 'client']) {
+    const line = tds[field].tagName === 'DIV' ? tds[field].previousElementSibling : null;
+    if (!line) continue;
+    const value = registerProjectValue(field);
+    line.textContent = value || 'Not in the register';
+    line.classList.toggle('none', !value);
+    line.title = value ? `Register: ${value}` : '';
+    registerLines[field] = line;
+  }
   if (!row.rel || !/\.pdf$/i.test(row.rel)) return;
   const entry = state.fileDetails.get(absPath(row.rel));
   if (!entry) {
@@ -1526,6 +1543,11 @@ function renderFileDetails(tds, row) {
     if (problem) tds[field].classList.add('differs');
     const registerValue = registerProjectValue(field);
     tds[field].title = problem || (registerValue ? `Matches the register's "${registerValue}"` : '');
+    if (problem && registerValue && registerLines[field]) {
+      const [before, after] = markDifferences(registerValue, value);
+      registerLines[field].replaceChildren(...before);
+      tds[field].replaceChildren(...after);
+    }
   }
   renderDetailCompare(tds.scale, row, 'scale', scale);
   renderDetailCompare(tds.size, row, 'size', size);
