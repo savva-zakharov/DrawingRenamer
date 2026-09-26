@@ -4337,6 +4337,14 @@ stackCheckbox.addEventListener('change', () => {
   const stacked = stackCheckbox.checked;
   tableEl.classList.toggle('stacked', stacked);
   document.getElementById(stacked ? 'stacked-file-title-label' : 'file-title-th').prepend(titlesFromFilesBtn);
+  // Stacked, the titles are one above the other, so the copy buttons point up and down, on the left
+  // of their lines; side by side they point left and right, the register one on the right
+  const registerTh = titlesFromRegisterBtn.parentElement;
+  if (stacked) registerTh.prepend(titlesFromRegisterBtn);
+  else registerTh.insertBefore(titlesFromRegisterBtn, document.getElementById('stacked-file-title-label'));
+  titlesFromRegisterBtn.classList.toggle('right', !stacked);
+  titlesFromRegisterBtn.textContent = stacked ? '↓' : '>';
+  titlesFromFilesBtn.textContent = stacked ? '↑' : '<';
   render(new Set());
 });
 

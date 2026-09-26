@@ -189,7 +189,6 @@ h3{ margin:0; font-size:14px }
 /* Stack comparisons: each pair of columns shown one above the other in one column */
 table.stacked .unstacked-only, table:not(.stacked) .stacked-only{ display:none }
 th .stack-label{ margin-top:2px; font-weight:normal; color:var(--muted) }
-th .stack-label button.title-copy{ margin:0 6px 0 0 }
 .stack-bottom{ margin-top:2px; color:var(--muted) }
 mark.diff{ background:var(--diff-bg); color:inherit; border-radius:2px; padding:0 1px }
 .stack-bottom mark.diff{ background:var(--diff-add-bg) }
