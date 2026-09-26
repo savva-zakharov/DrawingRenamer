@@ -4225,6 +4225,17 @@ async function setIgnored(row, w, ignore) {
   render(new Set()); // the counts, Status column icons and "Only with warnings"
 }
 
+// Forgets every ignored warning in this folder, including ones for drawings no longer listed
+async function restoreAllIgnored() {
+  const n = state.layout.ignoredWarnings.length;
+  if (!n) return;
+  state.layout.ignoredWarnings = [];
+  showIgnoredWarnings = false;
+  appendLog(`👁 No longer ignoring ${n} warning${n === 1 ? '' : 's'}.`);
+  await saveLayout();
+  render(new Set());
+}
+
 let showIgnoredWarnings = false;
 
 let warningsTimer = null;
@@ -4318,6 +4329,14 @@ function renderWarnings() {
     });
     toggle.append(cb, `Show ${ignoredCount} ignored`);
     head.appendChild(toggle);
+  }
+  // Also when the ignored warnings are all for drawings not showing them now
+  const savedIgnores = state.layout.ignoredWarnings.length;
+  if (savedIgnores) {
+    const reset = el('button', 'Restore all', 'restore-ignored');
+    reset.title = `Count every ignored warning again (${savedIgnores} kept for this folder)`;
+    reset.addEventListener('click', restoreAllIgnored);
+    head.appendChild(reset);
   }
   const exportBtn = el('button', 'Export CSV…', 'export');
   exportBtn.disabled = !total;
