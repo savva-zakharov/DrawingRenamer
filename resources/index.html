@@ -126,6 +126,7 @@
       <!-- What the table shows; under every tab -->
       <div class="row view-options">
         <label class="inline"><input type="checkbox" id="hide-empty" /> Hide missing drawings</label>
+        <label class="inline" title="Read the drawing number from each drawing's title block and compare it with the register and the file name"><input type="checkbox" id="show-file-number" /> Number</label>
         <label class="inline" title="Read the title printed in each drawing's title block"><input type="checkbox" id="show-file-titles" /> Show in-file titles</label>
         <label class="inline" title="Read the revision from each drawing's title block"><input type="checkbox" id="show-file-rev" /> Revision</label>
         <label class="inline" title="Read the scale from each drawing's title block and compare it with the register's"><input type="checkbox" id="show-file-scale" /> Scale</label>
@@ -137,12 +138,13 @@
     </header>
 
     <main id="table-wrap">
-      <table id="drawings" class="hide-file-titles hide-file-rev hide-file-scale hide-file-size hide-file-project hide-file-client">
+      <table id="drawings" class="hide-file-number hide-file-titles hide-file-rev hide-file-scale hide-file-size hide-file-project hide-file-client">
         <thead>
           <tr>
             <th class="col-drag"></th>
             <th class="col-check"><input type="checkbox" id="check-all" checked title="Select all" /></th>
-            <th class="col-number">Drawing No.</th>
+            <th class="col-number">Drawing No.<div class="stacked-only col-file-number stack-label">In-File No.</div></th>
+            <th class="col-file-number unstacked-only">In-File No.</th>
             <th>Register title<button id="titles-from-register" class="col-file-title title-copy right">&gt;</button><div id="stacked-file-title-label" class="stacked-only col-file-title stack-label">In-File Title</div></th>
             <th id="file-title-th" class="col-file-title unstacked-only"><button id="titles-from-files" class="title-copy">&lt;</button>In-File Title</th>
             <th class="col-file-rev">Rev</th>

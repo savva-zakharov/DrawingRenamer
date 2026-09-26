@@ -222,10 +222,10 @@ tbody tr.alt{ background:var(--row-alt) }
 td.number{ font-family:Consolas, monospace; white-space:nowrap }
 
 /* Details read from each drawing's title block, each set shown by its checkbox */
-table.hide-file-titles .col-file-title, table.hide-file-rev .col-file-rev, table.hide-file-scale .col-file-scale, table.hide-file-size .col-file-size,
+table.hide-file-number .col-file-number, table.hide-file-titles .col-file-title, table.hide-file-rev .col-file-rev, table.hide-file-scale .col-file-scale, table.hide-file-size .col-file-size,
 table.hide-file-project .col-file-project, table.hide-file-client .col-file-client{ display:none }
 th.col-file-rev, th.col-file-scale, th.col-file-size, td.file-rev, td.file-scale, td.file-size{ white-space:nowrap }
-.file-title.differs, td.file-scale.differs, td.file-size.differs, .file-project.differs, .file-client.differs{ color:var(--warn) }
+.file-number.differs, .file-title.differs, td.file-scale.differs, td.file-size.differs, .file-project.differs, .file-client.differs{ color:var(--warn) }
 .register-value{ color:var(--muted); font-size:11px }
 .file-detail.pending, .file-detail.none{ color:var(--muted); font-style:italic }
 /* > and < in the headers: copy titles between the register and the files for the selected rows */
@@ -329,7 +329,8 @@ button.edit-badge.new:hover{ background:var(--new-badge-hover) }
 #entry-error{ color:var(--bad); font-size:12px; min-height:18px; margin-top:4px }
 
 /* Renumbered drawings */
-td.number.edited{ color:var(--edit-fg) }
+.number.edited{ color:var(--edit-fg) }
+.file-number{ font-family:Consolas, monospace; white-space:nowrap }
 button.edit-badge.number{ margin:2px 0 0; font-family:Segoe UI, Roboto, Arial, sans-serif }
 input.number-input{ font-family:Consolas, monospace }
 

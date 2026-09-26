@@ -13,13 +13,14 @@ const entryBtn = document.getElementById('new-entry');
 const hideEmptyCheckbox = document.getElementById('hide-empty');
 const checkAllCheckbox = document.getElementById('check-all');
 const fileTitlesCheckbox = document.getElementById('show-file-titles');
+const fileNumberCheckbox = document.getElementById('show-file-number');
 const fileRevCheckbox = document.getElementById('show-file-rev');
 const fileScaleCheckbox = document.getElementById('show-file-scale');
 const fileSizeCheckbox = document.getElementById('show-file-size');
 const fileProjectCheckbox = document.getElementById('show-file-project');
 const fileClientCheckbox = document.getElementById('show-file-client');
 // Each shows columns read from the drawings' title blocks (all fields are read in one pass)
-const fileDetailCheckboxes = [[fileTitlesCheckbox, 'hide-file-titles'], [fileRevCheckbox, 'hide-file-rev'], [fileScaleCheckbox, 'hide-file-scale'], [fileSizeCheckbox, 'hide-file-size'],
+const fileDetailCheckboxes = [[fileNumberCheckbox, 'hide-file-number'], [fileTitlesCheckbox, 'hide-file-titles'], [fileRevCheckbox, 'hide-file-rev'], [fileScaleCheckbox, 'hide-file-scale'], [fileSizeCheckbox, 'hide-file-size'],
   [fileProjectCheckbox, 'hide-file-project'], [fileClientCheckbox, 'hide-file-client']];
 const tableEl = document.getElementById('drawings');
 const stackCheckbox = document.getElementById('stack-compare');
@@ -954,7 +955,7 @@ function renderSectionHeader(section, visible, inside) {
 
   const td = cell(tr, '');
   // Includes the in-file detail columns, which may be hidden; stacked, two fewer columns
-  td.colSpan = stackCheckbox.checked ? 9 : 11;
+  td.colSpan = stackCheckbox.checked ? 9 : 12;
   const name = document.createElement('span');
   name.className = 'section-name';
   if (section.unmatched) name.textContent = 'Files not in the register';
@@ -1335,14 +1336,17 @@ function renderRow(row, newFiles, alt, depth) {
   // Only label the drawing once per group
   const showDrawing = !row.group || row.first;
   const numberTd = cell(tr, '', 'number');
-  if (showDrawing) renderNumber(numberTd, row);
+  // Stacked, the in-file number goes under the register's, in its cell
+  const stacked = stackCheckbox.checked;
+  const numberTop = stacked ? stackPart(numberTd, 'stack-top number') : numberTd;
+  if (showDrawing) renderNumber(numberTop, row);
   if (depth) numberTd.style.paddingLeft = `${8 + depth * 22}px`;
+  const fileNumberCell = stacked ? stackPart(numberTd, 'stack-bottom') : cell(tr, '');
   const titleTd = cell(tr, '', 'title');
   // Stacked, the in-file title goes under the register title, in its cell
-  const stacked = stackCheckbox.checked;
   const titleTop = stacked ? stackPart(titleTd, 'stack-top title') : titleTd;
   if (showDrawing) renderTitle(titleTop, row);
-  const detailTds = { title: stacked ? stackPart(titleTd, 'stack-bottom') : cell(tr, ''), rev: cell(tr, ''), scale: cell(tr, ''), size: cell(tr, '') };
+  const detailTds = { number: fileNumberCell, title: stacked ? stackPart(titleTd, 'stack-bottom') : cell(tr, ''), rev: cell(tr, ''), scale: cell(tr, ''), size: cell(tr, '') };
   // Stacked, the drawing's project and client go under the register's
   for (const field of ['project', 'client']) {
     if (!stacked) {
@@ -1563,7 +1567,11 @@ function startTitleEdit(td, row) {
 // Drawing number editing
 // --------------------
 function renderNumber(td, row) {
-  td.textContent = row.token;
+  td.textContent = '';
+  const text = document.createElement('span');
+  text.className = 'number-text';
+  text.textContent = row.token;
+  td.appendChild(text);
   if (row.renumbered) {
     td.classList.add('edited');
     const badge = document.createElement('button');
@@ -1683,7 +1691,7 @@ const fileDetailCells = new Map(); // rel => [{ tds: { title, rev, scale, size }
 let fileDetailRun = 0;
 
 const sameTitle = (a, b) => a.replace(/\s+/g, ' ').trim().toLowerCase() === b.replace(/\s+/g, ' ').trim().toLowerCase();
-const DETAIL_COLUMNS = { title: 'col-file-title', rev: 'col-file-rev', scale: 'col-file-scale', size: 'col-file-size', project: 'col-file-project', client: 'col-file-client' };
+const DETAIL_COLUMNS = { number: 'col-file-number', title: 'col-file-title', rev: 'col-file-rev', scale: 'col-file-scale', size: 'col-file-size', project: 'col-file-project', client: 'col-file-client' };
 
 // Title blocks are read while any detail column is shown, or the Project data or Revisions tab is open
 function fileDetailsShown() {
@@ -1700,6 +1708,9 @@ function renderFileDetails(tds, row) {
   // Stacked: the register title above, its differences marked once the in-file title is known
   const titleText = tds.title.tagName === 'DIV' ? tds.title.parentElement.querySelector('.title-text') : null;
   if (titleText) titleText.textContent = row.title;
+  // and the same for the drawing number
+  const numberText = tds.number.tagName === 'DIV' ? tds.number.parentElement.querySelector('.number-text') : null;
+  if (numberText) numberText.textContent = row.token;
   // Stacked: the register's project and client above the drawing's
   const registerLines = {};
   for (const field of ['project', 'client']) {
@@ -1715,7 +1726,7 @@ function renderFileDetails(tds, row) {
   const entry = state.fileDetails.get(absPath(row.rel));
   if (!entry) {
     tds.title.textContent = 'Reading…';
-    tds.rev.textContent = tds.scale.textContent = tds.size.textContent = tds.project.textContent = tds.client.textContent = '…';
+    tds.rev.textContent = tds.scale.textContent = tds.size.textContent = tds.project.textContent = tds.client.textContent = tds.number.textContent = '…';
     for (const td of Object.values(tds)) td.classList.add('pending');
     return;
   }
@@ -1726,6 +1737,7 @@ function renderFileDetails(tds, row) {
   }
   const { title, rev, scale, size } = entry.details;
   tds.rev.textContent = rev;
+  renderFileNumber(tds.number, numberText, row, entry.details.number || '');
   for (const field of ['project', 'client']) {
     const value = entry.details[field] || '';
     tds[field].textContent = value;
@@ -1754,6 +1766,37 @@ function renderFileDetails(tds, row) {
       titleText.replaceChildren(...before);
       tds.title.replaceChildren(...after);
     }
+  }
+}
+
+// Drawing numbers compared ignoring case and spaces ("PAWE - DA - ..." prints apart)
+const numberKey = n => (n || '').replace(/\s+/g, '').toUpperCase();
+
+// Why a title block's drawing number is flagged: it isn't the register's number, or the file
+// name doesn't have it; [] when it's fine or not read
+function fileNumberProblems(row, number) {
+  if (!number || !row.rel) return [];
+  const problems = [];
+  if (row.token && numberKey(number) !== numberKey(row.token)) problems.push(`The title block's number ${number} isn't the register's ${row.token}`);
+  if (!numberKey(row.file).includes(numberKey(number))) problems.push(`The file name doesn't have the title block's number ${number}`);
+  return problems;
+}
+
+// The in-file drawing number, marked when it differs; stacked, the differences from the
+// register's number above are marked too
+function renderFileNumber(cell, numberText, row, number) {
+  cell.textContent = number;
+  if (!number) {
+    cell.title = 'No drawing number found in the title block';
+    return;
+  }
+  const problems = fileNumberProblems(row, number);
+  cell.classList.toggle('differs', problems.length > 0);
+  cell.title = problems.join('\n') || (row.token ? 'Matches the register and the file name' : 'Matches the file name');
+  if (numberText && row.token && numberKey(number) !== numberKey(row.token)) {
+    const [before, after] = markDifferences(row.token, number);
+    numberText.replaceChildren(...before);
+    cell.replaceChildren(...after);
   }
 }
 
@@ -2119,7 +2162,10 @@ function projectWarnings(row) {
   const entry = row.rel && state.fileDetails.get(absPath(row.rel));
   const details = entry && entry.details;
   if (!details) return [];
-  return ['project', 'client'].map(field => details[field] && projectFieldProblem(field, details[field])).filter(Boolean);
+  return [
+    ...fileNumberProblems(row, details.number),
+    ...['project', 'client'].map(field => details[field] && projectFieldProblem(field, details[field])).filter(Boolean)
+  ];
 }
 
 // Why a title block's project or client value is flagged, or '' when it isn't
@@ -3712,6 +3758,7 @@ async function fillEntryFromTitleBlock(rel) {
   const filePath = absPath(rel);
   const apply = details => {
     if (!details || !entryDialog.open || entryDialog.dataset.rel !== rel) return;
+    if (!entryFields.token.value.trim() && details.number) entryFields.token.value = details.number;
     if (!entryFields.title.value.trim() && details.title) entryFields.title.value = details.title;
     if (!entryFields.scale.value.trim() && details.scale) entryFields.scale.value = details.scale;
     if (!entryFields.size.value && [...entryFields.size.options].some(o => o.value === details.size)) entryFields.size.value = details.size;

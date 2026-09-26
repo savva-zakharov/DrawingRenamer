@@ -37,7 +37,7 @@
   // --------------------
 
   // Details printed in a drawing's title block, from the text items on its first page:
-  // { title, rev, scale, size, project, client, sources } ('' or [] where not found). Items are { str, x, y, h, rotated } in PDF units
+  // { title, number, rev, scale, size, project, client, sources } ('' or [] where not found). Items are { str, x, y, h, rotated } in PDF units
   // as the sheet is displayed (rotation applied), y upwards; page is { width, height }. Items may
   // also give their reading direction { dx, dy } (y upwards), so a sheet plotted sideways on the
   // page can be turned to read its title block.
@@ -50,6 +50,7 @@
     const parsed = splitScale(scaleField);
     return {
       title: readLabelled(text, TITLE_LABEL_RE),
+      number: readDrawingNumber(text),
       project: readLabelled(text, PROJECT_LABEL_RE),
       client: readLabelled(text, CLIENT_LABEL_RE),
       rev: readRevision(text),
@@ -160,14 +161,20 @@
   // Title strip fields have the label at the top of the cell and the value under it. The value
   // is the first line below the label, from the label's left edge up to the next label along.
   function fieldValue(text, label) {
+    const items = fieldItems(text, label);
+    return items.length ? joinLines(items, ' ') : '';
+  }
+
+  // The items of the first line under a label, in its cell (up to the next label along)
+  function fieldItems(text, label) {
     const h = label.h;
     const labelRow = text.filter(i => i !== label && Math.abs(i.y - label.y) < h * 0.5 && i.x > label.x + 1);
     const right = labelRow.length ? Math.min(...labelRow.map(i => i.x)) - 1 : label.x + h * 20;
     const inCell = text.filter(i => i.y < label.y - h * 0.5 && i.y > label.y - h * 4 &&
       i.x > label.x - h * 1.5 && i.x < right);
-    if (!inCell.length) return '';
+    if (!inCell.length) return [];
     const top = Math.max(...inCell.map(i => i.y));
-    return joinLines(inCell.filter(i => Math.abs(i.y - top) < i.h * 0.4), ' ');
+    return inCell.filter(i => Math.abs(i.y - top) < i.h * 0.4);
   }
 
   // The lowest matching label on the sheet: the title strip is along the bottom, and tables
@@ -195,6 +202,21 @@
     for (const label of labels) {
       const value = fieldValue(text, label);
       if (value && value.length <= 8) return value;
+    }
+    return '';
+  }
+
+  // "Dwg. No.", "Drawing No.", "Drawing Number", "Drawing Codes." ISO 19650 title blocks may print
+  // the code's fields apart ("PAWE -" "DA - SF- 00- DR - A - 1900"), or each in its own box with
+  // the hyphens as a separate line of dashes, when the fields are joined with hyphens
+  const NUMBER_LABEL_RE = /^\s*(?:dwg|drawing)\.?\s*(?:no\.?|number|codes?)\s*[.:]?\s*$/i;
+  function readDrawingNumber(text) {
+    for (const label of lowestLabels(text, NUMBER_LABEL_RE)) {
+      const parts = fieldItems(text, label).filter(i => !/^[\s\-–]*$/.test(i.str)).sort((a, b) => a.x - b.x).map(i => i.str.trim());
+      const boxed = parts.length > 1 && parts.every(p => !/[-_.\s]/.test(p));
+      const value = parts.join(boxed ? '-' : ' ').replace(/\s*([-_.])\s*/g, '$1').replace(/\s+/g, ' ').trim();
+      // A drawing number has a digit and is short; anything else isn't one
+      if (value && /\d/.test(value) && value.length <= 60) return value;
     }
     return '';
   }
