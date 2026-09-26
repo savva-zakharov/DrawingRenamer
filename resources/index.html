@@ -42,10 +42,6 @@
           </span>
         </span>
         <span id="summary" class="muted">No register loaded.</span>
-        <label class="inline"><input type="checkbox" id="hide-empty" /> Hide missing drawings</label>
-        <label class="inline" title="Read the title printed in each drawing's title block"><input type="checkbox" id="show-file-titles" /> Show in-file titles</label>
-        <label class="inline" title="Read the revision from each drawing's title block"><input type="checkbox" id="show-file-rev" /> Revision</label>
-        <label class="inline" title="Read the scale and sheet size from each drawing's title block"><input type="checkbox" id="show-file-scale" /> Scale &amp; size</label>
         <span id="watching" class="muted"></span>
       </div>
       </div>
@@ -54,6 +50,14 @@
       </div>
       <div class="tab-panel" data-panel="revisions" role="tabpanel" hidden>
         <div id="revision-data" class="muted">No register loaded.</div>
+      </div>
+      <!-- What the table shows; under every tab -->
+      <div class="row view-options">
+        <label class="inline"><input type="checkbox" id="hide-empty" /> Hide missing drawings</label>
+        <label class="inline" title="Read the title printed in each drawing's title block"><input type="checkbox" id="show-file-titles" /> Show in-file titles</label>
+        <label class="inline" title="Read the revision from each drawing's title block"><input type="checkbox" id="show-file-rev" /> Revision</label>
+        <label class="inline" title="Read the scale and sheet size from each drawing's title block"><input type="checkbox" id="show-file-scale" /> Scale &amp; size</label>
+        <label class="inline" title="Show the register and in-file titles, and the current and new file names, one above the other with their differences marked"><input type="checkbox" id="stack-compare" /> Stack comparisons</label>
       </div>
     </header>
 
@@ -64,13 +68,13 @@
             <th class="col-drag"></th>
             <th class="col-check"><input type="checkbox" id="check-all" checked title="Select all" /></th>
             <th class="col-number">Drawing No.</th>
-            <th>Register title<button id="titles-from-register" class="col-file-title title-copy right">&gt;</button></th>
-            <th class="col-file-title"><button id="titles-from-files" class="title-copy">&lt;</button>In-File Title</th>
+            <th>Register title<button id="titles-from-register" class="col-file-title title-copy right">&gt;</button><div id="stacked-file-title-label" class="stacked-only col-file-title stack-label">In-File Title</div></th>
+            <th id="file-title-th" class="col-file-title unstacked-only"><button id="titles-from-files" class="title-copy">&lt;</button>In-File Title</th>
             <th class="col-file-rev">Rev</th>
             <th class="col-file-scale"><button id="details-from-files" class="title-copy">&lt;</button>Scale</th>
             <th class="col-file-scale">Size</th>
-            <th>Current file</th>
-            <th>New name</th>
+            <th>Current file<div class="stacked-only stack-label">→ New name</div></th>
+            <th class="unstacked-only">New name</th>
             <th class="col-status">Status</th>
           </tr>
         </thead>
