@@ -1,9 +1,11 @@
+
 const fs = require("fs");
 const path = require("path");
 const pdfParse = require("pdf-parse");
 const JSZip = require("jszip");
 const readline = require("readline");
 const core = require("./resources/register-core");
+
 const dryRun = process.argv.includes('--dry-run') || process.argv.includes('-n');
 // Simple CLI arg helper for --register / -r
 function getArgValue(names) {
