@@ -393,6 +393,18 @@ td.status-cell{ white-space:nowrap }
 /* A row's right-click menu, where it was clicked */
 .menu.row-menu{ position:fixed; top:auto; left:auto; min-width:240px; max-width:560px }
 .menu button .menu-detail{ display:block; overflow:hidden; text-overflow:ellipsis; font-size:11px; color:var(--muted) }
+/* File names tab */
+#names{ max-height:300px; overflow:auto; color:var(--fg) }
+.names-grid{ display:grid; grid-template-columns:minmax(360px, 1fr) minmax(360px, 1.3fr); gap:8px 32px }
+.names-grid h4{ margin:0 0 6px; font-size:13px }
+.template-input{ flex:1; min-width:0; padding:3px 6px; font-family:Consolas, monospace }
+.name-fields button{ padding:2px 8px; font-size:12px }
+.name-fields{ flex-wrap:wrap }
+table.name-preview{ width:100%; border-collapse:collapse; font-size:12px }
+table.name-preview td{ padding:2px 6px; border-top:1px solid var(--row-line); vertical-align:top; word-break:break-all }
+table.name-preview td.arrow{ width:1%; color:var(--muted) }
+table.name-preview .same{ color:var(--muted) }
+
 /* Options tab */
 #options{ max-height:300px; overflow:auto }
 .options-grid{ display:grid; grid-template-columns:repeat(auto-fit, minmax(320px, 1fr)); gap:8px 32px; color:var(--fg) }
