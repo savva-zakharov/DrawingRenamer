@@ -363,6 +363,12 @@ td.status-cell{ white-space:nowrap }
 .menu button:hover:not(:disabled){ background:var(--accent-soft) }
 .menu button:disabled{ color:var(--muted) }
 .menu-sep{ height:1px; margin:4px 0; background:var(--border) }
+/* Copy button at the right end of the table cell under the mouse */
+.hover-copy{ position:fixed; z-index:15; display:flex; align-items:center; margin:0; padding:3px 4px; border:1px solid var(--border); border-radius:4px; background:var(--bg); color:var(--muted); box-shadow:0 1px 3px var(--dialog-shadow); cursor:pointer }
+.hover-copy[hidden]{ display:none }
+.hover-copy:hover{ color:var(--fg); border-color:var(--accent) }
+.hover-copy.done{ color:var(--ok); border-color:var(--ok) }
+
 /* A row's right-click menu, where it was clicked */
 .menu.row-menu{ position:fixed; top:auto; left:auto; min-width:240px; max-width:560px }
 .menu button .menu-detail{ display:block; overflow:hidden; text-overflow:ellipsis; font-size:11px; color:var(--muted) }

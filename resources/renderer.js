@@ -2573,6 +2573,7 @@ function render(newFiles) {
     return;
   }
   rowsEl.textContent = '';
+  hideHoverCopy(); // its cell is gone
   fileDetailCells.clear();
   const showHeaders = drawingFolders().length > 0;
   state.displayKeys = [];
@@ -4179,10 +4180,59 @@ async function copyText(text, label) {
     if (typeof Neutralino !== 'undefined' && Neutralino.clipboard) await Neutralino.clipboard.writeText(text);
     else await navigator.clipboard.writeText(text);
     appendLog(`📋 Copied ${label ? label.toLowerCase() + ' ' : ''}"${text}".`);
+    return true;
   } catch (err) {
     appendLog(`❌ Could not copy: ${err.message || err}`);
+    return false;
   }
 }
+
+// ---------- copy button shown on hover ----------
+// One button, moved to the right end of the cell (or stacked line) under the mouse
+const hoverCopyBtn = document.createElement('button');
+hoverCopyBtn.className = 'hover-copy';
+hoverCopyBtn.hidden = true;
+hoverCopyBtn.innerHTML = '<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><rect x="5" y="5" width="9" height="9" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M11 5V3.5A1.5 1.5 0 0 0 9.5 2h-6A1.5 1.5 0 0 0 2 3.5v6A1.5 1.5 0 0 0 3.5 11H5" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>';
+document.body.appendChild(hoverCopyBtn);
+let hoverCopy = null; // { label, text, el }
+
+function hideHoverCopy() {
+  hoverCopyBtn.hidden = true;
+  hoverCopyBtn.classList.remove('done');
+  hoverCopy = null;
+}
+
+rowsEl.addEventListener('mouseover', (e) => {
+  const target = e.target.closest('.stack-top, .stack-bottom, td');
+  // Between a stacked cell's lines, neither line is offered
+  if (!target || state.editingToken || state.drag || (target.tagName === 'TD' && target.querySelector('.stack-top'))) return hideHoverCopy();
+  if (hoverCopy && hoverCopy.el === target) return;
+  const copy = copyTarget(target);
+  if (!copy) return hideHoverCopy();
+  hoverCopy = { ...copy, el: target };
+  hoverCopyBtn.classList.remove('done');
+  hoverCopyBtn.title = `Copy ${copy.label || 'text'}: ${copy.text}`;
+  hoverCopyBtn.hidden = false;
+  const r = target.getBoundingClientRect();
+  const b = hoverCopyBtn.getBoundingClientRect();
+  hoverCopyBtn.style.left = `${Math.round(r.right - b.width - 3)}px`;
+  hoverCopyBtn.style.top = `${Math.round(target.tagName === 'TD' ? r.top + 5 : r.top + (r.height - b.height) / 2)}px`;
+});
+document.getElementById('table-wrap').addEventListener('mouseleave', (e) => {
+  if (e.relatedTarget !== hoverCopyBtn && !hoverCopyBtn.contains(e.relatedTarget)) hideHoverCopy();
+});
+hoverCopyBtn.addEventListener('mouseleave', (e) => {
+  if (!hoverCopy || !hoverCopy.el.contains(e.relatedTarget)) hideHoverCopy();
+});
+document.getElementById('table-wrap').addEventListener('scroll', hideHoverCopy);
+hoverCopyBtn.addEventListener('click', async () => {
+  if (!hoverCopy) return;
+  const shownFor = hoverCopy.el;
+  if (await copyText(hoverCopy.text, hoverCopy.label) && hoverCopy && hoverCopy.el === shownFor) {
+    hoverCopyBtn.classList.add('done');
+    setTimeout(() => hoverCopyBtn.classList.remove('done'), 1200);
+  }
+});
 
 function renderRowMenu(row, copy) {
   const items = [];
