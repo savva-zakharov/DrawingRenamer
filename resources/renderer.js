@@ -944,6 +944,7 @@ function rowShown() {
 }
 
 function updateButtons() {
+  updateToolbarActions();
   const n = renameRows().length;
   renameBtn.textContent = n ? `RENAME (${n})` : 'RENAME';
   renameBtn.disabled = state.busy || n === 0;
@@ -4018,59 +4019,30 @@ async function removeNewEntry(token) {
 }
 
 // --------------------
-// More-actions menu
+// Toolbar actions beside + FOLDER
 // --------------------
-const menuBtn = document.getElementById('menu-btn');
-const menuEl = document.getElementById('menu');
+const resetFoldersBtn = document.getElementById('reset-folders');
+const sortRegisterBtn = document.getElementById('sort-register');
+const discardChangesBtn = document.getElementById('discard-changes');
+const openFolderBtn = document.getElementById('open-folder');
 
-function menuItem(action) {
-  return menuEl.querySelector(`[data-action="${action}"]`);
-}
-
-function openMenu() {
+function updateToolbarActions() {
   const loaded = !!state.registerPath && !state.busy;
-  const reset = menuItem('reset-folders');
-  reset.disabled = !loaded || !state.layout.folders.length;
-  reset.title = state.layout.folders.length ? 'Take every drawing out of its folder' : 'There are no folders';
-  const sort = menuItem('sort');
-  sort.disabled = !loaded || !canReorder();
-  sort.title = canReorder() ? 'Put the register in drawing number order' : 'Sorting reorders the register, which needs a Word register';
-  const pending = unsavedRegisterChanges();
-  const discard = menuItem('discard');
-  discard.disabled = !loaded || !pending.total;
-  discard.title = pending.total ? `Forget ${pending.summary}` : 'There are no unsaved register changes';
-  const open = menuItem('open-folder');
-  open.disabled = !state.targetDir;
-  open.title = state.targetDir ? displayPath(state.targetDir) : 'Load a register first';
-  menuEl.hidden = false;
-  menuBtn.setAttribute('aria-expanded', 'true');
+  resetFoldersBtn.disabled = !loaded || !state.layout.folders.length;
+  resetFoldersBtn.title = state.layout.folders.length ? 'Take every drawing out of its folder' : 'There are no folders';
+  sortRegisterBtn.disabled = !loaded || !canReorder();
+  sortRegisterBtn.title = canReorder() ? 'Put the register in drawing number order' : 'Sorting reorders the register, which needs a Word register';
+  const pending = state.registerPath ? unsavedRegisterChanges() : { total: 0 };
+  discardChangesBtn.disabled = !loaded || !pending.total;
+  discardChangesBtn.title = pending.total ? `Forget ${pending.summary}` : 'There are no unsaved register changes';
+  openFolderBtn.disabled = !state.targetDir;
+  openFolderBtn.title = state.targetDir ? `Open ${displayPath(state.targetDir)} in Explorer` : 'Load a register first';
 }
 
-function closeMenu() {
-  menuEl.hidden = true;
-  menuBtn.setAttribute('aria-expanded', 'false');
-}
-
-menuBtn.addEventListener('click', (e) => {
-  e.stopPropagation();
-  if (menuEl.hidden) openMenu();
-  else closeMenu();
-});
-document.addEventListener('click', (e) => {
-  if (!menuEl.hidden && !menuEl.contains(e.target)) closeMenu();
-});
-document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && !menuEl.hidden) closeMenu();
-});
-menuEl.addEventListener('click', (e) => {
-  const item = e.target.closest('button[data-action]');
-  if (!item || item.disabled) return;
-  closeMenu();
-  if (item.dataset.action === 'reset-folders') resetFolders();
-  if (item.dataset.action === 'sort') sortByNumber();
-  if (item.dataset.action === 'discard') discardRegisterChanges();
-  if (item.dataset.action === 'open-folder') openFolderInExplorer();
-});
+resetFoldersBtn.addEventListener('click', resetFolders);
+sortRegisterBtn.addEventListener('click', sortByNumber);
+discardChangesBtn.addEventListener('click', discardRegisterChanges);
+openFolderBtn.addEventListener('click', openFolderInExplorer);
 
 // ---------- file name pattern (File names tab) ----------
 const templateInput = document.getElementById('name-template');

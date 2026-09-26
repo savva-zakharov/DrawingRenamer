@@ -35,17 +35,11 @@
       <div class="row toolbar">
         <span class="actions">
           <button id="new-entry" hidden title="Add a drawing to the Word register">+ NEW ENTRY</button>
-          <button id="make-folder" disabled title="Put the selected drawings in a folder">+ FOLDER</button>
-          <span class="menu-wrap">
-            <button id="menu-btn" title="More actions" aria-haspopup="true" aria-expanded="false">☰</button>
-            <div id="menu" class="menu" role="menu" hidden>
-              <button role="menuitem" data-action="reset-folders">Reset folders</button>
-              <button role="menuitem" data-action="sort">Sort by drawing number</button>
-              <button role="menuitem" data-action="discard">Discard unsaved register changes</button>
-              <div class="menu-sep"></div>
-              <button role="menuitem" data-action="open-folder">Open folder in Explorer</button>
-            </div>
-          </span>
+          <button id="make-folder" class="secondary" disabled title="Put the selected drawings in a folder">+ FOLDER</button>
+          <button id="reset-folders" disabled>RESET FOLDERS</button>
+          <button id="sort-register" disabled>SORT BY NUMBER</button>
+          <button id="discard-changes" disabled>DISCARD CHANGES</button>
+          <button id="open-folder" disabled>OPEN IN EXPLORER</button>
         </span>
         <span id="summary" class="muted">No register loaded.</span>
         <span id="watching" class="muted"></span>
