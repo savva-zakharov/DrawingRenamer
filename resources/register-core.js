@@ -38,8 +38,11 @@
 
   // Details printed in a drawing's title block, from the text items on its first page:
   // { title, rev, scale, size, project, client } ('' where not found). Items are { str, x, y, h, rotated } in PDF units
-  // as the sheet is displayed (rotation applied), y upwards; page is { width, height }.
+  // as the sheet is displayed (rotation applied), y upwards; page is { width, height }. Items may
+  // also give their reading direction { dx, dy } (y upwards), so a sheet plotted sideways on the
+  // page can be turned to read its title block.
   function readTitleBlock(items, page) {
+    ({ items, page } = uprightSheet(items, page));
     // Only horizontal text; rotated notes and dimensions aren't title block fields
     const text = items.filter(i => i.str.trim() && !i.rotated);
     const scaleField = readField(text, SCALE_LABEL_RE);
@@ -53,6 +56,41 @@
       scale: parsed.scale || scalesOnSheet(items),
       size: (sizeField.match(SHEET_SIZE_RE) || [])[0] || parsed.size || (page ? sheetSizeOf(page.width, page.height) : '')
     };
+  }
+
+  // A sheet's items and size turned so that its title block reads left to right: the way most of
+  // the title block labels read (or, without any, most of the text), in quarter turns. Unchanged
+  // when that's already upright or the items don't give their direction.
+  const LABEL_RES = () => [TITLE_LABEL_RE, PROJECT_LABEL_RE, CLIENT_LABEL_RE, REV_LABEL_RE, SCALE_LABEL_RE, SIZE_LABEL_RE];
+  function uprightSheet(items, page) {
+    const quarter = i => (Math.round(Math.atan2(i.dy, i.dx) / (Math.PI / 2)) + 4) % 4;
+    const withDir = items.filter(i => i.str.trim() && Number.isFinite(i.dx) && Number.isFinite(i.dy) && (i.dx || i.dy));
+    if (!withDir.length) return { items, page };
+    const tally = (list, weight) => {
+      const counts = [0, 0, 0, 0];
+      for (const i of list) counts[quarter(i)] += weight(i);
+      return counts.indexOf(Math.max(...counts));
+    };
+    const labels = withDir.filter(i => LABEL_RES().some(re => re.test(i.str)));
+    const turn = labels.length ? tally(labels, () => 1) : tally(withDir, i => i.str.trim().length);
+    if (!turn) return { items, page };
+    // Turn the sheet back by `turn` quarter turns (clockwise), keeping coordinates positive
+    const rotate = (x, y) => {
+      for (let k = 0; k < turn; k++) [x, y] = [y, -x];
+      return [x, y];
+    };
+    const corners = [[0, 0], [page.width, 0], [0, page.height], [page.width, page.height]].map(([x, y]) => rotate(x, y));
+    const minX = Math.min(...corners.map(c => c[0])), minY = Math.min(...corners.map(c => c[1]));
+    const turned = items.map(i => {
+      const [x, y] = rotate(i.x, i.y);
+      const out = { ...i, x: x - minX, y: y - minY };
+      if (Number.isFinite(i.dx) && Number.isFinite(i.dy)) {
+        [out.dx, out.dy] = rotate(i.dx, i.dy);
+        out.rotated = Math.abs(out.dy) > Math.abs(out.dx) * 0.05;
+      }
+      return out;
+    });
+    return { items: turned, page: turn % 2 ? { width: page.height, height: page.width } : page };
   }
 
   // The title sits to the right of a "Title." label, from the label's top down to the next label
