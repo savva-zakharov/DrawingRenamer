@@ -126,6 +126,7 @@ const state = {
   displayKeys: [],       // keys of the selectable rows in the order shown
   knownFiles: null,      // rels seen on the previous refresh, to highlight new arrivals
   watchers: new Map(),   // rel dir => watcher id
+  titleBlockTokens: new Map(), // no-register mode: file rel => drawing number read from its title block
   fileDetails: new Map(), // full path => { stamp, details } read from a drawing's title block:
                           // details { title, rev, scale, size }, or null if the file couldn't be read
   pollTimer: null,
@@ -208,7 +209,12 @@ function registerKindOf(name) {
   return null;
 }
 
-const REGISTER_KIND_NAMES = { docx: 'Word', xlsx: 'Excel', pdf: 'PDF' };
+// 'titleblock': no register in the folder, so drawings are read from their own title blocks
+const REGISTER_KIND_NAMES = { docx: 'Word', xlsx: 'Excel', pdf: 'PDF', titleblock: 'title block' };
+
+function isTitleBlockMode() {
+  return state.registerKind === 'titleblock';
+}
 
 // Files named "...register..." in dir; Word beats Excel beats PDF (the PDF is usually exported
 // from one of the others), and the last by name (registers are usually date-prefixed, so that's
@@ -230,9 +236,8 @@ async function resolveRegisterPath(input) {
     return input;
   }
   if (stats.isDirectory) {
-    const found = await findRegister(input);
-    if (!found) throw new Error('No register (.docx, .xlsx, .xlsm or .pdf with "register" in its name) found in that directory.');
-    return found;
+    // Without a register, the folder itself: its drawings are read from their title blocks
+    return (await findRegister(input)) || input.replace(/[\\/]+$/, '');
   }
   throw new Error('Unsupported path type.');
 }
@@ -782,8 +787,17 @@ function matchFiles(tokenMap, files, registerRels) {
   const byToken = {};
   const unmatched = [];
   const reordered = new Set(); // files whose code has the right fields in a different order
+  const mismatched = new Map(); // no register: file rel => the other number its name starts with
   for (const file of pdfs) {
-    let token = matchToken(file.name);
+    // Without a register, a file is the drawing its title block says it is (its name is only a
+    // fallback, for a title block without a readable number)
+    let token = isTitleBlockMode() ? state.titleBlockTokens.get(file.rel) || null : null;
+    if (token && !(token in tokenMap)) token = null;
+    if (token) {
+      const named = nameNumberConflict(file.name, token);
+      if (named) mismatched.set(file.rel, named);
+    }
+    if (!token) token = matchToken(file.name);
     if (!token) {
       token = matchReordered(file.name);
       if (token) reordered.add(file.rel);
@@ -792,7 +806,7 @@ function matchFiles(tokenMap, files, registerRels) {
     // A register's own PDF (e.g. exported from the Excel register) isn't a drawing
     else if (!/register/i.test(file.name)) unmatched.push(file);
   }
-  return { byToken, unmatched, reordered };
+  return { byToken, unmatched, reordered, mismatched };
 }
 
 // When several files match one drawing, the user picks which to use.
@@ -855,6 +869,13 @@ function computeRows(tokenMap, match, files, addedTimes, choices) {
       if (match.reordered && match.reordered.has(f.rel)) {
         row.reordered = true;
         row.reason = `The code in this file name has the same parts as ${token} in a different order`;
+      }
+      if (match.mismatched && match.mismatched.has(f.rel)) {
+        // Not ticked until the user decides which number is right
+        row.reordered = true;
+        row.flagLabel = '⚠ number differs';
+        row.reason = `The file name has ${match.mismatched.get(f.rel)}, but its title block says ${token}`;
+        row.flagHint = "; tick it to rename the file with the title block's number";
       }
       if (f === chosen) {
         if (f.rel === targetRel) {
@@ -1368,6 +1389,7 @@ async function relocateFolder(folder, dest, verb) {
       }
       if (parentFolder(dest)) await ensureDir(parentFolder(dest));
       await nfs.move(absPath(folder), absPath(dest));
+      await moveCachedDetails(folder, dest);
     }
     const remap = f => (f && isInside(f, folder) ? dest + f.slice(folder.length) : f);
     const remapRel = rel => (rel.startsWith(folder + '/') ? dest + rel.slice(folder.length) : rel);
@@ -1547,8 +1569,8 @@ function renderRow(row, newFiles, alt, depth) {
   if (row.reordered) {
     const warn = document.createElement('div');
     warn.className = 'reordered';
-    warn.textContent = '⚠ code reordered';
-    warn.title = `${row.reason}; tick it to rename the file with the register's code`;
+    warn.textContent = row.flagLabel || '⚠ code reordered';
+    warn.title = row.reason + (row.flagHint || "; tick it to rename the file with the register's code");
     statusTd.appendChild(warn);
   }
   if (row.token && row.rel) {
@@ -2035,6 +2057,30 @@ async function copyDetails(field) {
   rebuild();
 }
 
+// A file (or a folder of files) the app has just moved keeps its read title block under its new
+// path, so it isn't read again. The app moved it itself, so its contents are unchanged; but a
+// rename updates the timestamp the stamp is made from, so the stamp is taken again from the moved
+// file (as long as its size is the same, which it always is for a move).
+async function moveCachedDetails(fromRel, toRel) {
+  const from = absPath(fromRel);
+  const to = absPath(toRel);
+  const moved = [];
+  for (const [key, entry] of [...state.fileDetails]) {
+    let newKey = null;
+    if (key === from) newKey = to;
+    else if (key.startsWith(from + '/')) newKey = to + key.slice(from.length);
+    if (newKey === null) continue;
+    state.fileDetails.delete(key);
+    state.fileDetails.set(newKey, entry);
+    moved.push([newKey, entry]);
+  }
+  for (const [key, entry] of moved) {
+    const stats = await getStatsOrNull(key);
+    const size = entry.stamp && entry.stamp.split(':')[0];
+    if (stats && String(stats.size) === size) entry.stamp = `${stats.size}:${stats.modifiedAt}`;
+  }
+}
+
 // Reads the details of files not read yet or changed since; the table updates as each one arrives.
 // Several files are read at once, each lane with its own pdf.js worker.
 const FILE_DETAIL_LANES = Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 4) - 1)); // more lanes gained nothing in testing
@@ -2235,9 +2281,13 @@ async function setProjectEdit(field, value) {
 // The register's header fields, each an input when the register can be written to
 function renderProjectFields(section) {
   const project = state.registerProject;
-  section.appendChild(el('h4', `Register: ${baseName(state.registerPath)}${state.registerInfo ? ` (${state.registerInfo})` : ''}`));
+  section.appendChild(el('h4', isTitleBlockMode()
+    ? 'No register: drawings read from their title blocks'
+    : `Register: ${baseName(state.registerPath)}${state.registerInfo ? ` (${state.registerInfo})` : ''}`));
   if (!project || !project.fields.length) {
-    section.appendChild(el('p', state.registerKind === 'pdf'
+    section.appendChild(el('p', isTitleBlockMode()
+      ? 'There is no register in this folder, so there are no register project details.'
+      : state.registerKind === 'pdf'
       ? 'Project details are only read from Word and Excel registers.'
       : 'No project details found at the top of the register.', 'muted'));
     return;
@@ -2785,7 +2835,7 @@ function render(newFiles) {
   const entries = Object.keys(state.tokenMap).length;
   const added = pendingNewEntries().length;
   const parts = [
-    `${entries} register entries` + (added ? ` + ${added} new` : ''),
+    (isTitleBlockMode() ? `${entries} drawing${entries === 1 ? '' : 's'} read from title blocks` : `${entries} register entries`) + (added ? ` + ${added} new` : ''),
     `${count('rename') + count('supersede')} to rename`,
     `${count('ok')} already named`,
     `${count('unmatched')} unmatched`
@@ -2795,6 +2845,7 @@ function render(newFiles) {
   if (count('supersede')) parts.push(`${count('supersede')} replacing older files`);
   if (count('conflict')) parts.push(`${count('conflict')} conflicts`);
   summaryEl.textContent = parts.join(' · ');
+  document.getElementById('title-header').textContent = isTitleBlockMode() ? 'Title (from title block)' : 'Register title';
 
   renderProjectData();
   renderRevisionData();
@@ -2803,7 +2854,9 @@ function render(newFiles) {
   if (!dataRows) {
     const filtered = tableFilterInput.value.trim() || onlyWarningsCheckbox.checked;
     emptyEl.textContent = !state.registerPath ? 'Choose a drawing register or the folder containing it.'
-      : filtered && state.rows.length ? 'No drawings match the filter.' : 'No drawings found in this folder yet.';
+      : filtered && state.rows.length ? 'No drawings match the filter.'
+      : isTitleBlockMode() ? 'No drawing PDFs with a readable drawing number and title in this folder yet.'
+      : 'No drawings found in this folder yet.';
   }
   updateButtons();
 }
@@ -2904,6 +2957,7 @@ function pendingNewEntries() {
 
 // The register and its PDF, which aren't drawings
 function registerRels() {
+  if (isTitleBlockMode()) return [];
   return [baseName(state.registerPath), baseName(registerPdfPath())];
 }
 
@@ -2930,6 +2984,89 @@ function rebuild(newFiles = new Set()) {
   render(newFiles);
 }
 
+// --------------------
+// No register: drawings read from their own title blocks
+// --------------------
+
+// A drawing number as printed, tidied the way numbers are written in file names
+function tidyNumber(number) {
+  return String(number || '').toUpperCase().replace(/\s*-\s*/g, '-').replace(/\s+/g, '');
+}
+
+// A file name that starts with a drawing number other than `token` (and doesn't have `token` in it
+// anywhere): that number, else null. A leading date ("26-09-15 ") is skipped.
+function nameNumberConflict(fileName, token) {
+  if (RegisterCore.makeMatcher([token])(fileName)) return null;
+  const stem = fileName.replace(/\.[^.]+$/, '').toUpperCase().replace(/^\d{2}[-.]\d{2}[-.]\d{2}\s+/, '');
+  const lead = (/^[A-Z0-9]+(?:-[A-Z0-9]+)+/.exec(stem) || [])[0];
+  return lead && lead !== token && isValidNumber(lead) ? lead : null;
+}
+
+// Reads (or takes from the cache) the title block of every PDF in the drawing folders, then builds
+// the drawing list from them: { number: title }, in number order. When several files carry the same
+// number, the title comes from the one added most recently. Files whose title block has no
+// readable drawing number or title stay unmatched (unless their name gives a number).
+async function readTitleBlockRegister(files) {
+  const pdfs = files.filter(f => /\.pdf$/i.test(f.name));
+  const queue = pdfs.slice();
+  let done = 0;
+  let read = 0;
+  const started = Date.now();
+  const lane = async () => {
+    let worker = null;
+    try {
+      while (queue.length) {
+        const f = queue.shift();
+        const filePath = absPath(f.rel);
+        const stats = await getStatsOrNull(filePath);
+        const stamp = stats ? `${stats.size}:${stats.modifiedAt}` : '';
+        const cached = state.fileDetails.get(filePath);
+        if (stats && !(cached && cached.stamp === stamp)) {
+          if (!worker) worker = new PDFJS.PDFWorker();
+          let details = null;
+          try {
+            details = await readFileDetails(filePath, worker);
+          } catch (e) {
+            // unreadable: the file stays unmatched
+          }
+          state.fileDetails.set(filePath, { stamp, details, added: addedTime(stats) });
+          read++;
+        }
+        done++;
+        if (read && done % 5 === 0) summaryEl.textContent = `Reading title blocks: ${done} of ${pdfs.length} drawings...`;
+      }
+    } finally {
+      if (worker) worker.destroy();
+    }
+  };
+  await Promise.all(Array.from({ length: FILE_DETAIL_LANES }, lane));
+
+  const found = []; // { rel, number, title, added }
+  let noNumber = 0;
+  for (const f of pdfs) {
+    const entry = state.fileDetails.get(absPath(f.rel));
+    const d = entry && entry.details;
+    const number = d ? tidyNumber(d.number) : '';
+    const title = d ? String(d.title || '').replace(/\s+/g, ' ').trim() : '';
+    if (number && isValidNumber(number) && title) found.push({ rel: f.rel, number, title, added: entry.added || 0 });
+    else noNumber++;
+  }
+  // Newest file first, so its title wins for a number printed on several files
+  found.sort((a, b) => b.added - a.added || a.rel.localeCompare(b.rel));
+  const titles = {};
+  for (const { number, title } of found) if (!(number in titles)) titles[number] = title;
+  const numbers = Object.keys(titles).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  const before = Object.keys(state.tokenMap).join('|');
+  state.tokenMap = Object.fromEntries(numbers.map(n => [n, titles[n]]));
+  state.titleBlockTokens = new Map(found.map(({ rel, number }) => [rel, number]));
+
+  if (read || before !== numbers.join('|')) {
+    appendLog(`📄 Read ${numbers.length} drawing${numbers.length === 1 ? '' : 's'} from the title blocks of ${pdfs.length} PDF${pdfs.length === 1 ? '' : 's'}` +
+      (read ? ` (${read} read in ${((Date.now() - started) / 1000).toFixed(1)}s)` : '') +
+      (noNumber ? `; ${noNumber} had no readable drawing number or title` : '') + '.');
+  }
+}
+
 let refreshRunning = false;
 let refreshQueued = false;
 let refreshTimer = null;
@@ -2948,8 +3085,10 @@ async function refresh() {
   refreshRunning = true;
   try {
     // Re-parse the register if it has been replaced or edited
-    const regStats = await getStatsOrNull(state.registerPath);
-    if (!regStats) {
+    const regStats = isTitleBlockMode() ? true : await getStatsOrNull(state.registerPath);
+    if (isTitleBlockMode()) {
+      // The drawing list is built from the title blocks once the files are scanned
+    } else if (!regStats) {
       appendLog(`⚠️ Register is no longer in the folder: ${baseName(state.registerPath)}`);
     } else if (registerStamp(regStats) !== state.registerModified) {
       if (state.registerModified !== null) appendLog('📚 Register changed, re-reading it...');
@@ -2997,6 +3136,7 @@ async function refresh() {
     state.knownFiles = new Set(files.map(f => f.rel));
 
     state.files = files;
+    if (isTitleBlockMode()) await readTitleBlockRegister(files);
     state.titles = effectiveTitles();
     if (expireNumberHistory(files)) await saveLayout();
     state.match = matchFiles(state.titles, files, registerRels());
@@ -3083,12 +3223,15 @@ async function load() {
   }
   try {
     const registerPath = await resolveRegisterPath(input);
+    const pathStats = await getStatsOrNull(registerPath);
+    const titleBlocks = !!(pathStats && pathStats.isDirectory);
     await stopWatching();
     Object.assign(state, {
       registerPath,
-      registerKind: registerKindOf(baseName(registerPath)),
+      registerKind: titleBlocks ? 'titleblock' : registerKindOf(baseName(registerPath)),
       registerModified: null,
-      targetDir: dirName(registerPath),
+      targetDir: titleBlocks ? registerPath : dirName(registerPath),
+      titleBlockTokens: new Map(),
       tokenMap: {},
       titles: {},
       rows: [],
@@ -3106,11 +3249,19 @@ async function load() {
     await loadLayout();
     renderOptions();
     renderNames(true);
-    appendLog(`📚 Reading ${REGISTER_KIND_NAMES[state.registerKind]} register: ${registerPath} ...`);
-    if (state.registerKind !== 'docx' && await findWordTwin()) {
+    if (titleBlocks) {
+      appendLog(`📂 No drawing register in ${registerPath}; reading drawing numbers and titles from each drawing's title block...`);
+      state.registerDetails = {};
+      state.registerColumns = { scale: false, size: false };
+      state.registerProject = null;
+      state.registerIssues = null;
+      state.registerInfo = '';
+      state.registerXml = null;
+    } else appendLog(`📚 Reading ${REGISTER_KIND_NAMES[state.registerKind]} register: ${registerPath} ...`);
+    if (!titleBlocks && state.registerKind !== 'docx' && await findWordTwin()) {
       appendLog(`ℹ️ A Word version of this register is next to it; load it (or the folder) to edit titles.`);
     }
-    summaryEl.textContent = 'Reading register...';
+    summaryEl.textContent = titleBlocks ? 'Reading title blocks...' : 'Reading register...';
     await refresh();
   } catch (err) {
     appendLog('❌ ' + (err.message || err));
@@ -3228,6 +3379,7 @@ async function supersede(file) {
     dest = `${stem} (${n})${ext}`;
   }
   await nfs.move(absPath(file.rel), absPath(relJoin(ssRel, dest)));
+  await moveCachedDetails(file.rel, relJoin(ssRel, dest));
   appendLog(`📦 Moved ${displayPath(file.rel)} → ${displayPath(relJoin(ssRel, dest))}`);
 }
 
@@ -3243,6 +3395,7 @@ async function renameSelected() {
       if (row.folder) await ensureDir(row.folder);
       if (row.status === 'supersede') await supersede(row.occupant);
       await nfs.move(absPath(row.rel), absPath(row.targetRel));
+      await moveCachedDetails(row.rel, row.targetRel);
       const verb = row.status === 'move' ? '📁 Moved' : '✅ Renamed';
       appendLog(`${verb} ${displayPath(row.rel)} → ${displayPath(row.targetRel)}`);
       renamed++;
