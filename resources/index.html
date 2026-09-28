@@ -166,16 +166,16 @@
       </div>
       <!-- What the table shows; under every tab -->
       <div class="row view-options">
-        <label class="inline"><input type="checkbox" id="hide-empty" /> Hide missing drawings</label>
         <label class="inline" title="Read the drawing number from each drawing's title block and compare it with the register and the file name"><input type="checkbox" id="show-file-number" /> Number</label>
-        <label class="inline" title="Read the title printed in each drawing's title block"><input type="checkbox" id="show-file-titles" /> Show in-file titles</label>
+        <label class="inline" title="Read the title printed in each drawing's title block"><input type="checkbox" id="show-file-titles" /> Titles</label>
         <label class="inline" title="Read the revision from each drawing's title block"><input type="checkbox" id="show-file-rev" /> Revision</label>
         <label class="inline" title="Read the scale from each drawing's title block and compare it with the register's"><input type="checkbox" id="show-file-scale" /> Scale</label>
         <label class="inline" title="Read the sheet size from each drawing's title block and compare it with the register's"><input type="checkbox" id="show-file-size" /> Size</label>
         <label class="inline" title="Read the project from each drawing's title block and compare it with the register's"><input type="checkbox" id="show-file-project" /> Project</label>
         <label class="inline" title="Read the client from each drawing's title block and compare it with the register's"><input type="checkbox" id="show-file-client" /> Client</label>
-        <label class="inline" title="Show the register and in-file titles, and the current and new file names, one above the other with their differences marked"><input type="checkbox" id="stack-compare" /> Stack comparisons</label>
         <span class="table-filter">
+          <label class="inline"><input type="checkbox" id="hide-empty" /> Hide missing</label>
+          <label class="inline" title="Show the register and in-file titles, and the current and new file names, one above the other with their differences marked"><input type="checkbox" id="stack-compare" /> Stack</label>
           <label class="inline" title="Show only drawings with a warning (see the Warnings tab)"><input type="checkbox" id="only-warnings" /> Only with warnings</label>
           <input type="search" id="table-filter" placeholder="Filter by number, title or file…" spellcheck="false" autocomplete="off" />
         </span>
