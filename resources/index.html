@@ -125,6 +125,16 @@
                 <option value="dark">Dark</option>
               </select>
             </div>
+            <h4>Spelling <span class="muted">(all folders)</span></h4>
+            <div class="option-row">
+              <label>Dictionary</label>
+              <span id="opt-dict-name" class="dict-name"></span>
+            </div>
+            <div class="option-row">
+              <button id="opt-dict-load" title="Use a Hunspell dictionary (.aff and .dic files) for another language">Load dictionary…</button>
+              <button id="opt-dict-reset" title="Go back to the built-in English (UK) dictionary">Use built-in</button>
+            </div>
+            <div id="opt-dict-note" class="option-note"></div>
           </section>
           <section>
             <h4>Open files with <span class="muted">(all folders)</span></h4>
@@ -173,6 +183,7 @@
         <label class="inline" title="Read the sheet size from each drawing's title block and compare it with the register's"><input type="checkbox" id="show-file-size" /> Size</label>
         <label class="inline" title="Read the project from each drawing's title block and compare it with the register's"><input type="checkbox" id="show-file-project" /> Project</label>
         <label class="inline" title="Read the client from each drawing's title block and compare it with the register's"><input type="checkbox" id="show-file-client" /> Client</label>
+        <label class="inline" title="Underline words in the titles that aren't in the spelling dictionary; right-click one for suggestions"><input type="checkbox" id="show-spelling" /> Spelling</label>
         <span class="table-filter">
           <label class="inline"><input type="checkbox" id="hide-empty" /> Hide missing</label>
           <label class="inline" title="Show the register and in-file titles, and the current and new file names, one above the other with their differences marked"><input type="checkbox" id="stack-compare" /> Stack</label>
@@ -291,6 +302,7 @@
 
     <script src="js/pdfjs/pdf.js"></script>
     <script src="js/jszip/jszip.min.js"></script>
+    <script src="js/nspell/nspell.js"></script>
     <script src="register-core.js"></script>
     <script src="js/neutralino.js"></script>
     <script src="renderer.js"></script>

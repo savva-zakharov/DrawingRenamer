@@ -51,3 +51,5 @@ resources/js/jszip/
 
 # Neutralino storage (the app's options)
 .storage/
+resources/js/nspell/
+resources/js/dictionaries/

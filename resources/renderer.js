@@ -44,7 +44,9 @@ const DEFAULT_TEMPLATE = `{number}${DEFAULT_SEPARATOR}{title}`;
 // Neutralino's storage
 const DEFAULT_SETTINGS = {
   theme: 'system',                  // 'light', 'dark', or 'system' to follow Windows
-  apps: { word: '', excel: '', pdf: '', revit: '', autocad: '' } // programs to open files with ('' = the system default)
+  apps: { word: '', excel: '', pdf: '', revit: '', autocad: '' }, // programs to open files with ('' = the system default)
+  dictionary: null,                 // { aff, dic, name } of a Hunspell dictionary to use, or null for the built-in English (UK)
+  spellingWords: []                 // words added to the dictionary, for every folder
 };
 let settings = JSON.parse(JSON.stringify(DEFAULT_SETTINGS));
 
@@ -105,7 +107,7 @@ const state = {
   // { register number: mark }, header: { label: value }, highlight: 'RRGGBB' or null, register }
   // (header: the Issue No / Date edits it made; highlight: the colour to highlight the issue column
   // with; register: the file name of the register it's for)
-  layout: { folders: [], assignments: {}, titleEdits: {}, detailEdits: {}, projectEdits: {}, issueEdit: null, numberEdits: {}, numberHistory: {}, newEntries: [], moves: [], foldersToRemove: [], nameTemplate: DEFAULT_TEMPLATE, options: {}, ignoredWarnings: [] },
+  layout: { folders: [], assignments: {}, titleEdits: {}, detailEdits: {}, projectEdits: {}, issueEdit: null, numberEdits: {}, numberHistory: {}, newEntries: [], moves: [], foldersToRemove: [], nameTemplate: DEFAULT_TEMPLATE, options: {}, ignoredWarnings: [], spellingWords: [] },
   drag: null,            // what's being dragged: { kind: 'drawing', token } or { kind: 'folder', folder }
   origOf: {},            // drawing number shown => number in the register (for renumbered drawings)
   movedTokens: new Set(), // register numbers of drawings with a pending move
@@ -453,7 +455,7 @@ function layoutPath() {
 }
 
 async function loadLayout() {
-  state.layout = { folders: [], assignments: {}, titleEdits: {}, detailEdits: {}, projectEdits: {}, issueEdit: null, numberEdits: {}, numberHistory: {}, newEntries: [], moves: [], foldersToRemove: [], nameTemplate: DEFAULT_TEMPLATE, options: {}, ignoredWarnings: [] };
+  state.layout = { folders: [], assignments: {}, titleEdits: {}, detailEdits: {}, projectEdits: {}, issueEdit: null, numberEdits: {}, numberHistory: {}, newEntries: [], moves: [], foldersToRemove: [], nameTemplate: DEFAULT_TEMPLATE, options: {}, ignoredWarnings: [], spellingWords: [] };
   state.layoutBroken = false;
   if (!(await getStatsOrNull(layoutPath()))) return;
   try {
@@ -524,7 +526,8 @@ async function loadLayout() {
     const nameTemplate = typeof data.nameTemplate === 'string' && !templateProblem(data.nameTemplate) ? data.nameTemplate : `{number}${separator}{title}`;
     const options = validFolderOptions(data.options);
     const ignoredWarnings = (Array.isArray(data.ignoredWarnings) ? data.ignoredWarnings : []).filter(k => typeof k === 'string');
-    state.layout = { folders: withAncestors(folders), assignments, titleEdits, detailEdits, projectEdits, issueEdit, otherDrafts: drafts, numberEdits, numberHistory, newEntries, moves, foldersToRemove, nameTemplate, options, ignoredWarnings };
+    const spellingWords = (Array.isArray(data.spellingWords) ? data.spellingWords : []).filter(w => typeof w === 'string' && w);
+    state.layout = { folders: withAncestors(folders), assignments, titleEdits, detailEdits, projectEdits, issueEdit, otherDrafts: drafts, numberEdits, numberHistory, newEntries, moves, foldersToRemove, nameTemplate, options, ignoredWarnings, spellingWords };
     appendLog(`📁 Loaded folder layout from ${LAYOUT_FILE} (${folders.length} folders).`);
   } catch (err) {
     state.layoutBroken = true;
@@ -588,6 +591,8 @@ async function saveLayout() {
     foldersToRemove: state.layout.foldersToRemove,
     // Warnings ignored in the Warnings tab: drawing|kind|text (a changed warning shows again)
     ignoredWarnings: state.layout.ignoredWarnings,
+    // Words added to the spelling dictionary while working in this folder
+    spellingWords: state.layout.spellingWords,
     newEntries: state.layout.newEntries
   };
   try {
@@ -1445,6 +1450,12 @@ function renderRow(row, newFiles, alt, depth) {
   // model or CAD file, or its folder
   tr.addEventListener('contextmenu', (e) => {
     if (e.target.closest('input')) return;
+    const misspelt = e.target.closest('.misspelled');
+    if (misspelt) {
+      e.preventDefault();
+      openSpellingMenu(e.clientX, e.clientY, row, misspelt.dataset.word, misspelt.closest('.file-detail') ? 'file' : 'register');
+      return;
+    }
     const copy = copyTarget(e.target);
     if (!copy && !row.rel) return;
     e.preventDefault();
@@ -1638,6 +1649,7 @@ function renderTitle(td, row) {
   text.className = 'title-text';
   text.textContent = row.title;
   td.appendChild(text);
+  underlineMisspellings(text);
   if (row.moved) {
     const badge = document.createElement('button');
     badge.className = 'edit-badge moved';
@@ -1844,7 +1856,14 @@ function fileDetailsShown() {
     ['project', 'revisions', 'warnings'].includes(state.activeTab);
 }
 
+// The title block cells, with misspelt words in the titles underlined when Spelling is ticked
 function renderFileDetails(tds, row) {
+  renderFileDetailCells(tds, row);
+  underlineMisspellings(tds.title);
+  if (tds.title.tagName === 'DIV') underlineMisspellings(tds.title.parentElement.querySelector('.title-text'));
+}
+
+function renderFileDetailCells(tds, row) {
   for (const [field, td] of Object.entries(tds)) {
     const line = ['stack-top', 'stack-bottom'].find(c => td.classList.contains(c));
     td.className = `${DETAIL_COLUMNS[field]} file-detail file-${field}` + (line ? ` ${line}` : '');
@@ -3247,6 +3266,7 @@ async function load() {
     state.picked.clear();
     state.choices.clear();
     await loadLayout();
+    syncProjectWords();
     renderOptions();
     renderNames(true);
     if (titleBlocks) {
@@ -4278,10 +4298,315 @@ for (const btn of document.querySelectorAll('.name-fields button')) {
   });
 }
 
+// ---------- spelling ----------
+// Titles are checked with nspell against a Hunspell dictionary: English (UK) built in, or one the
+// user loads (Options tab). Words the user adds are kept for this folder and for every folder.
+const spellingCheckbox = document.getElementById('show-spelling');
+const BUILT_IN_DICTIONARY = { aff: 'js/dictionaries/en-GB/en_GB.aff', dic: 'js/dictionaries/en-GB/en_GB.dic', name: 'English (UK)' };
+let speller = null;              // the loaded nspell instance
+let spellerLoading = null;       // a promise while it loads
+let spellingWarningsOn = false;  // the Warnings tab's Check spelling
+const misspeltCache = new Map(); // text => [{ word, start }]
+const CONSTRUCTION_TERMS = 'spelling/construction-terms.txt'; // construction words the dictionary doesn't have
+let projectWordsInSpeller = [];  // this folder's added words, currently in the speller
+const suggestionCache = new Map();
+
+function dictionaryName() {
+  return settings.dictionary ? settings.dictionary.name : BUILT_IN_DICTIONARY.name;
+}
+
+// Hunspell files name their character set in the .aff ("SET ISO8859-1"); decoded with it
+const HUNSPELL_ENCODINGS = { 'ISO8859-1': 'iso-8859-1', 'ISO8859-2': 'iso-8859-2', 'ISO8859-7': 'iso-8859-7', 'ISO8859-15': 'iso-8859-15', 'KOI8-R': 'koi8-r', 'MICROSOFT-CP1251': 'windows-1251', 'CP1251': 'windows-1251', 'UTF-8': 'utf-8' };
+
+function decodeHunspell(affBytes, dicBytes) {
+  const head = new TextDecoder('iso-8859-1').decode(affBytes.slice(0, 4096));
+  const set = ((/^SET\s+(\S+)/m.exec(head) || [])[1] || 'UTF-8').toUpperCase();
+  const decoder = new TextDecoder(HUNSPELL_ENCODINGS[set] || 'utf-8');
+  return { aff: decoder.decode(affBytes), dic: decoder.decode(dicBytes) };
+}
+
+async function readDictionary(dict) {
+  if (dict === BUILT_IN_DICTIONARY) {
+    const get = async url => new Uint8Array(await (await fetch(url)).arrayBuffer());
+    return decodeHunspell(await get(dict.aff), await get(dict.dic));
+  }
+  return decodeHunspell(new Uint8Array(await nfs.readBinaryFile(dict.aff)), new Uint8Array(await nfs.readBinaryFile(dict.dic)));
+}
+
+// Loads the dictionary once (in the background); a loaded one that fails falls back to the built-in
+function ensureSpeller() {
+  if (speller) return Promise.resolve(speller);
+  if (spellerLoading) return spellerLoading;
+  spellerLoading = (async () => {
+    const started = Date.now();
+    let dict = settings.dictionary || BUILT_IN_DICTIONARY;
+    try {
+      const { aff, dic } = await readDictionary(dict);
+      speller = NSpell(aff, dic);
+    } catch (err) {
+      if (dict === BUILT_IN_DICTIONARY) throw err;
+      appendLog(`❌ Couldn't load the ${dict.name} dictionary (${err.message || err}); using ${BUILT_IN_DICTIONARY.name}.`);
+      dict = BUILT_IN_DICTIONARY;
+      const { aff, dic } = await readDictionary(dict);
+      speller = NSpell(aff, dic);
+    }
+    // Construction words and the words added for every folder; this folder's go in below
+    try {
+      const terms = await (await fetch(CONSTRUCTION_TERMS)).text();
+      for (const line of terms.split(/\r?\n/)) if (line.trim() && !line.startsWith('#')) speller.add(line.trim());
+    } catch (e) {
+      // the list is only a help
+    }
+    for (const w of settings.spellingWords) speller.add(w);
+    projectWordsInSpeller = [];
+    syncProjectWords();
+    misspeltCache.clear();
+    suggestionCache.clear();
+    appendLog(`📖 Loaded the ${dict.name} spelling dictionary in ${((Date.now() - started) / 1000).toFixed(1)}s.`);
+    return speller;
+  })().catch(err => {
+    appendLog(`❌ Couldn't load a spelling dictionary: ${err.message || err}`);
+    return null;
+  }).finally(() => {
+    spellerLoading = null;
+    if (state.match) render(new Set());
+    renderSpellingOptions();
+  });
+  return spellerLoading;
+}
+
+function resetSpeller() {
+  speller = null;
+  misspeltCache.clear();
+  suggestionCache.clear();
+  if (spellingCheckbox.checked || spellingWarningsOn) ensureSpeller();
+}
+
+// Puts this folder's added words in the speller (so they can be suggested), taking out the last
+// folder's (unless they're also kept for every folder)
+function syncProjectWords() {
+  if (!speller) return;
+  const everywhere = new Set(settings.spellingWords.map(w => w.toLowerCase()));
+  const wanted = state.registerPath ? state.layout.spellingWords || [] : [];
+  for (const w of projectWordsInSpeller) {
+    if (!wanted.includes(w) && !everywhere.has(w.toLowerCase())) speller.remove(w);
+  }
+  for (const w of wanted) if (!projectWordsInSpeller.includes(w)) speller.add(w);
+  projectWordsInSpeller = wanted.slice();
+  misspeltCache.clear();
+}
+
+// Words the user added (this folder and every folder), and words from the project's own details
+function knownWords() {
+  const words = new Set([...settings.spellingWords, ...(state.layout.spellingWords || [])].map(w => w.toLowerCase()));
+  const project = state.registerProject && state.registerProject.fields ? state.registerProject.fields.map(f => f.value) : [];
+  for (const text of [...project, registerProjectValue('project'), registerProjectValue('client')]) {
+    for (const m of String(text || '').matchAll(/[A-Za-z\u00C0-\u024F]+/g)) words.add(m[0].toLowerCase());
+  }
+  return words;
+}
+
+// Words in a title worth checking: letters (with an apostrophe) between spaces and punctuation.
+// Anything with a digit in it (drawing codes, 1A3, 03-03) is skipped, and so are single letters and
+// short all-capital abbreviations (GA, ITM). [{ word, start }]
+function checkedWords(text) {
+  const out = [];
+  const chunkRe = /[^\s,;:()[\]{}"“”&+=]+/g;
+  let c;
+  while ((c = chunkRe.exec(text)) !== null) {
+    if (/\d/.test(c[0])) continue;
+    const wordRe = /[A-Za-z\u00C0-\u024F]+(?:['’][A-Za-z\u00C0-\u024F]+)?/g;
+    let w;
+    while ((w = wordRe.exec(c[0])) !== null) {
+      if (w[0].length < 2 || /^[A-Z]{2,3}$/.test(w[0])) continue;
+      out.push({ word: w[0], start: c.index + w.index });
+    }
+  }
+  return out;
+}
+
+// Words in the text that aren't in the dictionary (or added); [] until the dictionary loads
+function misspelledWords(text) {
+  if (!speller || !text) return [];
+  if (misspeltCache.has(text)) return misspeltCache.get(text);
+  const known = knownWords();
+  const found = checkedWords(text).filter(({ word }) => !known.has(word.toLowerCase()) && !speller.correct(word));
+  misspeltCache.set(text, found);
+  return found;
+}
+
+// The dictionary's suggestions, then the word split in two where both halves are words
+// ("TWINSTUD" -> "TWIN STUD")
+function suggestionsFor(word) {
+  if (!speller) return [];
+  if (!suggestionCache.has(word)) {
+    const found = speller.suggest(word).slice(0, 5);
+    for (let i = 3; i <= word.length - 3; i++) {
+      const a = word.slice(0, i);
+      const b = word.slice(i);
+      if (speller.correct(a) && speller.correct(b)) found.push(`${a} ${b}`);
+    }
+    suggestionCache.set(word, [...new Set(found)].slice(0, 6));
+  }
+  return suggestionCache.get(word);
+}
+
+function spellingWarning({ word }, where) {
+  const suggestions = suggestionsFor(word).slice(0, 3);
+  return `"${word}" in ${where} isn't in the dictionary` + (suggestions.length ? ` (did you mean ${suggestions.join(', ')}?)` : '');
+}
+
+// Underlines misspelt words inside an element (already rendered text, differences marked or not)
+function underlineMisspellings(root) {
+  if (!root || !spellingCheckbox.checked || !speller) return;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode: n => (n.parentElement.closest('button, .misspelled') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT)
+  });
+  const nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+  for (const node of nodes) {
+    const words = misspelledWords(node.data);
+    if (!words.length) continue;
+    const frag = document.createDocumentFragment();
+    let pos = 0;
+    for (const { word, start } of words) {
+      frag.append(node.data.slice(pos, start));
+      const span = document.createElement('span');
+      span.className = 'misspelled';
+      span.dataset.word = word;
+      span.textContent = word;
+      span.title = 'Not in the dictionary: right-click for suggestions';
+      frag.append(span);
+      pos = start + word.length;
+    }
+    frag.append(node.data.slice(pos));
+    node.replaceWith(frag);
+  }
+}
+
+// A suggestion in the word's own case (DOORS -> DOORS, Recieve -> Receive)
+function matchCase(word, suggestion) {
+  if (word === word.toUpperCase()) return suggestion.toUpperCase();
+  if (word[0] === word[0].toUpperCase()) return suggestion[0].toUpperCase() + suggestion.slice(1);
+  return suggestion;
+}
+
+// The title with the first whole-word `word` replaced
+function replaceWord(title, word, replacement) {
+  const re = new RegExp('(^|[^A-Za-z\u00C0-\u024F])' + word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?![A-Za-z\u00C0-\u024F])');
+  return title.replace(re, (all, before) => before + replacement);
+}
+
+// The right-click menu on a misspelt word: suggestions (which become a title edit when the
+// register can be written to) and Add to dictionary
+function openSpellingMenu(x, y, row, word, source) {
+  closeRowMenu();
+  const editable = source === 'register' && row.token && canEditRegister();
+  const why = source === 'file' ? "In the drawing's title block, which isn't changed from here"
+    : !canEditRegister() ? 'Titles can only be changed in a Word or Excel register' : '';
+  const suggestions = suggestionsFor(word);
+  const items = suggestions.length
+    ? suggestions.map(sug => {
+      const shown = sug === sug.toLowerCase() ? matchCase(word, sug) : sug;
+      return rowMenuItem(shown, editable ? '' : why, editable ? () => setTitleEdit(row.token, replaceWord(row.title, word, shown)) : null);
+    })
+    : [rowMenuItem('No suggestions')];
+  rowMenu.replaceChildren(
+    el('div', `"${word}"`, 'menu-heading'),
+    ...items,
+    el('div', undefined, 'menu-sep'),
+    rowMenuItem(`Add "${word}" to the dictionary`, 'For this folder and every folder', () => addToDictionary(word))
+  );
+  rowMenuRow = row;
+  rowMenu.hidden = false;
+  const { width, height } = rowMenu.getBoundingClientRect();
+  rowMenu.style.left = `${Math.max(4, Math.min(x, window.innerWidth - width - 4))}px`;
+  rowMenu.style.top = `${Math.max(4, Math.min(y, window.innerHeight - height - 4))}px`;
+}
+
+// Kept in the app's settings (every folder) and in this folder's layout file
+async function addToDictionary(word) {
+  const lower = word.toLowerCase();
+  if (!settings.spellingWords.some(w => w.toLowerCase() === lower)) {
+    settings.spellingWords = [...settings.spellingWords, word];
+    await setOption('spellingWords', settings.spellingWords);
+  }
+  if (state.registerPath && !state.layout.spellingWords.some(w => w.toLowerCase() === lower)) {
+    state.layout.spellingWords = [...state.layout.spellingWords, word];
+    await saveLayout();
+  }
+  if (speller) speller.add(word);
+  projectWordsInSpeller = [...new Set([...projectWordsInSpeller, word])];
+  misspeltCache.clear();
+  suggestionCache.clear();
+  appendLog(`📖 Added "${word}" to the dictionary (this folder and every folder).`);
+  render(new Set());
+}
+
+function setSpellingWarnings(on) {
+  spellingWarningsOn = on;
+  if (on) ensureSpeller();
+  render(new Set());
+}
+
+spellingCheckbox.addEventListener('change', () => {
+  if (spellingCheckbox.checked) ensureSpeller();
+  render(new Set());
+});
+
+// Options tab: which dictionary, and how many words have been added
+function renderSpellingOptions() {
+  const name = document.getElementById('opt-dict-name');
+  if (!name) return;
+  name.textContent = dictionaryName() + (settings.dictionary ? '' : ', built in') + (spellerLoading ? ' (loading…)' : '');
+  name.title = settings.dictionary ? `${settings.dictionary.aff}\n${settings.dictionary.dic}` : 'Built into the app';
+  document.getElementById('opt-dict-reset').disabled = !settings.dictionary;
+  const here = state.registerPath ? (state.layout.spellingWords || []).length : 0;
+  const all = settings.spellingWords.length;
+  document.getElementById('opt-dict-note').textContent =
+    `Titles are checked when Spelling is ticked above the table, or Check spelling in the Warnings tab. Words added: ${all} for every folder` +
+    (state.registerPath ? `, ${here} in this folder's drawing-renamer.json` : '') + '.';
+}
+
+document.getElementById('opt-dict-load').addEventListener('click', async () => {
+  let files;
+  try {
+    files = await Neutralino.os.showOpenDialog('Choose a Hunspell dictionary (.dic or .aff)', {
+      filters: [{ name: 'Hunspell dictionaries', extensions: ['dic', 'aff'] }]
+    });
+  } catch (err) {
+    appendLog('Could not open file dialog: ' + (err.message || err));
+    return;
+  }
+  if (!files || !files.length) return;
+  const stem = files[0].replace(/\.(dic|aff)$/i, '');
+  const dict = { aff: stem + '.aff', dic: stem + '.dic', name: baseName(stem) };
+  for (const f of [dict.aff, dict.dic]) {
+    if (!(await getStatsOrNull(f))) {
+      appendLog(`❌ ${baseName(f)} wasn't found next to it; a Hunspell dictionary needs both the .aff and the .dic file.`);
+      return;
+    }
+  }
+  try {
+    const { aff, dic } = await readDictionary(dict);
+    NSpell(aff, dic); // check it loads before switching to it
+  } catch (err) {
+    appendLog(`❌ ${dict.name} doesn't look like a Hunspell dictionary: ${err.message || err}`);
+    return;
+  }
+  await setOption('dictionary', dict, `Spelling now uses the ${dict.name} dictionary.`);
+  resetSpeller();
+});
+
+document.getElementById('opt-dict-reset').addEventListener('click', async () => {
+  await setOption('dictionary', null, `Spelling now uses the built-in ${BUILT_IN_DICTIONARY.name} dictionary.`);
+  resetSpeller();
+});
+
 // ---------- warnings ----------
 const WARNING_KINDS = {
   number: 'Number', title: 'Title', revision: 'Revision', scale: 'Scale', size: 'Size',
-  project: 'Project', client: 'Client', file: 'File'
+  project: 'Project', client: 'Client', file: 'File', spelling: 'Spelling'
 };
 const warningKindsShown = new Set(Object.keys(WARNING_KINDS));
 
@@ -4298,11 +4623,21 @@ function rowWarnings(row) {
     const n = state.rows.filter(r => r.token === row.token && r.rel).length;
     add('file', `${n} files match this drawing; the one ticked is used`);
   }
+  // Spelling (when switched on in the Warnings tab): the title, once per drawing, and the title
+  // block's title where it's different
+  const spellingRow = spellingWarningsOn && speller && (!row.group || row.chosen);
+  if (spellingRow && row.token && row.title) {
+    const where = isTitleBlockMode() ? 'the title' : 'the register title';
+    for (const w of misspelledWords(row.title)) add('spelling', spellingWarning(w, where));
+  }
   // Title blocks of the files not in use aren't checked
   if (!row.rel || ['skip', 'superseded'].includes(row.status)) return warnings;
   const entry = state.fileDetails.get(absPath(row.rel));
   const details = entry && entry.details;
   if (!details) return warnings;
+  if (spellingRow && details.title && !(row.title && sameTitle(details.title, row.title))) {
+    for (const w of misspelledWords(details.title)) add('spelling', spellingWarning(w, 'the title block'));
+  }
   for (const text of fileNumberProblems(row, details.number)) add('number', text);
   if (row.title && details.title && !sameTitle(details.title, row.title)) add('title', `The title block says "${details.title}"; the register says "${row.title}"`);
   if (row.token) for (const text of revisionWarnings(row)) add('revision', text);
@@ -4438,6 +4773,15 @@ function renderWarnings() {
     kinds.appendChild(label);
   }
   head.appendChild(kinds);
+  // Spelling isn't checked unless switched on here
+  const spell = el('label', undefined, 'spelling-toggle');
+  spell.title = `Check the titles against the ${dictionaryName()} dictionary`;
+  const spellBox = document.createElement('input');
+  spellBox.type = 'checkbox';
+  spellBox.checked = spellingWarningsOn;
+  spellBox.addEventListener('change', () => setSpellingWarnings(spellBox.checked));
+  spell.append(spellBox, spellingWarningsOn && !speller ? 'Spelling (loading…)' : 'Check spelling');
+  head.appendChild(spell);
   const missing = state.rows.filter(r => r.status === 'none').length;
   const notes = [];
   if (read < pdfs.size) notes.push(`reading title blocks… ${read} of ${pdfs.size}`);
@@ -4573,6 +4917,7 @@ function ssFolderProblem(name) {
 
 // Shows the current options
 function renderOptions() {
+  renderSpellingOptions();
   const today = new Date();
   const loaded = !!state.registerPath;
   fillSelect(optFileDate, FILE_DATE_FORMATS.map(f => [f, `${f.toUpperCase()}  (${datePrefix(today, f)})`]), folderOption('fileDate'));
@@ -4602,9 +4947,12 @@ async function loadSettings() {
   try {
     const data = JSON.parse(await Neutralino.storage.getData('settings'));
     const apps = data.apps && typeof data.apps === 'object' ? data.apps : {};
+    const dict = data.dictionary;
     settings = {
       theme: ['light', 'dark'].includes(data.theme) ? data.theme : 'system',
-      apps: Object.fromEntries(Object.keys(DEFAULT_SETTINGS.apps).map(k => [k, typeof apps[k] === 'string' ? apps[k] : '']))
+      apps: Object.fromEntries(Object.keys(DEFAULT_SETTINGS.apps).map(k => [k, typeof apps[k] === 'string' ? apps[k] : ''])),
+      dictionary: dict && typeof dict.aff === 'string' && typeof dict.dic === 'string' ? { aff: dict.aff, dic: dict.dic, name: String(dict.name || baseName(dict.dic)) } : null,
+      spellingWords: Array.isArray(data.spellingWords) ? data.spellingWords.filter(w => typeof w === 'string' && w) : []
     };
   } catch (e) {
     // nothing saved yet: the defaults
