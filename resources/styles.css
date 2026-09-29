@@ -433,5 +433,6 @@ table.name-preview .same{ color:var(--muted) }
 .misspelled{ text-decoration:underline wavy var(--bad); text-decoration-skip-ink:none; text-underline-offset:2px; cursor:context-menu }
 .dict-name{ font-weight:600 }
 .menu .menu-heading{ padding:6px 14px 3px; font-size:12px; font-weight:600; color:var(--muted); white-space:nowrap }
-.warnings-head .spelling-toggle{ display:flex; align-items:center; gap:4px; margin:0; font-size:12px; color:var(--fg); cursor:pointer; white-space:nowrap }
-.warnings-head .spelling-toggle input{ margin:0 }
+.warnings-list .warning-detail{ display:block; font-size:11px; margin-top:1px }
+.spell-hint{ margin-top:3px; font-size:11px; color:var(--muted) }
+.spell-hint .misspelled{ color:var(--fg) }

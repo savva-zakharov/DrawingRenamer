@@ -1861,6 +1861,11 @@ function renderFileDetails(tds, row) {
   renderFileDetailCells(tds, row);
   underlineMisspellings(tds.title);
   if (tds.title.tagName === 'DIV') underlineMisspellings(tds.title.parentElement.querySelector('.title-text'));
+  for (const field of ['project', 'client']) {
+    underlineMisspellings(tds[field]);
+    // Stacked: the register's value above the drawing's
+    if (tds[field].tagName === 'DIV') underlineMisspellings(tds[field].previousElementSibling);
+  }
 }
 
 function renderFileDetailCells(tds, row) {
@@ -2331,6 +2336,22 @@ function renderProjectFields(section) {
     });
     input.addEventListener('change', () => setProjectEdit(field, input.value));
     dd.appendChild(input);
+    // With Spelling ticked, words not in the dictionary are listed under the field
+    const misspelt = spellingCheckbox.checked ? misspelledWords(projectValue(field)) : [];
+    if (misspelt.length) {
+      const hint = el('div', 'Not in the dictionary: ', 'spell-hint');
+      misspelt.forEach(({ word }, i) => {
+        const span = el('span', word, 'misspelled');
+        span.dataset.word = word;
+        span.title = 'Right-click for suggestions';
+        span.addEventListener('contextmenu', (e) => {
+          e.preventDefault();
+          openSpellingMenu(e.clientX, e.clientY, null, word, 'project', field);
+        });
+        hint.append(i ? ', ' : '', span);
+      });
+      dd.appendChild(hint);
+    }
     if (edited) {
       const undo = el('button', 'edited ✕', 'edit-badge');
       undo.title = `Register: ${field.value || '(blank)'}\nClick to undo`;
@@ -4305,7 +4326,7 @@ const spellingCheckbox = document.getElementById('show-spelling');
 const BUILT_IN_DICTIONARY = { aff: 'js/dictionaries/en-GB/en_GB.aff', dic: 'js/dictionaries/en-GB/en_GB.dic', name: 'English (UK)' };
 let speller = null;              // the loaded nspell instance
 let spellerLoading = null;       // a promise while it loads
-let spellingWarningsOn = false;  // the Warnings tab's Check spelling
+let spellingWarningsOn = false;  // the Warnings tab's Spelling chip
 const misspeltCache = new Map(); // text => [{ word, start }]
 const CONSTRUCTION_TERMS = 'spelling/construction-terms.txt'; // construction words the dictionary doesn't have
 let projectWordsInSpeller = [];  // this folder's added words, currently in the speller
@@ -4370,6 +4391,7 @@ function ensureSpeller() {
   }).finally(() => {
     spellerLoading = null;
     if (state.match) render(new Set());
+    renderProjectData(true);
     renderSpellingOptions();
   });
   return spellerLoading;
@@ -4396,14 +4418,90 @@ function syncProjectWords() {
   misspeltCache.clear();
 }
 
-// Words the user added (this folder and every folder), and words from the project's own details
+// Words the user added (this folder and every folder)
 function knownWords() {
-  const words = new Set([...settings.spellingWords, ...(state.layout.spellingWords || [])].map(w => w.toLowerCase()));
-  const project = state.registerProject && state.registerProject.fields ? state.registerProject.fields.map(f => f.value) : [];
-  for (const text of [...project, registerProjectValue('project'), registerProjectValue('client')]) {
-    for (const m of String(text || '').matchAll(/[A-Za-z\u00C0-\u024F]+/g)) words.add(m[0].toLowerCase());
+  return new Set([...settings.spellingWords, ...(state.layout.spellingWords || [])].map(w => w.toLowerCase()));
+}
+
+// Stands in for the register's own project details in the warnings (they aren't one drawing's)
+const PROJECT_ROW = { key: '#register-details', token: null, rel: null, isRegisterDetails: true };
+
+// Every misspelt word, once, with every place it's found: drawing titles, title block titles,
+// projects and clients, and the register's project details. Each word's warning goes on the first
+// place it's found. { lower word: { word, places: [{ row, where }], owner } }
+let spellingIndexCache = null;
+function spellingIndex() {
+  const stamp = [state.rows, speller, state.fileDetails.size, misspeltCache.size ? 1 : 0, settings.spellingWords.length, (state.layout.spellingWords || []).length, JSON.stringify(state.layout.projectEdits || {})].map(String).join('|');
+  if (spellingIndexCache && spellingIndexCache.rows === state.rows && spellingIndexCache.stamp === stamp) return spellingIndexCache.index;
+  const index = {};
+  // field: what the text is, [singular, plural] ("title block project", "title block projects")
+  const note = (text, row, where, field) => {
+    for (const { word } of misspelledWords(text)) {
+      const key = word.toLowerCase();
+      const entry = index[key] || (index[key] = { word, places: [], owner: row });
+      if (!entry.places.some(pl => pl.where === where)) entry.places.push({ row, where, field });
+    }
+  };
+  const project = state.registerProject && state.registerProject.fields ? state.registerProject.fields : [];
+  // Fields holding codes, numbers and dates (Job No, Model No, Ref, Date) aren't words to check
+  const codeField = /\b(no|number|ref|reference|code|job|model|date|rev|revision)\b/i;
+  for (const field of project) {
+    const name = `the register's ${field.label.replace(/[:.]\s*$/, '')}`;
+    if (!codeField.test(field.label)) note(projectValue(field), PROJECT_ROW, name, [name, name]);
   }
-  return words;
+  for (const row of state.rows) {
+    if (row.group && !row.chosen) continue;
+    const name = row.token || (row.rel ? displayPath(row.rel) : '');
+    const titleField = isTitleBlockMode() ? ['title', 'titles'] : ['register title', 'register titles'];
+    if (row.token && row.title) note(row.title, row, `${name} title`, titleField);
+    if (!row.rel || ['skip', 'superseded'].includes(row.status)) continue;
+    const entry = state.fileDetails.get(absPath(row.rel));
+    const d = entry && entry.details;
+    if (!d) continue;
+    if (d.title && !(row.title && sameTitle(d.title, row.title))) note(d.title, row, `${name} title block`, ['title block title', 'title block titles']);
+    if (d.project) note(d.project, row, `${name} title block project`, ['title block project', 'title block projects']);
+    if (d.client) note(d.client, row, `${name} title block client`, ['title block client', 'title block clients']);
+  }
+  spellingIndexCache = { rows: state.rows, stamp, index };
+  return index;
+}
+
+// The fields a word is in: "the register's Project and title block projects". Counts are left
+// out, so an ignored warning stays ignored when another drawing has the same word.
+function spellingFields(places) {
+  const fields = [];
+  for (const { field } of places) {
+    const known = fields.find(f => f.field[0] === field[0]);
+    if (known) known.n++;
+    else fields.push({ field, n: 1 });
+  }
+  const names = fields.map(({ field, n }) => (n > 1 ? field[1] : field[0]));
+  return names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}` : names[0];
+}
+
+// "In PA-001 title" / "In 6 places: PA-001 title, PA-002 title, PA-003 title and 3 more"
+function spellingPlaces(places) {
+  if (places.length === 1) return `In ${places[0].where}`;
+  const shown = places.slice(0, 3).map(pl => pl.where).join(', ');
+  return `In ${places.length} places: ${shown}${places.length > 3 ? ` and ${places.length - 3} more` : ''}`;
+}
+
+// The spelling warnings a row owns (each misspelt word once, on the first place it's found)
+function spellingWarningsFor(row) {
+  if (!spellingWarningsOn || !speller) return [];
+  const out = [];
+  for (const entry of Object.values(spellingIndex())) {
+    if (entry.owner !== row) continue;
+    const suggestions = suggestionsFor(entry.word).slice(0, 3);
+    out.push({
+      kind: 'spelling',
+      text: `"${entry.word}" in the ${spellingFields(entry.places).replace(/^the /, '')} isn't in the dictionary` +
+        (suggestions.length ? ` (did you mean ${suggestions.join(', ')}?)` : ''),
+      // Which drawings, when it's in more than one place (one place is already named above)
+      detail: entry.places.length > 1 ? spellingPlaces(entry.places) : ''
+    });
+  }
+  return out;
 }
 
 // Words in a title worth checking: letters (with an apostrophe) between spaces and punctuation.
@@ -4451,11 +4549,6 @@ function suggestionsFor(word) {
   return suggestionCache.get(word);
 }
 
-function spellingWarning({ word }, where) {
-  const suggestions = suggestionsFor(word).slice(0, 3);
-  return `"${word}" in ${where} isn't in the dictionary` + (suggestions.length ? ` (did you mean ${suggestions.join(', ')}?)` : '');
-}
-
 // Underlines misspelt words inside an element (already rendered text, differences marked or not)
 function underlineMisspellings(root) {
   if (!root || !spellingCheckbox.checked || !speller) return;
@@ -4499,16 +4592,19 @@ function replaceWord(title, word, replacement) {
 
 // The right-click menu on a misspelt word: suggestions (which become a title edit when the
 // register can be written to) and Add to dictionary
-function openSpellingMenu(x, y, row, word, source) {
+function openSpellingMenu(x, y, row, word, source, field = null) {
   closeRowMenu();
-  const editable = source === 'register' && row.token && canEditRegister();
+  const editable = canEditRegister() && (source === 'project' ? !!field : source === 'register' && row && row.token);
   const why = source === 'file' ? "In the drawing's title block, which isn't changed from here"
-    : !canEditRegister() ? 'Titles can only be changed in a Word or Excel register' : '';
+    : !canEditRegister() ? `${source === 'project' ? 'Project details' : 'Titles'} can only be changed in a Word or Excel register` : '';
+  const apply = shown => (source === 'project'
+    ? () => setProjectEdit(field, replaceWord(projectValue(field), word, shown))
+    : () => setTitleEdit(row.token, replaceWord(row.title, word, shown)));
   const suggestions = suggestionsFor(word);
   const items = suggestions.length
     ? suggestions.map(sug => {
       const shown = sug === sug.toLowerCase() ? matchCase(word, sug) : sug;
-      return rowMenuItem(shown, editable ? '' : why, editable ? () => setTitleEdit(row.token, replaceWord(row.title, word, shown)) : null);
+      return rowMenuItem(shown, editable ? '' : why, editable ? apply(shown) : null);
     })
     : [rowMenuItem('No suggestions')];
   rowMenu.replaceChildren(
@@ -4541,6 +4637,7 @@ async function addToDictionary(word) {
   suggestionCache.clear();
   appendLog(`📖 Added "${word}" to the dictionary (this folder and every folder).`);
   render(new Set());
+  renderProjectData(true);
 }
 
 function setSpellingWarnings(on) {
@@ -4552,6 +4649,7 @@ function setSpellingWarnings(on) {
 spellingCheckbox.addEventListener('change', () => {
   if (spellingCheckbox.checked) ensureSpeller();
   render(new Set());
+  renderProjectData(true);
 });
 
 // Options tab: which dictionary, and how many words have been added
@@ -4564,7 +4662,7 @@ function renderSpellingOptions() {
   const here = state.registerPath ? (state.layout.spellingWords || []).length : 0;
   const all = settings.spellingWords.length;
   document.getElementById('opt-dict-note').textContent =
-    `Titles are checked when Spelling is ticked above the table, or Check spelling in the Warnings tab. Words added: ${all} for every folder` +
+    `Titles, projects and clients are checked when Spelling is ticked above the table or in the Warnings tab. Words added: ${all} for every folder` +
     (state.registerPath ? `, ${here} in this folder's drawing-renamer.json` : '') + '.';
 }
 
@@ -4623,21 +4721,15 @@ function rowWarnings(row) {
     const n = state.rows.filter(r => r.token === row.token && r.rel).length;
     add('file', `${n} files match this drawing; the one ticked is used`);
   }
-  // Spelling (when switched on in the Warnings tab): the title, once per drawing, and the title
-  // block's title where it's different
-  const spellingRow = spellingWarningsOn && speller && (!row.group || row.chosen);
-  if (spellingRow && row.token && row.title) {
-    const where = isTitleBlockMode() ? 'the title' : 'the register title';
-    for (const w of misspelledWords(row.title)) add('spelling', spellingWarning(w, where));
-  }
+  // Spelling (when switched on in the Warnings tab): each misspelt word once, however many
+  // titles, projects and clients it's in
+  warnings.push(...spellingWarningsFor(row));
+  if (row.isRegisterDetails) return warnings;
   // Title blocks of the files not in use aren't checked
   if (!row.rel || ['skip', 'superseded'].includes(row.status)) return warnings;
   const entry = state.fileDetails.get(absPath(row.rel));
   const details = entry && entry.details;
   if (!details) return warnings;
-  if (spellingRow && details.title && !(row.title && sameTitle(details.title, row.title))) {
-    for (const w of misspelledWords(details.title)) add('spelling', spellingWarning(w, 'the title block'));
-  }
   for (const text of fileNumberProblems(row, details.number)) add('number', text);
   if (row.title && details.title && !sameTitle(details.title, row.title)) add('title', `The title block says "${details.title}"; the register says "${row.title}"`);
   if (row.token) for (const text of revisionWarnings(row)) add('revision', text);
@@ -4658,7 +4750,7 @@ function rowWarnings(row) {
 // Ignored warnings (the Warnings tab's Ignore): kept per folder, by drawing, kind and text, so a
 // warning whose values change shows again
 function warningKey(row, w) {
-  return `${row.token || row.rel}|${w.kind}|${w.text}`;
+  return `${row.token || row.rel || row.key}|${w.kind}|${w.text}`;
 }
 
 function isIgnored(row, w) {
@@ -4713,7 +4805,7 @@ function scheduleWarningsUpdate() {
 
 // Drawings with warnings not ignored, and with `withIgnored` the ignored ones too (marked ignored)
 function warningsList(withIgnored = false) {
-  return state.rows
+  return [PROJECT_ROW, ...state.rows]
     .map(row => ({ row, warnings: rowWarnings(row).map(w => ({ ...w, ignored: isIgnored(row, w) })).filter(w => withIgnored || !w.ignored) }))
     .filter(w => w.warnings.length);
 }
@@ -4759,29 +4851,26 @@ function renderWarnings() {
   head.appendChild(el('strong', total ? `${total} warning${total === 1 ? '' : 's'} on ${all.length} drawing${all.length === 1 ? '' : 's'}` : 'No warnings'));
   const kinds = el('span', undefined, 'kinds');
   for (const [kind, name] of Object.entries(WARNING_KINDS)) {
-    if (!counts[kind]) continue;
+    // Spelling is always offered: it isn't checked (and so has no count) until it's ticked
+    const spelling = kind === 'spelling';
+    if (!counts[kind] && !spelling) continue;
     const label = el('label');
     const cb = document.createElement('input');
     cb.type = 'checkbox';
-    cb.checked = warningKindsShown.has(kind);
+    cb.checked = spelling ? spellingWarningsOn : warningKindsShown.has(kind);
     cb.addEventListener('change', () => {
+      if (spelling) return setSpellingWarnings(cb.checked);
       if (cb.checked) warningKindsShown.add(kind);
       else warningKindsShown.delete(kind);
       renderWarnings();
     });
-    label.append(cb, `${name} ${counts[kind]}`);
+    if (spelling) {
+      label.title = `Check titles, projects and clients against the ${dictionaryName()} dictionary`;
+      label.append(cb, !spellingWarningsOn ? name : !speller ? `${name} (loading…)` : `${name} ${counts[kind] || 0}`);
+    } else label.append(cb, `${name} ${counts[kind]}`);
     kinds.appendChild(label);
   }
   head.appendChild(kinds);
-  // Spelling isn't checked unless switched on here
-  const spell = el('label', undefined, 'spelling-toggle');
-  spell.title = `Check the titles against the ${dictionaryName()} dictionary`;
-  const spellBox = document.createElement('input');
-  spellBox.type = 'checkbox';
-  spellBox.checked = spellingWarningsOn;
-  spellBox.addEventListener('change', () => setSpellingWarnings(spellBox.checked));
-  spell.append(spellBox, spellingWarningsOn && !speller ? 'Spelling (loading…)' : 'Check spelling');
-  head.appendChild(spell);
   const missing = state.rows.filter(r => r.status === 'none').length;
   const notes = [];
   if (read < pdfs.size) notes.push(`reading title blocks… ${read} of ${pdfs.size}`);
@@ -4824,9 +4913,9 @@ function renderWarnings() {
     for (const { row, warnings } of shown) {
       const tr = el('tr');
       const who = el('td', undefined, 'drawing');
-      const link = el('button', row.token || 'Not in the register');
-      link.title = 'Show it in the table';
-      link.addEventListener('click', () => revealRow(row));
+      const link = el('button', row.isRegisterDetails ? 'Register details' : row.token || 'Not in the register');
+      link.title = row.isRegisterDetails ? 'Show them in the Project data tab' : 'Show it in the table';
+      link.addEventListener('click', () => (row.isRegisterDetails ? switchTab('project') : revealRow(row)));
       who.appendChild(link);
       if (row.rel) who.appendChild(el('span', displayPath(row.rel), 'muted'));
       const what = el('td');
@@ -4836,7 +4925,9 @@ function renderWarnings() {
         const btn = el('button', w.ignored ? 'Restore' : 'Ignore', 'ignore-warning');
         btn.title = w.ignored ? 'Count this warning again' : 'Hide this warning and leave it out of the counts (until what it says changes)';
         btn.addEventListener('click', () => setIgnored(row, w, !w.ignored));
-        li.append(el('span', WARNING_KINDS[w.kind], 'kind'), el('span', w.text, 'warning-text'), btn);
+        li.append(el('span', WARNING_KINDS[w.kind], 'kind'), el('span', w.text, 'warning-text'));
+        if (w.detail) li.appendChild(el('span', w.detail, 'warning-detail muted'));
+        li.appendChild(btn);
         ul.appendChild(li);
       }
       what.appendChild(ul);
@@ -4853,7 +4944,7 @@ async function exportWarnings(all) {
   const quote = v => `"${String(v || '').replace(/"/g, '""')}"`;
   const lines = [['Drawing', 'File', 'Kind', 'Warning'].map(quote).join(',')];
   for (const { row, warnings } of all) {
-    for (const w of warnings) lines.push([row.token || '', row.rel ? displayPath(row.rel) : '', WARNING_KINDS[w.kind], w.text].map(quote).join(','));
+    for (const w of warnings) lines.push([row.isRegisterDetails ? 'Register details' : row.token || '', row.rel ? displayPath(row.rel) : '', WARNING_KINDS[w.kind], w.detail ? `${w.text}. ${w.detail}` : w.text].map(quote).join(','));
   }
   try {
     const path = await Neutralino.os.showSaveDialog('Save warnings', {
