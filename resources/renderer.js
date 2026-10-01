@@ -46,7 +46,8 @@ const DEFAULT_SETTINGS = {
   theme: 'system',                  // 'light', 'dark', or 'system' to follow Windows
   apps: { word: '', excel: '', pdf: '', revit: '', autocad: '' }, // programs to open files with ('' = the system default)
   dictionary: null,                 // { aff, dic, name } of a Hunspell dictionary to use, or null for the built-in English (UK)
-  spellingWords: []                 // words added to the dictionary, for every folder
+  spellingWords: [],                // words added to the dictionary, for every folder
+  defaultView: null                 // what the table and Warnings tab show in a folder opened for the first time (null: the built-in view)
 };
 let settings = JSON.parse(JSON.stringify(DEFAULT_SETTINGS));
 
@@ -107,7 +108,7 @@ const state = {
   // { register number: mark }, header: { label: value }, highlight: 'RRGGBB' or null, register }
   // (header: the Issue No / Date edits it made; highlight: the colour to highlight the issue column
   // with; register: the file name of the register it's for)
-  layout: { folders: [], assignments: {}, titleEdits: {}, detailEdits: {}, projectEdits: {}, issueEdit: null, numberEdits: {}, numberHistory: {}, newEntries: [], moves: [], foldersToRemove: [], nameTemplate: DEFAULT_TEMPLATE, options: {}, ignoredWarnings: [], spellingWords: [] },
+  layout: { folders: [], assignments: {}, titleEdits: {}, detailEdits: {}, projectEdits: {}, issueEdit: null, numberEdits: {}, numberHistory: {}, newEntries: [], moves: [], foldersToRemove: [], nameTemplate: DEFAULT_TEMPLATE, options: {}, ignoredWarnings: [], spellingWords: [], view: null },
   drag: null,            // what's being dragged: { kind: 'drawing', token } or { kind: 'folder', folder }
   origOf: {},            // drawing number shown => number in the register (for renumbered drawings)
   movedTokens: new Set(), // register numbers of drawings with a pending move
@@ -455,7 +456,7 @@ function layoutPath() {
 }
 
 async function loadLayout() {
-  state.layout = { folders: [], assignments: {}, titleEdits: {}, detailEdits: {}, projectEdits: {}, issueEdit: null, numberEdits: {}, numberHistory: {}, newEntries: [], moves: [], foldersToRemove: [], nameTemplate: DEFAULT_TEMPLATE, options: {}, ignoredWarnings: [], spellingWords: [] };
+  state.layout = { folders: [], assignments: {}, titleEdits: {}, detailEdits: {}, projectEdits: {}, issueEdit: null, numberEdits: {}, numberHistory: {}, newEntries: [], moves: [], foldersToRemove: [], nameTemplate: DEFAULT_TEMPLATE, options: {}, ignoredWarnings: [], spellingWords: [], view: null };
   state.layoutBroken = false;
   if (!(await getStatsOrNull(layoutPath()))) return;
   try {
@@ -527,7 +528,8 @@ async function loadLayout() {
     const options = validFolderOptions(data.options);
     const ignoredWarnings = (Array.isArray(data.ignoredWarnings) ? data.ignoredWarnings : []).filter(k => typeof k === 'string');
     const spellingWords = (Array.isArray(data.spellingWords) ? data.spellingWords : []).filter(w => typeof w === 'string' && w);
-    state.layout = { folders: withAncestors(folders), assignments, titleEdits, detailEdits, projectEdits, issueEdit, otherDrafts: drafts, numberEdits, numberHistory, newEntries, moves, foldersToRemove, nameTemplate, options, ignoredWarnings, spellingWords };
+    const view = validView(data.view);
+    state.layout = { folders: withAncestors(folders), assignments, titleEdits, detailEdits, projectEdits, issueEdit, otherDrafts: drafts, numberEdits, numberHistory, newEntries, moves, foldersToRemove, nameTemplate, options, ignoredWarnings, spellingWords, view };
     appendLog(`📁 Loaded folder layout from ${LAYOUT_FILE} (${folders.length} folders).`);
   } catch (err) {
     state.layoutBroken = true;
@@ -593,6 +595,8 @@ async function saveLayout() {
     ignoredWarnings: state.layout.ignoredWarnings,
     // Words added to the spelling dictionary while working in this folder
     spellingWords: state.layout.spellingWords,
+    // What the table and Warnings tab showed when the folder was last used
+    view: state.layout.view || undefined,
     newEntries: state.layout.newEntries
   };
   try {
@@ -3287,6 +3291,7 @@ async function load() {
     state.picked.clear();
     state.choices.clear();
     await loadLayout();
+    applyView(state.layout.view || settings.defaultView || BUILT_IN_VIEW);
     syncProjectWords();
     renderOptions();
     renderNames(true);
@@ -4644,6 +4649,7 @@ function setSpellingWarnings(on) {
   spellingWarningsOn = on;
   if (on) ensureSpeller();
   render(new Set());
+  saveView();
 }
 
 spellingCheckbox.addEventListener('change', () => {
@@ -4783,6 +4789,7 @@ async function restoreAllIgnored() {
   if (!n) return;
   state.layout.ignoredWarnings = [];
   showIgnoredWarnings = false;
+  state.layout.view = currentView();
   appendLog(`👁 No longer ignoring ${n} warning${n === 1 ? '' : 's'}.`);
   await saveLayout();
   render(new Set());
@@ -4815,7 +4822,10 @@ function revealRow(row) {
   const find = () => [...rowsEl.querySelectorAll('tr')].find(tr => tr.dataset.key === row.key);
   if (!find()) {
     tableFilterInput.value = '';
-    if (row.status === 'none') hideEmptyCheckbox.checked = false;
+    if (row.status === 'none' && hideEmptyCheckbox.checked) {
+      hideEmptyCheckbox.checked = false;
+      saveView();
+    }
     render(new Set());
   }
   const tr = find();
@@ -4863,6 +4873,7 @@ function renderWarnings() {
       if (cb.checked) warningKindsShown.add(kind);
       else warningKindsShown.delete(kind);
       renderWarnings();
+      saveView();
     });
     if (spelling) {
       label.title = `Check titles, projects and clients against the ${dictionaryName()} dictionary`;
@@ -4884,6 +4895,7 @@ function renderWarnings() {
     cb.addEventListener('change', () => {
       showIgnoredWarnings = cb.checked;
       renderWarnings();
+      saveView();
     });
     toggle.append(cb, `Show ${ignoredCount} ignored`);
     head.appendChild(toggle);
@@ -4977,6 +4989,87 @@ onlyWarningsCheckbox.addEventListener('change', () => {
   if (onlyWarningsCheckbox.checked) loadFileDetails();
 });
 
+// ---------- view ----------
+// What the table and Warnings tab show: kept per folder in its layout file, so a folder opens as
+// it was left. A folder opened for the first time gets the default saved in the Options tab.
+const VIEW_CHECKBOXES = {
+  fileNumber: fileNumberCheckbox, fileTitles: fileTitlesCheckbox, fileRev: fileRevCheckbox, fileScale: fileScaleCheckbox,
+  fileSize: fileSizeCheckbox, fileProject: fileProjectCheckbox, fileClient: fileClientCheckbox, spelling: spellingCheckbox,
+  hideEmpty: hideEmptyCheckbox, stack: stackCheckbox, onlyWarnings: onlyWarningsCheckbox
+};
+// The page's own ticks, and the Warnings tab with every kind but spelling
+const BUILT_IN_VIEW = {
+  ...Object.fromEntries(Object.entries(VIEW_CHECKBOXES).map(([key, cb]) => [key, cb.checked])),
+  spellingWarnings: false, showIgnored: false, hiddenWarnings: []
+};
+
+function currentView() {
+  return {
+    ...Object.fromEntries(Object.entries(VIEW_CHECKBOXES).map(([key, cb]) => [key, cb.checked])),
+    spellingWarnings: spellingWarningsOn,
+    showIgnored: showIgnoredWarnings,
+    // the kinds unticked in the Warnings tab (spelling has its own tick)
+    hiddenWarnings: Object.keys(WARNING_KINDS).filter(kind => kind !== 'spelling' && !warningKindsShown.has(kind))
+  };
+}
+
+// A saved view, with anything missing or unusable left as built in (null if there's none)
+function validView(data) {
+  if (!data || typeof data !== 'object') return null;
+  const view = { ...BUILT_IN_VIEW };
+  for (const key of Object.keys(BUILT_IN_VIEW)) if (typeof data[key] === 'boolean') view[key] = data[key];
+  if (Array.isArray(data.hiddenWarnings)) view.hiddenWarnings = data.hiddenWarnings.filter(kind => kind in WARNING_KINDS && kind !== 'spelling');
+  return view;
+}
+
+// Ticks the boxes (the table is drawn after)
+function applyView(view) {
+  for (const [key, cb] of Object.entries(VIEW_CHECKBOXES)) cb.checked = view[key];
+  for (const [cb, hideClass] of fileDetailCheckboxes) tableEl.classList.toggle(hideClass, !cb.checked);
+  applyStacked();
+  spellingWarningsOn = view.spellingWarnings;
+  showIgnoredWarnings = view.showIgnored;
+  warningKindsShown.clear();
+  for (const kind of Object.keys(WARNING_KINDS)) if (!view.hiddenWarnings.includes(kind)) warningKindsShown.add(kind);
+  if (spellingCheckbox.checked || spellingWarningsOn) ensureSpeller();
+}
+
+// Keeps the view with the folder
+async function saveView() {
+  if (!state.registerPath || state.layoutBroken) return;
+  state.layout.view = currentView();
+  await saveLayout();
+}
+
+for (const cb of Object.values(VIEW_CHECKBOXES)) cb.addEventListener('change', saveView);
+
+// "Number, Titles; Stack, Only with warnings; Spelling warnings"
+function viewSummary(view) {
+  const ticked = keys => keys.filter(key => view[key]).map(key => VIEW_CHECKBOXES[key].parentElement.textContent.trim());
+  const parts = [
+    ticked(['fileNumber', 'fileTitles', 'fileRev', 'fileScale', 'fileSize', 'fileProject', 'fileClient', 'spelling']).join(', ') || 'no title block columns',
+    ticked(['hideEmpty', 'stack', 'onlyWarnings']).join(', ')
+  ];
+  const warnings = [];
+  if (view.spellingWarnings) warnings.push('spelling warnings');
+  if (view.hiddenWarnings.length) warnings.push(`hiding ${view.hiddenWarnings.map(kind => WARNING_KINDS[kind].toLowerCase()).join(', ')} warnings`);
+  if (view.showIgnored) warnings.push('ignored warnings shown');
+  if (warnings.length) parts.push(warnings.join(', '));
+  return parts.filter(Boolean).join('; ');
+}
+
+function renderViewOptions() {
+  const note = document.getElementById('opt-view-note');
+  if (!note) return;
+  note.textContent = settings.defaultView ? `New folders: ${viewSummary(settings.defaultView)}` : `New folders: the built-in view (${viewSummary(BUILT_IN_VIEW)})`;
+  document.getElementById('opt-view-reset').disabled = !settings.defaultView;
+}
+
+document.getElementById('opt-view-save').addEventListener('click', () =>
+  setOption('defaultView', currentView(), `Folders opened for the first time now show: ${viewSummary(currentView())}.`));
+document.getElementById('opt-view-reset').addEventListener('click', () =>
+  setOption('defaultView', null, 'Folders opened for the first time now show the built-in view.'));
+
 // ---------- options ----------
 const optFileDate = document.getElementById('opt-file-date');
 const optSsFolder = document.getElementById('opt-ss-folder');
@@ -5009,6 +5102,7 @@ function ssFolderProblem(name) {
 // Shows the current options
 function renderOptions() {
   renderSpellingOptions();
+  renderViewOptions();
   const today = new Date();
   const loaded = !!state.registerPath;
   fillSelect(optFileDate, FILE_DATE_FORMATS.map(f => [f, `${f.toUpperCase()}  (${datePrefix(today, f)})`]), folderOption('fileDate'));
@@ -5043,7 +5137,8 @@ async function loadSettings() {
       theme: ['light', 'dark'].includes(data.theme) ? data.theme : 'system',
       apps: Object.fromEntries(Object.keys(DEFAULT_SETTINGS.apps).map(k => [k, typeof apps[k] === 'string' ? apps[k] : ''])),
       dictionary: dict && typeof dict.aff === 'string' && typeof dict.dic === 'string' ? { aff: dict.aff, dic: dict.dic, name: String(dict.name || baseName(dict.dic)) } : null,
-      spellingWords: Array.isArray(data.spellingWords) ? data.spellingWords.filter(w => typeof w === 'string' && w) : []
+      spellingWords: Array.isArray(data.spellingWords) ? data.spellingWords.filter(w => typeof w === 'string' && w) : [],
+      defaultView: validView(data.defaultView)
     };
   } catch (e) {
     // nothing saved yet: the defaults
@@ -5617,7 +5712,7 @@ titlesFromRegisterBtn.addEventListener('click', () => copyTitles(false));
 for (const [field, btn] of Object.entries(detailCopyButtons)) btn.addEventListener('click', () => copyDetails(field));
 
 // Stacked comparisons: the in-file title's copy button moves into the register title's header
-stackCheckbox.addEventListener('change', () => {
+function applyStacked() {
   const stacked = stackCheckbox.checked;
   tableEl.classList.toggle('stacked', stacked);
   document.getElementById(stacked ? 'stacked-file-title-label' : 'file-title-th').prepend(titlesFromFilesBtn);
@@ -5629,6 +5724,9 @@ stackCheckbox.addEventListener('change', () => {
   titlesFromRegisterBtn.classList.toggle('right', !stacked);
   titlesFromRegisterBtn.textContent = stacked ? '↓' : '>';
   titlesFromFilesBtn.textContent = stacked ? '↑' : '<';
+}
+stackCheckbox.addEventListener('change', () => {
+  applyStacked();
   render(new Set());
 });
 

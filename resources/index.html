@@ -83,95 +83,112 @@
         <div id="warnings" class="muted">No register loaded.</div>
       </div>
       <div class="tab-panel" data-panel="options" role="tabpanel" hidden>
-        <div id="options" class="options-grid">
-          <section>
-            <h4>Dated files <span class="muted">(this folder)</span></h4>
-            <div class="option-note">The pattern for new drawing names is in the File names tab</div>
-            <div class="option-row">
-              <label for="opt-file-date">Date in front of file names</label>
-              <select id="opt-file-date"></select>
-            </div>
-            <div class="option-note">For superseded drawings, register backups and exported register PDFs</div>
-            <div class="option-row">
-              <label for="opt-ss-folder">Superseded drawings folder</label>
-              <input id="opt-ss-folder" class="short-input" autocomplete="off" spellcheck="false" />
-            </div>
-            <div id="opt-ss-note" class="option-note"></div>
-          </section>
-          <section>
-            <h4>Scanning <span class="muted">(this folder)</span></h4>
-            <label class="inline option-check"><input type="checkbox" id="opt-recursive" /> Include subfolders on disk</label>
-            <div class="option-note">Also finds drawings in any subfolder (not the superseded ones); they stay where they are unless put in another folder</div>
-            <h4>New issues <span class="muted">(this folder)</span></h4>
-            <div class="option-note">Used when the register doesn't already show a style</div>
-            <div class="option-row">
-              <label for="opt-issue-numbering">Issue numbering</label>
-              <select id="opt-issue-numbering"></select>
-            </div>
-            <div class="option-row">
-              <label for="opt-issue-date">Issue date format</label>
-              <select id="opt-issue-date"></select>
-            </div>
-            <div class="option-row">
-              <label for="opt-highlight">Issue highlight colour</label>
-              <input type="color" id="opt-highlight" class="highlight-color" />
-            </div>
-            <h4>Appearance <span class="muted">(all folders)</span></h4>
-            <div class="option-row">
-              <label for="opt-theme">Theme</label>
-              <select id="opt-theme">
-                <option value="system">Same as System</option>
-                <option value="light">Light</option>
-                <option value="dark">Dark</option>
-              </select>
-            </div>
-            <h4>Spelling <span class="muted">(all folders)</span></h4>
-            <div class="option-row">
-              <label>Dictionary</label>
-              <span id="opt-dict-name" class="dict-name"></span>
-            </div>
-            <div class="option-row">
-              <button id="opt-dict-load" title="Use a Hunspell dictionary (.aff and .dic files) for another language">Load dictionary…</button>
-              <button id="opt-dict-reset" title="Go back to the built-in English (UK) dictionary">Use built-in</button>
-            </div>
-            <div id="opt-dict-note" class="option-note"></div>
-          </section>
-          <section>
-            <h4>Open files with <span class="muted">(all folders)</span></h4>
-            <div class="option-note">Leave blank to use the program Windows opens them with</div>
-            <div class="option-row app-row" data-app="word">
-              <label for="opt-app-word">Word registers</label>
-              <input id="opt-app-word" class="app-path" placeholder="System default" spellcheck="false" />
-              <button class="app-browse" title="Choose the program">Browse…</button>
-              <button class="app-clear" title="Use the system default">✕</button>
-            </div>
-            <div class="option-row app-row" data-app="excel">
-              <label for="opt-app-excel">Excel registers</label>
-              <input id="opt-app-excel" class="app-path" placeholder="System default" spellcheck="false" />
-              <button class="app-browse" title="Choose the program">Browse…</button>
-              <button class="app-clear" title="Use the system default">✕</button>
-            </div>
-            <div class="option-row app-row" data-app="pdf">
-              <label for="opt-app-pdf">PDF drawings</label>
-              <input id="opt-app-pdf" class="app-path" placeholder="System default" spellcheck="false" />
-              <button class="app-browse" title="Choose the program">Browse…</button>
-              <button class="app-clear" title="Use the system default">✕</button>
-            </div>
-            <div class="option-row app-row" data-app="revit">
-              <label for="opt-app-revit" title=".rvt, .rfa and .rte files">Revit models</label>
-              <input id="opt-app-revit" class="app-path" placeholder="System default" spellcheck="false" />
-              <button class="app-browse" title="Choose the program">Browse…</button>
-              <button class="app-clear" title="Use the system default">✕</button>
-            </div>
-            <div class="option-row app-row" data-app="autocad">
-              <label for="opt-app-autocad" title=".dwg and .dxf files">CAD drawings</label>
-              <input id="opt-app-autocad" class="app-path" placeholder="System default" spellcheck="false" />
-              <button class="app-browse" title="Choose the program">Browse…</button>
-              <button class="app-clear" title="Use the system default">✕</button>
-            </div>
-            <div class="option-note">Revit and AutoCAD are for the source files opened from a drawing's right-click menu.</div>
-            <div class="option-note">"This folder" options are saved in the folder's drawing-renamer.json; the others are kept by the app for every folder.</div>
-          </section>
+        <div id="options">
+          <div class="options-grid">
+            <section>
+              <h4>Dated files <span class="muted">(this folder)</span></h4>
+              <div class="option-note">The pattern for new drawing names is in the File names tab</div>
+              <div class="option-row">
+                <label for="opt-file-date">Date in front of file names</label>
+                <select id="opt-file-date"></select>
+              </div>
+              <div class="option-note">For superseded drawings, register backups and exported register PDFs</div>
+              <div class="option-row">
+                <label for="opt-ss-folder">Superseded drawings folder</label>
+                <input id="opt-ss-folder" class="short-input" autocomplete="off" spellcheck="false" />
+              </div>
+              <div id="opt-ss-note" class="option-note"></div>
+            </section>
+            <section>
+              <h4>Scanning <span class="muted">(this folder)</span></h4>
+              <label class="inline option-check"><input type="checkbox" id="opt-recursive" /> Include subfolders on disk</label>
+              <div class="option-note">Also finds drawings in any subfolder (not the superseded ones); they stay where they are unless put in another folder</div>
+            </section>
+            <section>
+              <h4>New issues <span class="muted">(this folder)</span></h4>
+              <div class="option-note">Used when the register doesn't already show a style</div>
+              <div class="option-row">
+                <label for="opt-issue-numbering">Issue numbering</label>
+                <select id="opt-issue-numbering"></select>
+              </div>
+              <div class="option-row">
+                <label for="opt-issue-date">Issue date format</label>
+                <select id="opt-issue-date"></select>
+              </div>
+              <div class="option-row">
+                <label for="opt-highlight">Issue highlight colour</label>
+                <input type="color" id="opt-highlight" class="highlight-color" />
+              </div>
+            </section>
+            <section>
+              <h4>Appearance <span class="muted">(all folders)</span></h4>
+              <div class="option-row">
+                <label for="opt-theme">Theme</label>
+                <select id="opt-theme">
+                  <option value="system">Same as System</option>
+                  <option value="light">Light</option>
+                  <option value="dark">Dark</option>
+                </select>
+              </div>
+            </section>
+            <section>
+              <h4>Spelling <span class="muted">(all folders)</span></h4>
+              <div class="option-row">
+                <label>Dictionary</label>
+                <span id="opt-dict-name" class="dict-name"></span>
+              </div>
+              <div class="option-row">
+                <button id="opt-dict-load" title="Use a Hunspell dictionary (.aff and .dic files) for another language">Load dictionary…</button>
+                <button id="opt-dict-reset" title="Go back to the built-in English (UK) dictionary">Use built-in</button>
+              </div>
+              <div id="opt-dict-note" class="option-note"></div>
+            </section>
+            <section>
+              <h4>Table view <span class="muted">(new folders)</span></h4>
+              <div class="option-note">Each folder keeps the columns and filters it was last shown with, in the table and the Warnings tab; a folder opened for the first time starts with these</div>
+              <div class="option-row">
+                <button id="opt-view-save" title="Open new folders with the columns and filters showing now">Save current view as default</button>
+                <button id="opt-view-reset" title="Open new folders with the app's own view">Use built-in</button>
+              </div>
+              <div id="opt-view-note" class="option-note"></div>
+            </section>
+            <section>
+              <h4>Open files with <span class="muted">(all folders)</span></h4>
+              <div class="option-note">Leave blank to use the program Windows opens them with</div>
+              <div class="option-row app-row" data-app="word">
+                <label for="opt-app-word">Word registers</label>
+                <input id="opt-app-word" class="app-path" placeholder="System default" spellcheck="false" />
+                <button class="app-browse" title="Choose the program" aria-label="Choose the program"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M1.5 3.5h4.5l1.5 1.5h7v7.5h-13z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg></button>
+                <button class="app-clear" title="Use the system default">✕</button>
+              </div>
+              <div class="option-row app-row" data-app="excel">
+                <label for="opt-app-excel">Excel registers</label>
+                <input id="opt-app-excel" class="app-path" placeholder="System default" spellcheck="false" />
+                <button class="app-browse" title="Choose the program" aria-label="Choose the program"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M1.5 3.5h4.5l1.5 1.5h7v7.5h-13z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg></button>
+                <button class="app-clear" title="Use the system default">✕</button>
+              </div>
+              <div class="option-row app-row" data-app="pdf">
+                <label for="opt-app-pdf">PDF drawings</label>
+                <input id="opt-app-pdf" class="app-path" placeholder="System default" spellcheck="false" />
+                <button class="app-browse" title="Choose the program" aria-label="Choose the program"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M1.5 3.5h4.5l1.5 1.5h7v7.5h-13z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg></button>
+                <button class="app-clear" title="Use the system default">✕</button>
+              </div>
+              <div class="option-row app-row" data-app="revit">
+                <label for="opt-app-revit" title=".rvt, .rfa and .rte files">Revit models</label>
+                <input id="opt-app-revit" class="app-path" placeholder="System default" spellcheck="false" />
+                <button class="app-browse" title="Choose the program" aria-label="Choose the program"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M1.5 3.5h4.5l1.5 1.5h7v7.5h-13z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg></button>
+                <button class="app-clear" title="Use the system default">✕</button>
+              </div>
+              <div class="option-row app-row" data-app="autocad">
+                <label for="opt-app-autocad" title=".dwg and .dxf files">CAD drawings</label>
+                <input id="opt-app-autocad" class="app-path" placeholder="System default" spellcheck="false" />
+                <button class="app-browse" title="Choose the program" aria-label="Choose the program"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M1.5 3.5h4.5l1.5 1.5h7v7.5h-13z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg></button>
+                <button class="app-clear" title="Use the system default">✕</button>
+              </div>
+              <div class="option-note">Revit and AutoCAD are for the source files opened from a drawing's right-click menu.</div>
+            </section>
+          </div>
+          <div class="option-note options-foot">"This folder" options are saved in the folder's drawing-renamer.json; the others are kept by the app for every folder.</div>
         </div>
       </div>
       <!-- What the table shows; under every tab -->
