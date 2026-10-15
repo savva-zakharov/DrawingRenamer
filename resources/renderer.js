@@ -86,7 +86,8 @@ const state = {
   xlsxPlaces: {},        // Excel register: code => where its cells are (to check renumbering)
   excelAvailable: null,  // whether Excel can be driven to export PDFs (checked on first use)
   registerModified: null,
-  targetDir: null,       // directory containing the register (the parent of any drawing folders)
+  targetDir: null,       // the working folder: usually the register's (the parent of any drawing folders)
+  registerElsewhere: false, // the register is in another folder, chosen for this one
   tokenMap: {},          // drawing number => title, as in the register
   registerDetails: {},   // drawing number => { scale, size }, as in the register
   registerProject: null, // { heading, fields: [{ key, label, value }], description, client } from the register's header
@@ -183,6 +184,29 @@ function dirName(filePath) {
   return filePath.replace(/[\\/][^\\/]*$/, '');
 }
 
+const samePath = (a, b) => a.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase() === b.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+
+// target from dir: "../Registers/Register.docx", or the whole path on another drive
+function relativePath(dir, target) {
+  const a = dir.replace(/\\/g, '/').replace(/\/+$/, '').split('/');
+  const b = target.replace(/\\/g, '/').split('/');
+  if (a[0].toLowerCase() !== b[0].toLowerCase()) return b.join('/');
+  let i = 0;
+  while (i < a.length && i < b.length - 1 && a[i].toLowerCase() === b[i].toLowerCase()) i++;
+  return [...a.slice(i).map(() => '..'), ...b.slice(i)].join('/');
+}
+
+// A relative path from dir, made whole ("../x" climbs out of dir)
+function resolvePath(dir, path) {
+  if (/^([a-z]:)?[\\/]/i.test(path)) return path.replace(/\\/g, '/');
+  const parts = dir.replace(/\\/g, '/').replace(/\/+$/, '').split('/');
+  for (const part of path.replace(/\\/g, '/').split('/')) {
+    if (part === '..') parts.pop();
+    else if (part && part !== '.') parts.push(part);
+  }
+  return parts.join('/');
+}
+
 function baseName(filePath) {
   return filePath.split(/[\\/]/).pop();
 }
@@ -231,16 +255,34 @@ async function findRegister(dir) {
   return found ? joinPath(dir, found) : null;
 }
 
+// The register a folder's layout file says to use from another folder (null if none, or it's gone)
+async function externalRegisterOf(dir) {
+  try {
+    const data = JSON.parse(await nfs.readFile(joinPath(dir, LAYOUT_FILE)));
+    if (typeof data.externalRegister !== 'string' || !data.externalRegister) return null;
+    const path = resolvePath(dir, data.externalRegister);
+    const stats = await getStatsOrNull(path);
+    if (stats && stats.isFile && registerKindOf(baseName(path))) return path;
+    appendLog(`⚠️ The register chosen for this folder isn't there any more: ${displayPath(path)}. Using this folder's own instead.`);
+  } catch (e) {
+    // no layout file (or one that can't be read: loadLayout says so)
+  }
+  return null;
+}
+
+// { registerPath, targetDir }: a register file works in its own folder; a folder uses the register
+// chosen for it from another folder, else its own, else (none) its drawings' title blocks
 async function resolveRegisterPath(input) {
   const stats = await getStatsOrNull(input);
   if (!stats) throw new Error('Provided register path does not exist.');
   if (stats.isFile) {
     if (!registerKindOf(baseName(input))) throw new Error('Provided file is not a Word (.docx), Excel (.xlsx, .xlsm) or PDF register.');
-    return input;
+    return { registerPath: input, targetDir: dirName(input) };
   }
   if (stats.isDirectory) {
-    // Without a register, the folder itself: its drawings are read from their title blocks
-    return (await findRegister(input)) || input.replace(/[\\/]+$/, '');
+    const dir = input.replace(/[\\/]+$/, '');
+    const registerPath = (await externalRegisterOf(dir)) || (await findRegister(dir)) || dir;
+    return { registerPath, targetDir: dir };
   }
   throw new Error('Unsupported path type.');
 }
@@ -529,7 +571,8 @@ async function loadLayout() {
     const ignoredWarnings = (Array.isArray(data.ignoredWarnings) ? data.ignoredWarnings : []).filter(k => typeof k === 'string');
     const spellingWords = (Array.isArray(data.spellingWords) ? data.spellingWords : []).filter(w => typeof w === 'string' && w);
     const view = validView(data.view);
-    state.layout = { folders: withAncestors(folders), assignments, titleEdits, detailEdits, projectEdits, issueEdit, otherDrafts: drafts, numberEdits, numberHistory, newEntries, moves, foldersToRemove, nameTemplate, options, ignoredWarnings, spellingWords, view };
+    const externalRegister = typeof data.externalRegister === 'string' && data.externalRegister ? data.externalRegister : null;
+    state.layout = { folders: withAncestors(folders), assignments, titleEdits, detailEdits, projectEdits, issueEdit, otherDrafts: drafts, numberEdits, numberHistory, newEntries, moves, foldersToRemove, nameTemplate, options, ignoredWarnings, spellingWords, view, externalRegister };
     appendLog(`📁 Loaded folder layout from ${LAYOUT_FILE} (${folders.length} folders).`);
   } catch (err) {
     state.layoutBroken = true;
@@ -576,6 +619,8 @@ async function saveLayout() {
   const data = {
     version: 1,
     register: baseName(state.registerPath),
+    // A register in another folder chosen for this one (relative to this folder where it can be)
+    externalRegister: state.layout.externalRegister || undefined,
     // The pattern for new file names ({number}, {title}, {rev}, {filerev})
     nameTemplate: state.layout.nameTemplate,
     // Naming and numbering options set in the Options tab
@@ -2514,13 +2559,16 @@ function pendingIssue() {
     canEditRegister() && state.registerIssues && state.registerIssues.columns[issue.index] ? issue : null;
 }
 
-// A drawing's marks before column `index`: { prev, prevDate } (the last one), and the mark already in it
+// A drawing's marks before column `index`: { prev, prevDate } (the last one), and the mark already
+// in it. An Excel register's earlier sheets are looked at when this one has no mark before it.
 function previousMark(token, index) {
   const info = state.registerIssues;
   const marks = (info.marks[token] || []);
   for (let i = index - 1; i >= 0; i--) {
     if (marks[i]) return { prev: marks[i], prevDate: shortDate(info.columns[i]), current: marks[index] || '' };
   }
+  const old = info.earlier && info.earlier[token];
+  if (old) return { prev: old.mark, prevDate: `${shortDate(old.column)} on ${old.sheet}${old.as !== token ? ` as ${old.as}` : ''}`, current: marks[index] || '' };
   return { prev: '', prevDate: '', current: marks[index] || '' };
 }
 
@@ -3227,13 +3275,15 @@ async function stopWatching() {
 // Watch the top folder and every drawing folder that exists
 async function syncWatchers() {
   if (state.pollTimer) return;
-  const wanted = [];
+  const wanted = new Map(); // key => folder
   for (const dir of ['', ...drawingFolders()]) {
     const stats = await getStatsOrNull(absPath(dir));
-    if (stats && stats.isDirectory) wanted.push(dir);
+    if (stats && stats.isDirectory) wanted.set(dir, absPath(dir));
   }
+  // A register in another folder: that folder too, so saving the register there shows here
+  if (state.registerElsewhere) wanted.set('#register', dirName(state.registerPath));
   for (const [dir, id] of state.watchers) {
-    if (wanted.includes(dir)) continue;
+    if (wanted.has(dir)) continue;
     try {
       await nfs.removeWatcher(id);
     } catch (e) {
@@ -3241,10 +3291,10 @@ async function syncWatchers() {
     }
     state.watchers.delete(dir);
   }
-  for (const dir of wanted) {
+  for (const [dir, folder] of wanted) {
     if (state.watchers.has(dir)) continue;
     try {
-      state.watchers.set(dir, await nfs.createWatcher(absPath(dir)));
+      state.watchers.set(dir, await nfs.createWatcher(folder));
     } catch (err) {
       // Fall back to polling if the native watcher is unavailable
       state.pollTimer = setInterval(refresh, 3000);
@@ -3266,7 +3316,7 @@ async function load() {
     return;
   }
   try {
-    const registerPath = await resolveRegisterPath(input);
+    const { registerPath, targetDir } = await resolveRegisterPath(input);
     const pathStats = await getStatsOrNull(registerPath);
     const titleBlocks = !!(pathStats && pathStats.isDirectory);
     await stopWatching();
@@ -3274,7 +3324,8 @@ async function load() {
       registerPath,
       registerKind: titleBlocks ? 'titleblock' : registerKindOf(baseName(registerPath)),
       registerModified: null,
-      targetDir: titleBlocks ? registerPath : dirName(registerPath),
+      targetDir,
+      registerElsewhere: !titleBlocks && !samePath(dirName(registerPath), targetDir),
       titleBlockTokens: new Map(),
       tokenMap: {},
       titles: {},
@@ -3303,6 +3354,8 @@ async function load() {
       state.registerIssues = null;
       state.registerInfo = '';
       state.registerXml = null;
+    } else if (state.registerElsewhere) {
+      appendLog(`📚 Reading the ${REGISTER_KIND_NAMES[state.registerKind]} register chosen for ${displayPath(targetDir)}, from another folder: ${displayPath(registerPath)} ...`);
     } else appendLog(`📚 Reading ${REGISTER_KIND_NAMES[state.registerKind]} register: ${registerPath} ...`);
     if (!titleBlocks && state.registerKind !== 'docx' && await findWordTwin()) {
       appendLog(`ℹ️ A Word version of this register is next to it; load it (or the folder) to edit titles.`);
@@ -3843,10 +3896,11 @@ async function saveToWord() {
 async function excelPdfPath() {
   const same = registerPdfPath();
   if (await getStatsOrNull(same)) return same;
-  const pdfs = (await listFiles(state.targetDir))
+  const dir = dirName(state.registerPath);
+  const pdfs = (await listFiles(dir))
     .filter(f => /register/i.test(f) && f.toLowerCase().endsWith('.pdf'))
     .sort((a, b) => a.localeCompare(b));
-  return pdfs.length ? joinPath(state.targetDir, pdfs[pdfs.length - 1]) : same;
+  return pdfs.length ? joinPath(dir, pdfs[pdfs.length - 1]) : same;
 }
 
 async function checkExcelAvailable() {
@@ -4224,6 +4278,8 @@ const resetFoldersBtn = document.getElementById('reset-folders');
 const sortRegisterBtn = document.getElementById('sort-register');
 const discardChangesBtn = document.getElementById('discard-changes');
 const openFolderBtn = document.getElementById('open-folder');
+// Choose register... turns into Detach register while a register from another folder is in use
+const chooseRegisterBtn = document.getElementById('choose-file');
 
 function updateToolbarActions() {
   const loaded = !!state.registerPath && !state.busy;
@@ -4234,6 +4290,9 @@ function updateToolbarActions() {
   const pending = state.registerPath ? unsavedRegisterChanges() : { total: 0 };
   discardChangesBtn.disabled = !loaded || !pending.total;
   discardChangesBtn.title = pending.total ? `Forget ${pending.summary}` : 'There are no unsaved register changes';
+  chooseRegisterBtn.textContent = state.registerElsewhere ? 'Detach register' : 'Choose register...';
+  chooseRegisterBtn.disabled = state.registerElsewhere && !loaded;
+  chooseRegisterBtn.title = state.registerElsewhere ? `Stop using ${displayPath(state.registerPath)} for this folder: use its own register, or read its drawings' title blocks` : '';
   openFolderBtn.disabled = !state.targetDir;
   openFolderBtn.title = state.targetDir ? `Open ${displayPath(state.targetDir)} in Explorer` : 'Load a register first';
 }
@@ -5124,7 +5183,7 @@ function renderOptions() {
     const input = row.querySelector('.app-path');
     input.value = settings.apps[row.dataset.app];
     input.title = input.value || `Opens with the program Windows uses for ${APP_NAMES[row.dataset.app]}`;
-    row.querySelector('.app-clear').disabled = !input.value;
+    showAppClear(row);
   }
 }
 
@@ -5226,6 +5285,13 @@ optIssueNumbering.addEventListener('change', () => setFolderOption('issueNumberi
 optIssueDate.addEventListener('change', () => setFolderOption('issueDateFormat', optIssueDate.value, `New issues are dated like ${RegisterCore.formatDate(todayParts(), optIssueDate.value)} when the register doesn't show a format.`));
 optHighlight.addEventListener('change', () => setFolderOption('highlightColor', optHighlight.value.toUpperCase(), `New issues are highlighted in ${optHighlight.value.toUpperCase()} when the register doesn't already highlight them.`));
 
+// The ✕ (back to the system default) shows inside the box only while it has a path
+function showAppClear(row) {
+  const hasPath = !!row.querySelector('.app-path').value;
+  row.querySelector('.app-clear').hidden = !hasPath;
+  row.querySelector('.app-field').classList.toggle('has-path', hasPath);
+}
+
 for (const row of document.querySelectorAll('.app-row')) {
   const app = row.dataset.app;
   const input = row.querySelector('.app-path');
@@ -5234,6 +5300,7 @@ for (const row of document.querySelectorAll('.app-row')) {
     return setOption('apps', apps, apps[app] ? `${APP_NAMES[app]} now open with ${apps[app]}.` : `${APP_NAMES[app]} now open with the system default.`);
   };
   input.addEventListener('change', () => setApp(input.value));
+  input.addEventListener('input', () => showAppClear(row));
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') input.blur();
   });
@@ -5680,6 +5747,7 @@ document.getElementById('choose').addEventListener('click', async () => {
 });
 
 document.getElementById('choose-file').addEventListener('click', async () => {
+  if (state.registerElsewhere) return detachRegister();
   try {
     const files = await Neutralino.os.showOpenDialog('Select drawing register', {
       filters: [
@@ -5689,10 +5757,7 @@ document.getElementById('choose-file').addEventListener('click', async () => {
         { name: 'PDF files', extensions: ['pdf'] }
       ]
     });
-    if (files && files.length) {
-      registerInput.value = files[0];
-      load();
-    }
+    if (files && files.length) await chooseRegister(files[0]);
   } catch (err) {
     appendLog('Could not open file dialog: ' + (err.message || err));
   }
@@ -5702,6 +5767,34 @@ document.getElementById('load').addEventListener('click', load);
 registerInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') load();
 });
+
+// A folder without a register of its own (or already using one from elsewhere) keeps working in
+// that folder with a register chosen from another; otherwise the register's folder is opened
+async function chooseRegister(file) {
+  const keepFolder = state.targetDir && !state.busy && !state.layoutBroken && (isTitleBlockMode() || state.registerElsewhere);
+  if (!keepFolder) {
+    registerInput.value = file;
+    return load();
+  }
+  const inFolder = samePath(dirName(file), state.targetDir);
+  if (inFolder) delete state.layout.externalRegister;
+  else state.layout.externalRegister = relativePath(state.targetDir, file);
+  await saveLayout();
+  if (!inFolder) appendLog(`📌 ${displayPath(state.targetDir)} now uses the register ${displayPath(file)}.`);
+  // Its own register is found again from the folder; one from elsewhere from the layout file
+  registerInput.value = inFolder ? file : state.targetDir;
+  return load();
+}
+
+// Back to the folder's own register, or its title blocks
+async function detachRegister() {
+  if (!state.registerElsewhere || state.busy) return;
+  delete state.layout.externalRegister;
+  await saveLayout();
+  appendLog(`📌 ${displayPath(state.targetDir)} no longer uses ${displayPath(state.registerPath)}.`);
+  registerInput.value = state.targetDir;
+  return load();
+}
 
 hideEmptyCheckbox.addEventListener('change', () => render(new Set()));
 

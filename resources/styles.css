@@ -441,5 +441,13 @@ table.name-preview .same{ color:var(--muted) }
 .warnings-list .warning-detail{ display:block; font-size:11px; margin-top:1px }
 .spell-hint{ margin-top:3px; font-size:11px; color:var(--muted) }
 .spell-hint .misspelled{ color:var(--fg) }
-.option-row .app-browse{ display:inline-flex; align-items:center; padding:2px 6px }
+/* The program path with its folder button inside the box, on the right */
+.option-row .app-field{ flex:1; min-width:0; position:relative; display:flex }
+.option-row .app-field .app-path{ flex:1; padding-right:26px }
+.option-row .app-field.has-path .app-path{ padding-right:46px }
+.option-row .app-actions{ position:absolute; right:2px; top:50%; transform:translateY(-50%); display:flex; align-items:center }
+.option-row .app-actions button{ display:flex; align-items:center; padding:3px 4px; border:none; background:none; color:var(--muted); cursor:pointer; line-height:14px; font-size:12px }
+.option-row .app-actions button[hidden]{ display:none }
+.option-row .app-actions button:hover{ color:var(--accent) }
+.option-row .app-actions .app-clear:hover{ color:var(--bad) }
 .option-row .app-browse svg{ display:block }

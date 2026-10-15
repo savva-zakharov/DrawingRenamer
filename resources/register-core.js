@@ -413,9 +413,10 @@
   }
 
   // parts: { workbook, rels, sharedStrings, styles, sheets: { 'xl/worksheets/sheet1.xml': xml } }
-  // Returns { titles, details, places, sheet, path, issue } for the current register sheet: the
-  // one with the highest issue number, or the last sheet with drawings when there are no issue
-  // numbers. details: { code: { scale, size } }.
+  // Returns { titles, details, places, sheet, path, issue, earlier } for the current register
+  // sheet: the one with the highest issue number, or the last sheet with drawings when there are no
+  // issue numbers. details: { code: { scale, size } }. earlier: the other sheets with drawings,
+  // newest first, as [{ sheet, path, places, issue }].
   function readXlsxRegister(parts) {
     const sharedStrings = parts.sharedStrings
       ? findElements(parts.sharedStrings, 'si').map(si => stringItemText(si.xml))
@@ -435,18 +436,25 @@
       if (path && parts.sheets[path]) sheets.push({ name, path });
     }
     let best = null;
+    const all = [];
     sheets.forEach((sheet, order) => {
       const found = readSheetDrawings(readSheetRows(parts.sheets[sheet.path], sharedStrings, zeroPad));
       if (!Object.keys(found.titles).length) return;
       const candidate = { titles: found.titles, details: found.details, places: found.places, sheet: sheet.name, path: sheet.path, issue: found.issue, order };
+      all.push(candidate);
       if (!best) best = candidate;
       else if (candidate.issue !== null && best.issue !== null) {
         if (candidate.issue >= best.issue) best = candidate;
       } else if (candidate.issue !== null || best.issue === null) best = candidate;
     });
+    // Older sheets: lower issue numbers (those without one by their place in the workbook)
+    const age = c => [c.issue === null ? -Infinity : c.issue, c.order];
+    const earlier = all.filter(c => c !== best)
+      .sort((a, b) => { const [ai, ao] = age(a); const [bi, bo] = age(b); return bi - ai || bo - ao; })
+      .map(c => ({ sheet: c.sheet, path: c.path, places: c.places, issue: c.issue }));
     return best
-      ? { titles: best.titles, details: best.details, places: best.places, sheet: best.sheet, path: best.path, issue: best.issue }
-      : { titles: {}, details: {}, places: {}, sheet: null, path: null, issue: null };
+      ? { titles: best.titles, details: best.details, places: best.places, sheet: best.sheet, path: best.path, issue: best.issue, earlier }
+      : { titles: {}, details: {}, places: {}, sheet: null, path: null, issue: null, earlier: [] };
   }
 
   // --------------------
@@ -1664,13 +1672,53 @@
   // The same for the current register sheet of an Excel register: columns from the first
   // DAY / MONTH / YEAR block, running from the REVISION NUMBER heading to the last cell the
   // DAY row has (used or not); blocks: [{ day, month, year }] row numbers of every repeat of it.
+  // Registers that start a new sheet now and then keep the older issues on the earlier sheets:
+  // earlier is each drawing's last mark there, { code: { mark, column, sheet, as } }, for the
+  // drawings with no mark on this sheet before an issue. A drawing whose number has its fields in
+  // another order on an older sheet (PAWE-DA-BF-XX-DR-A-6011 for PAWE-BF-XX-DR-DA-A-6011) is the
+  // same drawing when no other has those fields; as is the number it had there.
   function readXlsxIssues(parts) {
     const reg = readXlsxRegister(parts);
-    const empty = { columns: [], latest: -1, marks: {}, blocks: [], highlight: null };
+    const empty = { columns: [], latest: -1, marks: {}, blocks: [], highlight: null, earlier: {} };
     if (!reg.path) return empty;
-    const sheetXml = parts.sheets[reg.path];
     const sharedStrings = parts.sharedStrings ? findElements(parts.sharedStrings, 'si').map(si => stringItemText(si.xml)) : [];
-    const rows = readSheetRows(sheetXml, sharedStrings, zeroPadStyles(parts.styles));
+    const zeroPad = zeroPadStyles(parts.styles);
+    const current = readSheetIssues(parts.sheets[reg.path], reg.places, sharedStrings, zeroPad);
+    if (!current) return empty;
+    const { columns, latest, marks, blocks, cols } = current;
+    const earlier = {};
+    for (const sheet of reg.earlier) {
+      const old = readSheetIssues(parts.sheets[sheet.path], sheet.places, sharedStrings, zeroPad);
+      if (!old) continue;
+      const reordered = makeReorderedMatcher(Object.keys(old.marks));
+      for (const code of Object.keys(marks)) {
+        if (earlier[code]) continue;
+        const as = old.marks[code] ? code : reordered(code);
+        const list = as ? old.marks[as] : [];
+        for (let i = list.length - 1; i >= 0; i--) {
+          if (list[i] && old.columns[i]) {
+            earlier[code] = { mark: list[i], column: old.columns[i], sheet: sheet.sheet, as };
+            break;
+          }
+        }
+      }
+    }
+    // Whether the latest issue column is highlighted, and in what colour
+    let highlight = null;
+    if (latest >= 0) {
+      const sheetXml = parts.sheets[reg.path];
+      const book = styleBook(parts.styles);
+      const rowsOf = blocks.flatMap(b => [b.day, b.month, b.year]).concat(Object.values(reg.places).map(pl => pl.row));
+      const found = highlightedCells(cellStyles(sheetXml), book, cols[latest], rowsOf, cols[0]);
+      if (found.length) highlight = mostCommon(found.map(f => f.color));
+    }
+    return { columns, latest, marks, blocks, highlight, earlier };
+  }
+
+  // One sheet's issue columns and marks (see readXlsxIssues), or null when it has no DAY / MONTH /
+  // YEAR block. places: { code: { row } } of the sheet's drawings. cols: the columns' cell indexes.
+  function readSheetIssues(sheetXml, places, sharedStrings, zeroPad) {
+    const rows = readSheetRows(sheetXml, sharedStrings, zeroPad);
     const byRow = {};
     for (const r of rows) byRow[r.row] = r.cells;
     const labelAt = (cells, word) => Object.keys(cells).map(Number).find(c => norm(cells[c]) === word);
@@ -1682,7 +1730,7 @@
       const year = rows.slice(i + 1, i + 4).find(x => labelAt(x.cells, 'YEAR') === col);
       if (month && year) blocks.push({ day: r.row, month: month.row, year: year.row, labelCol: col });
     });
-    if (!blocks.length) return empty;
+    if (!blocks.length) return null;
     let startCol;
     for (const r of rows) {
       const c = Object.keys(r.cells).map(Number).find(k => /^REVISION( NUMBER| ISSUED)?$|^ISSUE DATE$/.test(norm(r.cells[k])));
@@ -1701,16 +1749,8 @@
     const { columns, latest } = issueColumns(cols.map(c => at(first.day, c)), cols.map(c => at(first.month, c)), cols.map(c => at(first.year, c)));
     columns.forEach((column, i) => { column.col = cols[i]; });
     const marks = {};
-    for (const [code, place] of Object.entries(reg.places)) marks[code] = cols.map(c => at(place.row, c));
-    // Whether the latest issue column is highlighted, and in what colour
-    let highlight = null;
-    if (latest >= 0) {
-      const book = styleBook(parts.styles);
-      const rowsOf = blocks.flatMap(b => [b.day, b.month, b.year]).concat(Object.values(reg.places).map(pl => pl.row));
-      const found = highlightedCells(cellStyles(sheetXml), book, cols[latest], rowsOf, cols[0]);
-      if (found.length) highlight = mostCommon(found.map(f => f.color));
-    }
-    return { columns, latest, marks, blocks, highlight };
+    for (const [code, place] of Object.entries(places)) marks[code] = cols.map(c => at(place.row, c));
+    return { columns, latest, marks, blocks, cols };
   }
 
   function mostCommon(values) {
