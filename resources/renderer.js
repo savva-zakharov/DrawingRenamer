@@ -360,7 +360,8 @@ async function readFileDetails(filePath, worker) {
   const doc = await PDFJS.getDocument(worker ? { data, worker } : { data });
   try {
     const sheet = await titleBlockItems(await doc.getPage(1));
-    return RegisterCore.readTitleBlock(sheet.items, sheet.page, titleBlockAreasFor(filePath));
+    const set = titleBlockAreasFor(filePath);
+    return RegisterCore.readTitleBlock(sheet.items, sheet.page, set.areas, set.fallback);
   } finally {
     doc.destroy();
   }
@@ -393,13 +394,27 @@ async function titleBlockItems(page) {
 }
 
 // ---------- title block areas ----------
-// Where a folder's drawings print each title block field, when their title block isn't read
-// right by its labels: drawn in the viewer, and kept in the layout file as fractions of the sheet
-// as shown ([x0, y0, x1, y1], y downwards). files: a drawing's own areas (by its path in the
-// folder), over the folder's; 'label' there finds that field by its label despite a folder area.
+// Where drawings print each title block field, when their title block isn't read right by its
+// labels: drawn in the viewer, and kept in the layout file as fractions of the sheet as shown
+// ([x0, y0, x1, y1], y downwards). Each is { field: area }:
+//   areas: for every drawing
+//   folders: { folder: areas } for the drawings in a drawing folder ('' the top folder), over those
+//   files: { path in the working folder: areas } for one drawing, over both; 'label' there finds
+//     that field by its label despite an area above
+//   missing: read only where a field isn't found by its label (or an area above)
 function titleBlockLayout() {
-  if (!state.layout.titleBlock) state.layout.titleBlock = { areas: {}, files: {} };
-  return state.layout.titleBlock;
+  const tb = state.layout.titleBlock || (state.layout.titleBlock = {});
+  for (const key of ['areas', 'folders', 'files', 'missing']) if (!tb[key]) tb[key] = {};
+  return tb;
+}
+
+// The drawing folder a file is shown in ('' the top folder): its row's, or else the folder it's in
+function titleBlockFolderOf(filePath) {
+  const rel = relOfPath(filePath);
+  if (rel === null) return null;
+  const row = state.rows.find(r => r.rel === rel);
+  if (row && typeof row.folder === 'string') return row.folder;
+  return rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : '';
 }
 
 // A file's path in the working folder, or null if it isn't in it
@@ -408,16 +423,28 @@ function relOfPath(filePath) {
   return base && filePath && filePath.startsWith(base) ? filePath.slice(base.length) : null;
 }
 
+// The areas a file's fields are read from: { areas, fallback, source: { field: 'all', 'folder' or 'file' } }
 function titleBlockAreasFor(filePath) {
   const tb = state.layout && state.layout.titleBlock;
-  if (!tb) return {};
-  const areas = { ...tb.areas };
+  if (!tb) return { areas: {}, fallback: {}, source: {} };
+  const areas = {}, source = {};
+  const add = (set, from) => {
+    for (const [field, area] of Object.entries(set || {})) {
+      if (area === 'label') {
+        delete areas[field];
+        delete source[field];
+      } else {
+        areas[field] = area;
+        source[field] = from;
+      }
+    }
+  };
+  add(tb.areas, 'all');
+  const folder = titleBlockFolderOf(filePath);
+  if (folder !== null) add((tb.folders || {})[folder], 'folder');
   const rel = relOfPath(filePath);
-  for (const [field, area] of Object.entries(rel && tb.files[rel] || {})) {
-    if (area === 'label') delete areas[field];
-    else areas[field] = area;
-  }
-  return areas;
+  if (rel) add((tb.files || {})[rel], 'file');
+  return { areas, fallback: { ...(tb.missing || {}) }, source };
 }
 
 function validTitleBlock(data) {
@@ -430,14 +457,21 @@ function validTitleBlock(data) {
     }
     return out;
   };
-  const files = {};
-  if (data && data.files && typeof data.files === 'object') {
-    for (const [rel, o] of Object.entries(data.files)) {
-      const areas = areasOf(o, true);
-      if (Object.keys(areas).length) files[rel] = areas;
+  const byKey = (o, allowLabel) => {
+    const out = {};
+    if (!o || typeof o !== 'object') return out;
+    for (const [key, set] of Object.entries(o)) {
+      const areas = areasOf(set, allowLabel);
+      if (Object.keys(areas).length) out[key] = areas;
     }
-  }
-  return { areas: areasOf(data && data.areas, false), files };
+    return out;
+  };
+  return {
+    areas: areasOf(data && data.areas, false),
+    folders: byKey(data && data.folders, false),
+    files: byKey(data && data.files, true),
+    missing: areasOf(data && data.missing, false)
+  };
 }
 
 // --------------------
@@ -564,7 +598,7 @@ function layoutPath() {
 }
 
 async function loadLayout() {
-  state.layout = { folders: [], assignments: {}, titleEdits: {}, detailEdits: {}, projectEdits: {}, issueEdit: null, numberEdits: {}, numberHistory: {}, newEntries: [], moves: [], foldersToRemove: [], nameTemplate: DEFAULT_TEMPLATE, options: {}, ignoredWarnings: [], spellingWords: [], view: null, titleBlock: { areas: {}, files: {} } };
+  state.layout = { folders: [], assignments: {}, titleEdits: {}, detailEdits: {}, projectEdits: {}, issueEdit: null, numberEdits: {}, numberHistory: {}, newEntries: [], moves: [], foldersToRemove: [], nameTemplate: DEFAULT_TEMPLATE, options: {}, ignoredWarnings: [], spellingWords: [], view: null, titleBlock: { areas: {}, folders: {}, files: {}, missing: {} }, fileFolders: {} };
   state.layoutBroken = false;
   if (!(await getStatsOrNull(layoutPath()))) return;
   try {
@@ -639,7 +673,14 @@ async function loadLayout() {
     const view = validView(data.view);
     const externalRegister = typeof data.externalRegister === 'string' && data.externalRegister ? data.externalRegister : null;
     const titleBlock = validTitleBlock(data.titleBlock);
-    state.layout = { folders: withAncestors(folders), assignments, titleEdits, detailEdits, projectEdits, issueEdit, otherDrafts: drafts, numberEdits, numberHistory, newEntries, moves, foldersToRemove, nameTemplate, options, ignoredWarnings, spellingWords, view, externalRegister, titleBlock };
+    // Files not in the register put in a folder: file name => folder ('' the top folder)
+    const fileFolders = {};
+    for (const [name, folder] of Object.entries(data.fileFolders || {})) {
+      if (typeof folder !== 'string' || /[\\/]/.test(name)) continue;
+      fileFolders[name] = folder;
+      if (folder && !folders.includes(folder)) folders.push(folder);
+    }
+    state.layout = { folders: withAncestors(folders), assignments, titleEdits, detailEdits, projectEdits, issueEdit, otherDrafts: drafts, numberEdits, numberHistory, newEntries, moves, foldersToRemove, nameTemplate, options, ignoredWarnings, spellingWords, view, externalRegister, titleBlock, fileFolders };
     appendLog(`📁 Loaded folder layout from ${LAYOUT_FILE} (${folders.length} folders).`);
   } catch (err) {
     state.layoutBroken = true;
@@ -711,6 +752,8 @@ async function saveLayout() {
     view: state.layout.view || undefined,
     // Where title block fields are read from, where they aren't found by their labels
     titleBlock: titleBlockSaved(),
+    // Files not in the register put in a folder (by file name)
+    fileFolders: Object.keys(state.layout.fileFolders || {}).length ? state.layout.fileFolders : undefined,
     newEntries: state.layout.newEntries
   };
   try {
@@ -722,7 +765,7 @@ async function saveLayout() {
 
 function titleBlockSaved() {
   const tb = state.layout.titleBlock;
-  return tb && (Object.keys(tb.areas).length || Object.keys(tb.files).length) ? tb : undefined;
+  return tb && ['areas', 'folders', 'files', 'missing'].some(k => Object.keys(tb[k] || {}).length) ? tb : undefined;
 }
 
 // A drawing's folder: the one it was put in ('' for the top folder), or with recursive scanning
@@ -1036,8 +1079,21 @@ function computeRows(tokenMap, match, files, addedTimes, choices) {
       rows.push(row);
     });
   }
+  // A file not in the register stays in the folder it's in, unless it's been put in another; then
+  // it moves there on RENAME
   for (const f of match.unmatched) {
-    rows.push({ key: f.rel, token: null, title: null, folder: null, file: f.name, dir: f.dir, rel: f.rel, status: 'unmatched' });
+    const folder = fileFolderOf(f);
+    const row = { key: f.rel, token: null, title: null, folder, file: f.name, dir: f.dir, rel: f.rel, status: 'unmatched', unregistered: true };
+    if (folder !== f.dir) {
+      row.targetRel = relJoin(folder, f.name);
+      if (existing.has(row.targetRel.toLowerCase())) {
+        row.reason = `Not in the register; ${displayPath(row.targetRel)} already exists, so it can't be moved there`;
+      } else {
+        row.pendingMove = true;
+        row.reason = `Not in the register; will be moved into ${folder ? displayPath(folder) : 'the top folder'}`;
+      }
+    }
+    rows.push(row);
   }
   return rows;
 }
@@ -1049,12 +1105,15 @@ const ACTION_STATUSES = ['rename', 'supersede', 'move'];
 
 // One checkbox per drawing: on the file being used, or on the register entry if there's no file
 function isSelectable(row) {
+  // Files not in the register: ticked to go in a folder (+ FOLDER) or to be moved into theirs
+  if (row.unregistered) return true;
   return !!row.token && (!row.group || row.chosen);
 }
 
 function isSelected(row) {
   if (!isSelectable(row)) return false;
   // Rows needing a rename start ticked, except files matched by a reordered code
+  if (row.unregistered) return row.pendingMove ? !state.unchecked.has(row.key) : state.picked.has(row.key);
   return ACTION_STATUSES.includes(row.status) && !row.reordered ? !state.unchecked.has(row.key) : state.picked.has(row.key);
 }
 
@@ -1073,7 +1132,7 @@ function selectedRows() {
 }
 
 function renameRows() {
-  return selectedRows().filter(r => ACTION_STATUSES.includes(r.status));
+  return selectedRows().filter(r => ACTION_STATUSES.includes(r.status) || r.pendingMove);
 }
 
 function visibleRows() {
@@ -1204,7 +1263,7 @@ function sections(rows) {
   const byFolder = new Map(drawingFolders().slice().sort(compareFolders).map(f => [f, { folder: f, rows: [] }]));
   const unmatched = { unmatched: true, rows: [] };
   for (const row of rows) {
-    if (row.status === 'unmatched') unmatched.rows.push(row);
+    if (row.status === 'unmatched' && !(row.folder && byFolder.has(row.folder))) unmatched.rows.push(row);
     else (byFolder.get(row.folder) || top).rows.push(row);
   }
   return [top, ...byFolder.values(), unmatched];
@@ -1251,12 +1310,13 @@ function renderSectionHeader(section, visible, inside) {
 
   if (!section.unmatched) {
     const plural = n => n === 1 ? '1 drawing' : `${n} drawings`;
-    const direct = new Set(section.rows.map(r => r.token)).size;
+    // Files not in the register count one each
+    const direct = new Set(section.rows.map(r => r.token || r.key)).size;
     const count = document.createElement('span');
     count.className = 'muted section-count';
     count.textContent = plural(direct);
     if (section.folder) {
-      const total = new Set(state.rows.filter(r => r.token && r.folder && isInside(r.folder, section.folder)).map(r => r.token)).size;
+      const total = new Set(state.rows.filter(r => (r.token || r.unregistered) && r.folder && isInside(r.folder, section.folder)).map(r => r.token || r.key)).size;
       if (total > direct) count.textContent += ` · ${plural(total)} including subfolders`;
     }
     td.appendChild(count);
@@ -1377,6 +1437,17 @@ function addDragHandle(td, tr, row) {
   td.appendChild(handle);
 }
 
+function addFileHandle(td, tr, row) {
+  const handle = makeHandle('Not in the register: drag onto a folder to move this file there');
+  handle.addEventListener('dragstart', (e) => startDrag(e, tr, { kind: 'file', key: row.key }, row.file));
+  td.appendChild(handle);
+}
+
+// The row of a file being dragged
+function draggedFile() {
+  return state.drag && state.drag.kind === 'file' ? state.rows.find(r => r.key === state.drag.key) : null;
+}
+
 function addFolderHandle(td, tr, folder) {
   const handle = makeHandle('Drag onto another folder to put this folder inside it, or onto the top folder to take it out');
   handle.addEventListener('dragstart', (e) => startDrag(e, tr, { kind: 'folder', folder }, folder));
@@ -1387,15 +1458,37 @@ function addFolderHandle(td, tr, folder) {
 // half after it (without a Word register, only the folder changes)
 function makeDropTarget(tr, row) {
   const above = (e) => e.clientY < tr.getBoundingClientRect().top + tr.offsetHeight / 2;
-  const accepts = () => state.drag && state.drag.kind === 'drawing' && state.drag.token !== row.token &&
+  // A file not in the register dropped on a row goes into that row's folder; drawings are only
+  // dropped on drawings
+  const fileDrop = () => {
+    const file = draggedFile();
+    return file && file !== row && typeof row.folder === 'string' && file.folder !== row.folder ? file : null;
+  };
+  const accepts = () => !!row.token && state.drag && state.drag.kind === 'drawing' && state.drag.token !== row.token &&
     (canReorder() || folderOf(state.drag.token) !== row.folder);
   tr.addEventListener('dragover', (e) => {
+    if (fileDrop()) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      return markDrop(tr, 'drop-into');
+    }
     if (!accepts()) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
     markDrop(tr, canReorder() ? (above(e) ? 'drop-above' : 'drop-below') : 'drop-into');
   });
-  tr.addEventListener('drop', (e) => {
+  tr.addEventListener('drop', async (e) => {
+    const file = fileDrop();
+    if (file) {
+      e.preventDefault();
+      state.drag = null;
+      clearDropMarks();
+      if (setFileFolder(file, row.folder)) {
+        await saveLayout();
+        rebuild();
+      }
+      return;
+    }
     if (!accepts()) return;
     e.preventDefault();
     const token = state.drag.token;
@@ -1411,6 +1504,10 @@ function makeFolderDropTarget(tr, folder) {
     const d = state.drag;
     if (!d) return false;
     if (d.kind === 'drawing') return folderOf(d.token) !== folder;
+    if (d.kind === 'file') {
+      const file = draggedFile();
+      return !!file && file.folder !== folder;
+    }
     // Not into itself, its own subfolders, or the folder it's already in
     return d.folder !== folder && !(folder && isInside(folder, d.folder)) && parentFolder(d.folder) !== folder;
   };
@@ -1430,6 +1527,12 @@ function makeFolderDropTarget(tr, folder) {
       setDrawingFolder(drag.token, folder);
       await saveLayout();
       rebuild();
+    } else if (drag.kind === 'file') {
+      const file = state.rows.find(r => r.key === drag.key);
+      if (file && setFileFolder(file, folder)) {
+        await saveLayout();
+        rebuild();
+      }
     } else {
       await moveFolder(drag.folder, folder);
     }
@@ -1438,6 +1541,26 @@ function makeFolderDropTarget(tr, folder) {
 
 function parentFolder(folder) {
   return folder.includes('/') ? folder.slice(0, folder.lastIndexOf('/')) : '';
+}
+
+// The folder a file not in the register belongs in: the one it was put in, or the one it's in
+// (when that's a drawing folder)
+function fileFolderOf(f) {
+  const set = state.layout.fileFolders || {};
+  if (f.name in set && (set[f.name] === '' || drawingFolders().includes(set[f.name]))) return set[f.name];
+  return f.dir;
+}
+
+// Put a file not in the register in a folder ('' = the top folder); it moves there on RENAME
+function setFileFolder(row, folder, log = true) {
+  if (row.folder === folder) return false;
+  if (!state.layout.fileFolders) state.layout.fileFolders = {};
+  if (folder === row.dir) delete state.layout.fileFolders[row.file];
+  else state.layout.fileFolders[row.file] = folder;
+  // A file moved back where it is needs no move, so it isn't ticked for one later
+  state.unchecked.delete(row.key);
+  if (log) appendLog(`📁 ${row.file} will go ${folder ? 'into ' + displayPath(folder) : 'to the top folder'} when you press RENAME.`);
+  return true;
 }
 
 // Put a drawing in a folder ('' = the top folder); its files move there on RENAME
@@ -1536,6 +1659,18 @@ async function relocateFolder(folder, dest, verb) {
     for (const token of Object.keys(state.layout.assignments)) {
       state.layout.assignments[token] = remap(state.layout.assignments[token]);
     }
+    for (const name of Object.keys(state.layout.fileFolders)) {
+      state.layout.fileFolders[name] = remap(state.layout.fileFolders[name]);
+    }
+    const tbFolders = (state.layout.titleBlock || {}).folders;
+    if (tbFolders) {
+      for (const f of Object.keys(tbFolders)) {
+        const to = remap(f);
+        if (to === f) continue;
+        tbFolders[to] = tbFolders[f];
+        delete tbFolders[f];
+      }
+    }
     // Keep choices and selections for the files that moved, and don't flash them as new
     if (state.knownFiles) state.knownFiles = new Set([...state.knownFiles].map(remapRel));
     for (const [token, rel] of state.choices) state.choices.set(token, remapRel(rel));
@@ -1614,6 +1749,9 @@ function renderRow(row, newFiles, alt, depth) {
   const dragTd = cell(tr, '', 'drag');
   if (row.token && canDragDrawings()) {
     if (!row.group || row.first) addDragHandle(dragTd, tr, row);
+    makeDropTarget(tr, row);
+  } else if (row.unregistered && canDragDrawings()) {
+    addFileHandle(dragTd, tr, row);
     makeDropTarget(tr, row);
   }
   if (row.moved) tr.classList.add('moved');
@@ -1707,8 +1845,8 @@ function renderRow(row, newFiles, alt, depth) {
 
   const statusTd = cell(tr, '', 'status-cell');
   const badge = document.createElement('span');
-  badge.className = 'status ' + row.status;
-  badge.textContent = STATUS_LABELS[row.status];
+  badge.className = 'status ' + (row.pendingMove ? 'move' : row.status);
+  badge.textContent = row.pendingMove ? 'Move' : STATUS_LABELS[row.status];
   const tip = row.reason || STATUS_TIPS[row.status];
   if (tip) badge.title = tip;
   statusTd.appendChild(badge);
@@ -3529,21 +3667,26 @@ function askForFolder(count, current) {
 async function makeFolder() {
   const rows = selectedRows();
   if (!rows.length) return;
-  const tokens = [...new Set(rows.map(r => r.token))];
-  const folders = new Set(tokens.map(folderOf));
+  const tokens = [...new Set(rows.filter(r => r.token).map(r => r.token))];
+  // Files not in the register (ticked while waiting to move)
+  const files = rows.filter(r => r.unregistered);
+  const folders = new Set([...tokens.map(folderOf), ...files.map(r => r.folder)]);
   const current = folders.size === 1 ? [...folders][0] : '';
+  const count = tokens.length + files.length;
 
-  const result = await askForFolder(tokens.length, current);
+  const result = await askForFolder(count, current);
   if (result.action === 'cancel') return;
 
   if (result.action === 'remove') {
     for (const token of tokens) clearAssignment(token);
-    appendLog(`📁 ${tokens.length} drawing(s) will go back to the top folder when you press RENAME.`);
+    for (const r of files) setFileFolder(r, '', false);
+    appendLog(`📁 ${count} drawing(s) will go back to the top folder when you press RENAME.`);
   } else {
     const folder = matchExistingCase(result.folder);
     state.layout.folders = withAncestors([...state.layout.folders, folder]);
     for (const token of tokens) state.layout.assignments[token] = folder;
-    appendLog(`📁 ${tokens.length} drawing(s) assigned to ${displayPath(folder)}; files move there when you press RENAME.`);
+    for (const r of files) setFileFolder(r, folder, false);
+    appendLog(`📁 ${count} drawing(s) assigned to ${displayPath(folder)}; files move there when you press RENAME.`);
   }
   await saveLayout();
   // New folders may already hold files (e.g. layout edited by hand), so rescan
@@ -3603,7 +3746,9 @@ async function renameSelected() {
       if (row.status === 'supersede') await supersede(row.occupant);
       await nfs.move(absPath(row.rel), absPath(row.targetRel));
       await moveCachedDetails(row.rel, row.targetRel);
-      const verb = row.status === 'move' ? '📁 Moved' : '✅ Renamed';
+      const verb = row.status === 'move' || row.pendingMove ? '📁 Moved' : '✅ Renamed';
+      // In its folder now: nothing left to remember
+      if (row.pendingMove && state.layout.fileFolders) delete state.layout.fileFolders[row.file];
       appendLog(`${verb} ${displayPath(row.rel)} → ${displayPath(row.targetRel)}`);
       renamed++;
       // Keep using the renamed file, so leftover older copies don't try to replace it
@@ -3615,6 +3760,7 @@ async function renameSelected() {
     }
   }
   appendLog(`Renamed ${renamed} of ${toRename.length} files.`);
+  if (toRename.some(r => r.pendingMove)) await saveLayout();
   state.busy = false;
   await refresh();
 }
@@ -5378,7 +5524,13 @@ async function renderViewerPages() {
 
 // What's read from the drawing's title block, with the areas set for it
 function readViewerFields() {
-  viewer.details = viewer.sheet ? RegisterCore.readTitleBlock(viewer.sheet.items, viewer.sheet.page, titleBlockAreasFor(viewer.path)) : null;
+  if (!viewer.sheet) {
+    viewer.details = null;
+    return;
+  }
+  const set = titleBlockAreasFor(viewer.path);
+  viewer.details = RegisterCore.readTitleBlock(viewer.sheet.items, viewer.sheet.page, set.areas, set.fallback);
+  viewer.areaSource = set.source;
 }
 
 // The box of boxes [x0, y0, x1, y1]
@@ -5519,33 +5671,67 @@ async function setFieldArea(field, rect) {
   const tb = titleBlockLayout();
   const rel = relOfPath(viewer.path);
   const area = rect && rect.map(n => Math.round(Math.max(0, Math.min(1, n)) * 10000) / 10000);
-  const forFile = areaScope.value === 'file' && rel;
+  const scope = areaScope.value;
+  const forFile = scope === 'file' && rel;
+  // Sets or deletes the field's area in a set of areas kept under parent[key] (dropped when empty)
+  const put = (parent, key, value) => {
+    const set = { ...(parent[key] || {}) };
+    if (value) set[field] = value;
+    else delete set[field];
+    if (Object.keys(set).length) parent[key] = set;
+    else delete parent[key];
+  };
   if (forFile) {
-    const own = { ...(tb.files[rel] || {}) };
-    if (area) own[field] = area;
-    else if (own[field]) delete own[field];
-    else if (tb.areas[field]) own[field] = 'label';
-    if (Object.keys(own).length) tb.files[rel] = own;
-    else delete tb.files[rel];
+    const own = tb.files[rel] || {};
+    // Taking away an area it doesn't have: it finds the field by its label despite the others'
+    const inherited = tb.areas[field] || (tb.folders[titleBlockFolderOf(viewer.path)] || {})[field];
+    put(tb.files, rel, area || (own[field] ? null : inherited ? 'label' : null));
+  } else if (scope === 'section') {
+    put(tb.folders, titleBlockFolderOf(viewer.path), area);
+  } else if (scope === 'missing') {
+    if (area) tb.missing[field] = area;
+    else delete tb.missing[field];
   } else if (area) tb.areas[field] = area;
   else delete tb.areas[field];
   readViewerFields();
   updateAreaBar();
   renderOverlay();
   await saveLayout();
-  rereadTitleBlocks(forFile ? viewer.path : null);
+  rereadTitleBlocks(forFile ? [viewer.path] : affectedByArea(field, scope, titleBlockFolderOf(viewer.path)));
+}
+
+// The read drawings whose field a changed area (for the scope given) may change: not those with
+// an area of their own (or their folder's) above it, nor those whose field is found without it.
+// Drawings not read yet are read with it when they are.
+function affectedByArea(field, scope, folder) {
+  const paths = [];
+  for (const [filePath, entry] of state.fileDetails) {
+    const source = titleBlockAreasFor(filePath).source[field];
+    let affected;
+    if (scope === 'section') affected = titleBlockFolderOf(filePath) === folder && source !== 'file';
+    else if (scope === 'missing') {
+      // Missing the field, read from the area for drawings missing it, or not readable
+      const details = entry.details;
+      const found = details && details.found && details.found[field];
+      affected = !details || !details[field] || !!(found && found.fallback);
+    } else affected = source !== 'file' && source !== 'folder';
+    if (affected) paths.push(filePath);
+  }
+  return paths;
 }
 
 // The table's title block details read again (filePath: only that file's), after an area changed
 let rereadTimer = null;
 const rereadPaths = new Set();
-function rereadTitleBlocks(filePath) {
-  rereadPaths.add(filePath);
+// filePaths: only these are read again (their cached details dropped); the rest keep theirs
+function rereadTitleBlocks(filePaths) {
+  for (const p of filePaths) rereadPaths.add(p);
   clearTimeout(rereadTimer);
   rereadTimer = setTimeout(() => {
-    const all = rereadPaths.has(null);
-    for (const key of [...state.fileDetails.keys()]) if (all || rereadPaths.has(key)) state.fileDetails.delete(key);
+    const paths = [...rereadPaths];
     rereadPaths.clear();
+    if (!paths.length) return;
+    for (const p of paths) state.fileDetails.delete(p);
     if (isTitleBlockMode()) rebuild();
     else loadFileDetails();
   }, 300);
@@ -5564,6 +5750,9 @@ function updateAreaBar() {
   const details = viewer.details || { found: {} };
   const tb = titleBlockLayout();
   const own = tb.files[relOfPath(viewer.path)] || {};
+  const section = titleBlockFolderOf(viewer.path);
+  const folderLabel = section ? `drawings in ${displayPath(section)}` : 'drawings in the top folder';
+  areaScope.querySelector('option[value="section"]').textContent = section ? `Drawings in ${folderLeaf(section)}` : 'Drawings in the top folder';
   areaFieldsEl.textContent = '';
   for (const field of RegisterCore.TITLE_BLOCK_FIELDS) {
     const st = FIELD_STYLES[field];
@@ -5572,7 +5761,12 @@ function updateAreaBar() {
     btn.className = 'area-field' + (field === viewer.field ? ' selected' : '') + (found.area ? ' has-area' : '');
     btn.style.setProperty('--c', st.color);
     const value = details[field] || '';
-    const from = found.area ? (Array.isArray(own[field]) ? `this drawing's area` : `the folder's area`) : 'its label';
+    const source = (viewer.areaSource || {})[field];
+    const from = !found.area ? 'its label'
+      : found.fallback ? 'the area for drawings missing it'
+      : source === 'file' ? "this drawing's area"
+      : source === 'folder' ? `the area for ${folderLabel}`
+      : 'the area for all drawings';
     btn.title = `${st.name}: ${value || 'not found'} (read from ${from})`;
     const sw = document.createElement('span');
     sw.className = 'swatch';
@@ -5588,15 +5782,19 @@ function updateAreaBar() {
   const field = viewer.field;
   const name = FIELD_STYLES[field].name.toLowerCase();
   let clear = 'Remove area', can = !!tb.areas[field];
-  if (areaScope.value === 'file') {
+  if (areaScope.value === 'section') can = !!(tb.folders[section] || {})[field];
+  else if (areaScope.value === 'missing') can = !!tb.missing[field];
+  else if (areaScope.value === 'file') {
+    const inherited = tb.areas[field] || (tb.folders[section] || {})[field];
     if (Array.isArray(own[field])) { clear = 'Remove its area'; can = true; }
-    else if (own[field] === 'label') { clear = "Use the folder's area"; can = true; }
-    else if (tb.areas[field]) { clear = 'Find by label here'; can = true; }
+    else if (own[field] === 'label') { clear = 'Use the shared area'; can = true; }
+    else if (inherited) { clear = 'Find by label here'; can = true; }
     else can = false;
   }
   areaClearBtn.textContent = clear;
   areaClearBtn.disabled = !can;
-  areaHint.textContent = (details.found[field] || {}).area
+  if (areaScope.value === 'missing') areaHint.textContent = `Drawn here, the ${name} area is used only on drawings where the ${name} isn't found by its label.`;
+  else areaHint.textContent = (details.found[field] || {}).area
     ? `Drag the ${name} area to move it, or its corners to resize it; drag elsewhere to draw it again.`
     : `Drag a box on the sheet around where the ${name} is printed.`;
 }

@@ -46,31 +46,35 @@
   // with y downwards: box [x0, y0, x1, y1]. Then the details also say where each field was found,
   // found: { field: { boxes: [box...], label: box or null, area: rect or null } }, and areas
   // { field: [x0, y0, x1, y1] } (the same units) read a field from the text inside its area instead
-  // of looking for its label, for title blocks laid out differently.
+  // of looking for its label, for title blocks laid out differently; fallback areas (the same) are
+  // read only where a field isn't found by its label (found[field].fallback is then true).
   const TITLE_BLOCK_FIELDS = ['title', 'number', 'rev', 'scale', 'size', 'project', 'client'];
-  function readTitleBlock(items, page, areas = {}) {
+  function readTitleBlock(items, page, areas = {}, fallback = {}) {
     ({ items, page } = uprightSheet(items, page));
     // Only horizontal text; rotated notes and dimensions aren't title block fields
     const text = items.filter(i => i.str.trim() && !i.rotated);
     const found = {};
     const boxesOf = list => list.filter(i => i.box).map(i => i.box);
-    // A field from its area if it has one, else by its label
+    const fromArea = (name, area, fromText, isFallback) => {
+      const inside = list => list.filter(i => i.box && centreIn(i.box, area));
+      // Upright text first; sideways text only where the area has nothing else
+      let parts = inside(text);
+      if (!parts.length) parts = inside(items.filter(i => i.str.trim()));
+      // Without the captions of the boxes the area covers ("Zone:", "Number:")
+      const values = parts.filter(i => !LABEL_WORD_RE.test(i.str));
+      if (values.length) parts = values;
+      const r = fromText(parts);
+      found[name] = { boxes: boxesOf(r.items), label: null, area, fallback: isFallback };
+      return r;
+    };
+    // A field from its area if it has one, else by its label, else from its fallback area
     const field = (name, byLabel, fromText) => {
       const area = validArea(areas && areas[name]);
-      if (area) {
-        const inside = list => list.filter(i => i.box && centreIn(i.box, area));
-        // Upright text first; sideways text only where the area has nothing else
-        let parts = inside(text);
-        if (!parts.length) parts = inside(items.filter(i => i.str.trim()));
-        // Without the captions of the boxes the area covers ("Zone:", "Number:")
-        const values = parts.filter(i => !LABEL_WORD_RE.test(i.str));
-        if (values.length) parts = values;
-        const r = fromText(parts);
-        found[name] = { boxes: boxesOf(r.items), label: null, area };
-        return r;
-      }
+      if (area) return fromArea(name, area, fromText, false);
       const r = byLabel();
-      found[name] = { boxes: boxesOf(r.items), label: r.label && r.label.box || null, area: null };
+      const spare = validArea(fallback && fallback[name]);
+      if (!r.value && spare) return fromArea(name, spare, fromText, true);
+      found[name] = { boxes: boxesOf(r.items), label: r.label && r.label.box || null, area: null, fallback: false };
       return r;
     };
     const lines = parts => joinLinesWithItems(parts, ' ', false);
