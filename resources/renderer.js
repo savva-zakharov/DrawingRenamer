@@ -49,6 +49,7 @@ const DEFAULT_SETTINGS = {
   spellingWords: [],                // words added to the dictionary, for every folder
   pdfViewer: true,                  // drawings shown beside the table when their row is clicked
   viewerWidth: 0.5,                 // the viewer's share of the window's width
+  viewerFields: true,               // the title block fields marked on a drawing in the viewer
   defaultView: null                 // what the table and Warnings tab show in a folder opened for the first time (null: the built-in view)
 };
 let settings = JSON.parse(JSON.stringify(DEFAULT_SETTINGS));
@@ -353,27 +354,90 @@ function transformMatrix(m, n) {
 // its first page. Text positions are taken as the sheet is displayed, so rotated sheets (common
 // with ISO 19650 title blocks) read the same as upright ones.
 // Pass a PDFJS.PDFWorker to reuse it (starting a worker per file is most of the cost).
+// The fields are read from the areas set for the file in the viewer, where it has any.
 async function readFileDetails(filePath, worker) {
   const data = new Uint8Array(await nfs.readBinaryFile(filePath));
   const doc = await PDFJS.getDocument(worker ? { data, worker } : { data });
   try {
-    const page = await doc.getPage(1);
-    const viewport = page.getViewport(1);
-    const content = await page.getTextContent({ normalizeWhitespace: false, disableCombineTextItems: false });
-    const items = content.items.map(i => {
-      const m = transformMatrix(viewport.transform, i.transform);
-      // The viewport has y downwards; title block parsing wants y upwards
-      return {
-        str: i.str, x: m[4], y: viewport.height - m[5], h: Math.hypot(m[2], m[3]) || 1,
-        rotated: Math.abs(m[1]) > Math.abs(m[0]) * 0.05,
-        // Reading direction, y upwards: sheets plotted sideways on the page are turned to read
-        dx: m[0], dy: -m[1]
-      };
-    });
-    return RegisterCore.readTitleBlock(items, { width: viewport.width, height: viewport.height });
+    const sheet = await titleBlockItems(await doc.getPage(1));
+    return RegisterCore.readTitleBlock(sheet.items, sheet.page, titleBlockAreasFor(filePath));
   } finally {
     doc.destroy();
   }
+}
+
+// A page's text items for RegisterCore.readTitleBlock, each with its box on the page as shown
+// (fractions of its width and height, y downwards) to mark it in the viewer: { items, page }
+async function titleBlockItems(page) {
+  const viewport = page.getViewport(1);
+  const content = await page.getTextContent({ normalizeWhitespace: false, disableCombineTextItems: false });
+  const items = content.items.map(i => {
+    const m = transformMatrix(viewport.transform, i.transform);
+    const h = Math.hypot(m[2], m[3]) || 1;
+    // The text's box: along its baseline for its width, and up its height (a little below for descenders)
+    const len = Math.hypot(m[0], m[1]) || 1;
+    const along = [m[0] / len, m[1] / len], up = [m[2] / h, m[3] / h];
+    const w = i.width || 0;
+    const corners = [[0, -0.2], [w, -0.2], [0, 1], [w, 1]].map(([a, b]) => [m[4] + along[0] * a + up[0] * h * b, m[5] + along[1] * a + up[1] * h * b]);
+    const xs = corners.map(c => c[0]), ys = corners.map(c => c[1]);
+    // The viewport has y downwards; title block parsing wants y upwards
+    return {
+      str: i.str, x: m[4], y: viewport.height - m[5], h,
+      rotated: Math.abs(m[1]) > Math.abs(m[0]) * 0.05,
+      // Reading direction, y upwards: sheets plotted sideways on the page are turned to read
+      dx: m[0], dy: -m[1],
+      box: [Math.min(...xs) / viewport.width, Math.min(...ys) / viewport.height, Math.max(...xs) / viewport.width, Math.max(...ys) / viewport.height]
+    };
+  });
+  return { items, page: { width: viewport.width, height: viewport.height } };
+}
+
+// ---------- title block areas ----------
+// Where a folder's drawings print each title block field, when their title block isn't read
+// right by its labels: drawn in the viewer, and kept in the layout file as fractions of the sheet
+// as shown ([x0, y0, x1, y1], y downwards). files: a drawing's own areas (by its path in the
+// folder), over the folder's; 'label' there finds that field by its label despite a folder area.
+function titleBlockLayout() {
+  if (!state.layout.titleBlock) state.layout.titleBlock = { areas: {}, files: {} };
+  return state.layout.titleBlock;
+}
+
+// A file's path in the working folder, or null if it isn't in it
+function relOfPath(filePath) {
+  const base = state.targetDir ? state.targetDir + '/' : null;
+  return base && filePath && filePath.startsWith(base) ? filePath.slice(base.length) : null;
+}
+
+function titleBlockAreasFor(filePath) {
+  const tb = state.layout && state.layout.titleBlock;
+  if (!tb) return {};
+  const areas = { ...tb.areas };
+  const rel = relOfPath(filePath);
+  for (const [field, area] of Object.entries(rel && tb.files[rel] || {})) {
+    if (area === 'label') delete areas[field];
+    else areas[field] = area;
+  }
+  return areas;
+}
+
+function validTitleBlock(data) {
+  const areasOf = (o, allowLabel) => {
+    const out = {};
+    if (!o || typeof o !== 'object') return out;
+    for (const field of RegisterCore.TITLE_BLOCK_FIELDS) {
+      if (allowLabel && o[field] === 'label') out[field] = 'label';
+      else if (RegisterCore.validArea(o[field])) out[field] = o[field].slice();
+    }
+    return out;
+  };
+  const files = {};
+  if (data && data.files && typeof data.files === 'object') {
+    for (const [rel, o] of Object.entries(data.files)) {
+      const areas = areasOf(o, true);
+      if (Object.keys(areas).length) files[rel] = areas;
+    }
+  }
+  return { areas: areasOf(data && data.areas, false), files };
 }
 
 // --------------------
@@ -500,7 +564,7 @@ function layoutPath() {
 }
 
 async function loadLayout() {
-  state.layout = { folders: [], assignments: {}, titleEdits: {}, detailEdits: {}, projectEdits: {}, issueEdit: null, numberEdits: {}, numberHistory: {}, newEntries: [], moves: [], foldersToRemove: [], nameTemplate: DEFAULT_TEMPLATE, options: {}, ignoredWarnings: [], spellingWords: [], view: null };
+  state.layout = { folders: [], assignments: {}, titleEdits: {}, detailEdits: {}, projectEdits: {}, issueEdit: null, numberEdits: {}, numberHistory: {}, newEntries: [], moves: [], foldersToRemove: [], nameTemplate: DEFAULT_TEMPLATE, options: {}, ignoredWarnings: [], spellingWords: [], view: null, titleBlock: { areas: {}, files: {} } };
   state.layoutBroken = false;
   if (!(await getStatsOrNull(layoutPath()))) return;
   try {
@@ -574,7 +638,8 @@ async function loadLayout() {
     const spellingWords = (Array.isArray(data.spellingWords) ? data.spellingWords : []).filter(w => typeof w === 'string' && w);
     const view = validView(data.view);
     const externalRegister = typeof data.externalRegister === 'string' && data.externalRegister ? data.externalRegister : null;
-    state.layout = { folders: withAncestors(folders), assignments, titleEdits, detailEdits, projectEdits, issueEdit, otherDrafts: drafts, numberEdits, numberHistory, newEntries, moves, foldersToRemove, nameTemplate, options, ignoredWarnings, spellingWords, view, externalRegister };
+    const titleBlock = validTitleBlock(data.titleBlock);
+    state.layout = { folders: withAncestors(folders), assignments, titleEdits, detailEdits, projectEdits, issueEdit, otherDrafts: drafts, numberEdits, numberHistory, newEntries, moves, foldersToRemove, nameTemplate, options, ignoredWarnings, spellingWords, view, externalRegister, titleBlock };
     appendLog(`📁 Loaded folder layout from ${LAYOUT_FILE} (${folders.length} folders).`);
   } catch (err) {
     state.layoutBroken = true;
@@ -644,6 +709,8 @@ async function saveLayout() {
     spellingWords: state.layout.spellingWords,
     // What the table and Warnings tab showed when the folder was last used
     view: state.layout.view || undefined,
+    // Where title block fields are read from, where they aren't found by their labels
+    titleBlock: titleBlockSaved(),
     newEntries: state.layout.newEntries
   };
   try {
@@ -651,6 +718,11 @@ async function saveLayout() {
   } catch (err) {
     appendLog(`❌ Could not save ${LAYOUT_FILE}: ${err.message || err}`);
   }
+}
+
+function titleBlockSaved() {
+  const tb = state.layout.titleBlock;
+  return tb && (Object.keys(tb.areas).length || Object.keys(tb.files).length) ? tb : undefined;
 }
 
 // A drawing's folder: the one it was put in ('' for the top folder), or with recursive scanning
@@ -2162,6 +2234,17 @@ async function copyDetails(field) {
 async function moveCachedDetails(fromRel, toRel) {
   const from = absPath(fromRel);
   const to = absPath(toRel);
+  // A drawing's own title block areas follow it
+  const tb = state.layout.titleBlock;
+  let areasMoved = false;
+  for (const rel of Object.keys(tb ? tb.files : {})) {
+    const moved = rel === fromRel ? toRel : rel.startsWith(fromRel + '/') ? toRel + rel.slice(fromRel.length) : null;
+    if (moved === null) continue;
+    tb.files[moved] = tb.files[rel];
+    delete tb.files[rel];
+    areasMoved = true;
+  }
+  if (areasMoved) await saveLayout();
   const moved = [];
   for (const [key, entry] of [...state.fileDetails]) {
     let newKey = null;
@@ -5075,15 +5158,45 @@ onlyWarningsCheckbox.addEventListener('change', () => {
 });
 
 // ---------- PDF viewer ----------
-// The right half of the window: WebView2's own PDF viewer in a frame, given the file as a blob
+// The right half of the window: the pages drawn by pdf.js. On a drawing, the title block fields
+// read from it are marked, and the areas they're read from can be drawn and moved.
 const viewerEl = document.getElementById('pdf-viewer');
-const viewerFrame = document.getElementById('viewer-frame');
+const viewerPages = document.getElementById('viewer-pages');
 const viewerName = document.getElementById('viewer-name');
 const viewerOpenBtn = document.getElementById('viewer-open');
 const viewerExternalBtn = document.getElementById('viewer-external');
+const viewerZoomEl = document.getElementById('viewer-zoom');
+const viewerZoomOutBtn = document.getElementById('viewer-zoom-out');
+const viewerZoomInBtn = document.getElementById('viewer-zoom-in');
+const viewerFitBtn = document.getElementById('viewer-fit');
+const viewerFieldsBtn = document.getElementById('viewer-fields');
+const viewerAreasBtn = document.getElementById('viewer-areas');
+const areaBar = document.getElementById('area-bar');
+const areaFieldsEl = document.getElementById('area-fields');
+const areaScope = document.getElementById('area-scope');
+const areaClearBtn = document.getElementById('area-clear');
+const areaHint = document.getElementById('area-hint');
 const optPdfViewer = document.getElementById('opt-pdf-viewer');
 const viewerDivider = document.getElementById('viewer-divider');
-const viewer = { open: false, path: null, key: null, url: null, run: 0 };
+const VIEWER_MAX_PAGES = 60;      // pages shown of a long PDF
+const VIEWER_PAGE_GAP = 12;       // around the pages (#viewer-pages' padding)
+const FIELD_STYLES = {
+  title: { name: 'Title', color: '#2f7de1' },
+  number: { name: 'Number', color: '#d6336c' },
+  rev: { name: 'Revision', color: '#e8590c' },
+  scale: { name: 'Scale', color: '#2b8a3e' },
+  size: { name: 'Size', color: '#0c8599' },
+  project: { name: 'Project', color: '#7048e8' },
+  client: { name: 'Client', color: '#b08900' }
+};
+const viewer = {
+  open: false, path: null, key: null, run: 0,
+  doc: null, worker: null, pages: [], scale: 1, fit: 'page', renderRun: 0, renderTimer: null,
+  isDrawing: false,
+  sheet: null,      // the first page's text items, { items, page }, on a drawing
+  details: null,    // what's read from them, with where (details.found)
+  adjusting: false, field: 'title', drag: null
+};
 
 function updateViewer() {
   viewerEl.hidden = !settings.pdfViewer || !viewer.open;
@@ -5091,11 +5204,15 @@ function updateViewer() {
   setViewerWidth(settings.viewerWidth);
   viewerOpenBtn.hidden = !settings.pdfViewer || viewer.open;
   viewerExternalBtn.disabled = !viewer.path;
+  for (const btn of [viewerZoomOutBtn, viewerZoomInBtn, viewerFitBtn]) btn.disabled = !viewer.pages.length;
+  viewerFieldsBtn.setAttribute('aria-pressed', String(settings.viewerFields));
   for (const tr of rowsEl.querySelectorAll('tr.viewing')) if (tr.dataset.key !== viewer.key) tr.classList.remove('viewing');
   if (viewer.key) {
     const tr = [...rowsEl.querySelectorAll('tr')].find(t => t.dataset.key === viewer.key);
     if (tr) tr.classList.add('viewing');
   }
+  updateAreaBar();
+  renderOverlay();
 }
 
 function setViewerOpen(open) {
@@ -5103,7 +5220,8 @@ function setViewerOpen(open) {
   updateViewer();
 }
 
-// Shows a PDF (rowKey: the table row it's for, to mark it), opening the viewer
+// Shows a PDF (rowKey: the table row it's for, to mark it), opening the viewer. A drawing's (one
+// with a row) title block fields are marked on it.
 async function showPdf(filePath, rowKey = null) {
   if (!settings.pdfViewer) return;
   viewer.key = rowKey;
@@ -5112,26 +5230,444 @@ async function showPdf(filePath, rowKey = null) {
   const run = ++viewer.run;
   viewer.path = filePath;
   viewerName.textContent = `Loading ${baseName(filePath)}…`;
+  viewerName.title = '';
   viewerName.classList.remove('loaded');
   updateViewer();
+  let doc = null;
   try {
-    const data = await nfs.readBinaryFile(filePath);
+    const data = new Uint8Array(await nfs.readBinaryFile(filePath));
     if (run !== viewer.run) return;
-    if (viewer.url) URL.revokeObjectURL(viewer.url);
-    viewer.url = URL.createObjectURL(new Blob([data], { type: 'application/pdf' }));
-    // The whole sheet in view
-    viewerFrame.src = `${viewer.url}#view=Fit&navpanes=0`;
-    viewerName.textContent = baseName(filePath);
+    if (!viewer.worker) viewer.worker = new PDFJS.PDFWorker();
+    doc = await PDFJS.getDocument({ data, worker: viewer.worker });
+    if (run !== viewer.run) return doc.destroy();
+    const pages = [];
+    for (let n = 1; n <= Math.min(doc.numPages, VIEWER_MAX_PAGES); n++) pages.push(await doc.getPage(n));
+    let sheet = null;
+    if (rowKey) {
+      try {
+        sheet = await titleBlockItems(pages[0]);
+      } catch (e) {
+        // shown without its fields
+      }
+    }
+    if (run !== viewer.run) return doc.destroy();
+    closeViewerDoc();
+    viewer.doc = doc;
+    viewer.isDrawing = !!rowKey;
+    viewer.sheet = sheet;
+    readViewerFields();
+    buildViewerPages(pages);
+    viewer.fit = 'page';
+    fitViewerPages();
+    viewerPages.scrollLeft = 0;
+    viewerPages.scrollTop = 0;
+    viewerName.textContent = baseName(filePath) + (doc.numPages > VIEWER_MAX_PAGES ? ` (first ${VIEWER_MAX_PAGES} of ${doc.numPages} pages)` : '');
     viewerName.title = displayPath(filePath);
     viewerName.classList.add('loaded');
   } catch (err) {
+    if (doc) doc.destroy();
     if (run !== viewer.run) return;
+    closeViewerDoc();
     viewer.path = null;
     viewerName.textContent = `Could not open ${baseName(filePath)}`;
     appendLog(`❌ Could not show ${baseName(filePath)}: ${err.message || err}`);
-    updateViewer();
+  }
+  updateViewer();
+}
+
+// Clears the pages shown (stopping any drawing of them)
+function closeViewerDoc() {
+  viewer.renderRun++;
+  for (const pv of viewer.pages) if (pv.task) pv.task.cancel();
+  if (viewer.doc) viewer.doc.destroy();
+  viewer.doc = null;
+  viewer.pages = [];
+  viewer.sheet = null;
+  viewer.details = null;
+  viewer.isDrawing = false;
+  viewer.drag = null;
+  viewerPages.textContent = '';
+}
+
+function buildViewerPages(pages) {
+  viewer.pages = pages.map((page, n) => {
+    const vp = page.getViewport(1);
+    const el = document.createElement('div');
+    el.className = 'viewer-page';
+    const canvas = document.createElement('canvas');
+    el.appendChild(canvas);
+    let overlay = null;
+    if (n === 0) {
+      overlay = document.createElement('div');
+      overlay.className = 'viewer-overlay';
+      el.appendChild(overlay);
+      overlay.addEventListener('pointerdown', startAreaDrag);
+    }
+    viewerPages.appendChild(el);
+    return { page, width: vp.width, height: vp.height, el, canvas, overlay, rendered: 0, task: null };
+  });
+}
+
+// The scale that fits the first page in the viewer (whole, or its width)
+function fitScale(fit) {
+  const pv = viewer.pages[0];
+  if (!pv) return 1;
+  const w = viewerPages.clientWidth - 2 * VIEWER_PAGE_GAP, h = viewerPages.clientHeight - 2 * VIEWER_PAGE_GAP;
+  if (w <= 0 || h <= 0) return viewer.scale;
+  return fit === 'width' ? w / pv.width : Math.min(w / pv.width, h / pv.height);
+}
+
+function fitViewerPages() {
+  if (viewer.fit) setViewerScale(fitScale(viewer.fit));
+}
+
+// Sizes the pages for scale (1: a PDF point to a pixel), keeping the point at (x, y) in the
+// viewer (client coordinates) still, then draws them again sharp
+function setViewerScale(scale, x, y) {
+  scale = Math.max(0.05, Math.min(10, scale));
+  const box = viewerPages.getBoundingClientRect();
+  const ax = x === undefined ? box.width / 2 : x - box.left, ay = y === undefined ? box.height / 2 : y - box.top;
+  const k = scale / viewer.scale;
+  const left = (viewerPages.scrollLeft + ax) * k - ax, top = (viewerPages.scrollTop + ay) * k - ay;
+  viewer.scale = scale;
+  for (const pv of viewer.pages) {
+    pv.el.style.width = `${Math.round(pv.width * scale)}px`;
+    pv.el.style.height = `${Math.round(pv.height * scale)}px`;
+  }
+  viewerPages.scrollLeft = left;
+  viewerPages.scrollTop = top;
+  viewerZoomEl.textContent = viewer.pages.length ? `${Math.round(scale * 100)}%` : '';
+  clearTimeout(viewer.renderTimer);
+  viewer.renderTimer = setTimeout(renderViewerPages, 120);
+}
+
+// Draws the pages at the scale shown, one at a time; each replaces the last drawing when done
+async function renderViewerPages() {
+  const run = ++viewer.renderRun;
+  const dpr = window.devicePixelRatio || 1;
+  for (const pv of viewer.pages) {
+    if (run !== viewer.renderRun) return;
+    if (pv.rendered === viewer.scale) continue;
+    // At most 16 megapixels a page: past that it's stretched (canvases that big are slow)
+    let scale = viewer.scale * dpr;
+    const pixels = pv.width * pv.height * scale * scale;
+    if (pixels > 16e6) scale *= Math.sqrt(16e6 / pixels);
+    const vp = pv.page.getViewport(scale);
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.ceil(vp.width);
+    canvas.height = Math.ceil(vp.height);
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    pv.task = pv.page.render({ canvasContext: ctx, viewport: vp });
+    const drawnAt = viewer.scale;
+    try {
+      await pv.task.promise;
+    } catch (e) {
+      if (run !== viewer.renderRun) return;
+      continue; // a page that can't be drawn stays blank
+    } finally {
+      pv.task = null;
+    }
+    if (run !== viewer.renderRun) return;
+    pv.canvas.replaceWith(canvas);
+    pv.canvas = canvas;
+    pv.rendered = drawnAt;
   }
 }
+
+// What's read from the drawing's title block, with the areas set for it
+function readViewerFields() {
+  viewer.details = viewer.sheet ? RegisterCore.readTitleBlock(viewer.sheet.items, viewer.sheet.page, titleBlockAreasFor(viewer.path)) : null;
+}
+
+// The box of boxes [x0, y0, x1, y1]
+function unionBox(boxes) {
+  return [Math.min(...boxes.map(b => b[0])), Math.min(...boxes.map(b => b[1])), Math.max(...boxes.map(b => b[2])), Math.max(...boxes.map(b => b[3]))];
+}
+
+// Marks the title block fields on the first page: where each value was read (solid), its label
+// (dashed, faint) or the area it was read from (dashed); while adjusting, the areas can be dragged
+function renderOverlay() {
+  const pv = viewer.pages[0];
+  if (!pv || !pv.overlay) return;
+  const overlay = pv.overlay;
+  overlay.textContent = '';
+  overlay.classList.toggle('adjusting', viewer.adjusting);
+  const details = viewer.details;
+  if (!details || !details.found || !(settings.viewerFields || viewer.adjusting)) return;
+  const place = (cls, box, field) => {
+    const el = document.createElement('div');
+    el.className = cls;
+    el.dataset.field = field;
+    el.style.setProperty('--c', FIELD_STYLES[field].color);
+    el.style.left = `${box[0] * 100}%`;
+    el.style.top = `${box[1] * 100}%`;
+    el.style.width = `${(box[2] - box[0]) * 100}%`;
+    el.style.height = `${(box[3] - box[1]) * 100}%`;
+    overlay.appendChild(el);
+    return el;
+  };
+  const tag = (el, field) => {
+    const t = document.createElement('span');
+    t.className = 'field-tag';
+    t.textContent = FIELD_STYLES[field].name;
+    el.appendChild(t);
+  };
+  for (const field of RegisterCore.TITLE_BLOCK_FIELDS) {
+    const found = details.found[field] || { boxes: [], label: null, area: null };
+    const dragging = viewer.drag && viewer.drag.field === field;
+    const area = dragging ? viewer.drag.rect : found.area;
+    const dim = viewer.adjusting && viewer.field !== field;
+    const value = details[field] || '';
+    if (area) {
+      const el = place('field-area' + (viewer.adjusting && !dim ? ' selected' : '') + (dim ? ' dim' : ''), area, field);
+      el.title = `${FIELD_STYLES[field].name}: ${value || 'nothing read here'}`;
+      tag(el, field);
+      if (viewer.adjusting && !dim) {
+        for (const corner of ['nw', 'ne', 'sw', 'se']) {
+          const h = document.createElement('span');
+          h.className = 'area-handle';
+          h.dataset.corner = corner;
+          el.appendChild(h);
+        }
+      }
+    }
+    if (found.boxes.length && !dragging) {
+      const el = place('field-found' + (dim ? ' dim' : ''), unionBox(found.boxes), field);
+      el.title = `${FIELD_STYLES[field].name}: ${value}`;
+      if (!area) tag(el, field);
+    }
+    if (found.label && !area && !viewer.adjusting) place('field-label', found.label, field);
+  }
+}
+
+// ---- drawing and moving areas
+// The point under the pointer, as fractions of the first page
+function pagePoint(e) {
+  const r = viewer.pages[0].overlay.getBoundingClientRect();
+  return { x: Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)), y: Math.max(0, Math.min(1, (e.clientY - r.top) / r.height)) };
+}
+
+function startAreaDrag(e) {
+  if (!viewer.adjusting || e.button !== 0) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const handle = e.target.closest('.area-handle');
+  const areaEl = e.target.closest('.field-area');
+  const field = (handle || areaEl) ? (handle || areaEl).closest('[data-field]').dataset.field : viewer.field;
+  const p = pagePoint(e);
+  const current = viewer.details && viewer.details.found[field] && viewer.details.found[field].area;
+  // A click on another field's area chooses that field; it's moved only once it's chosen
+  if (areaEl && field !== viewer.field) {
+    viewer.field = field;
+    updateAreaBar();
+    renderOverlay();
+    return;
+  }
+  viewer.field = field;
+  viewer.drag = {
+    field, start: p, orig: current,
+    mode: handle ? 'resize' : areaEl ? 'move' : 'draw',
+    corner: handle ? handle.dataset.corner : null,
+    rect: (handle || areaEl) && current ? current.slice() : [p.x, p.y, p.x, p.y]
+  };
+  const overlay = viewer.pages[0].overlay;
+  overlay.setPointerCapture(e.pointerId);
+  const move = (ev) => {
+    const d = viewer.drag;
+    if (!d) return;
+    const q = pagePoint(ev);
+    if (d.mode === 'draw') d.rect = [Math.min(d.start.x, q.x), Math.min(d.start.y, q.y), Math.max(d.start.x, q.x), Math.max(d.start.y, q.y)];
+    else if (d.mode === 'move') {
+      const [x0, y0, x1, y1] = d.orig;
+      const dx = Math.max(-x0, Math.min(1 - x1, q.x - d.start.x)), dy = Math.max(-y0, Math.min(1 - y1, q.y - d.start.y));
+      d.rect = [x0 + dx, y0 + dy, x1 + dx, y1 + dy];
+    } else {
+      let [x0, y0, x1, y1] = d.orig;
+      if (d.corner.includes('w')) x0 = q.x; else x1 = q.x;
+      if (d.corner.includes('n')) y0 = q.y; else y1 = q.y;
+      d.rect = [Math.min(x0, x1), Math.min(y0, y1), Math.max(x0, x1), Math.max(y0, y1)];
+    }
+    renderOverlay();
+  };
+  const up = () => {
+    overlay.removeEventListener('pointermove', move);
+    overlay.removeEventListener('pointerup', up);
+    overlay.removeEventListener('pointercancel', up);
+    const d = viewer.drag;
+    viewer.drag = null;
+    if (!d) return;
+    const [x0, y0, x1, y1] = d.rect;
+    // A click without a drag draws nothing
+    if (x1 - x0 < 0.003 || y1 - y0 < 0.003 || (d.mode !== 'draw' && d.rect.every((n, k) => n === d.orig[k]))) {
+      renderOverlay();
+      return;
+    }
+    setFieldArea(d.field, d.rect);
+  };
+  overlay.addEventListener('pointermove', move);
+  overlay.addEventListener('pointerup', up);
+  overlay.addEventListener('pointercancel', up);
+  updateAreaBar();
+  renderOverlay();
+}
+
+// Sets (rect) or takes away (null) a field's area, for the folder or this drawing (the scope
+// chosen); then the drawings' title blocks are read again with it
+async function setFieldArea(field, rect) {
+  const tb = titleBlockLayout();
+  const rel = relOfPath(viewer.path);
+  const area = rect && rect.map(n => Math.round(Math.max(0, Math.min(1, n)) * 10000) / 10000);
+  const forFile = areaScope.value === 'file' && rel;
+  if (forFile) {
+    const own = { ...(tb.files[rel] || {}) };
+    if (area) own[field] = area;
+    else if (own[field]) delete own[field];
+    else if (tb.areas[field]) own[field] = 'label';
+    if (Object.keys(own).length) tb.files[rel] = own;
+    else delete tb.files[rel];
+  } else if (area) tb.areas[field] = area;
+  else delete tb.areas[field];
+  readViewerFields();
+  updateAreaBar();
+  renderOverlay();
+  await saveLayout();
+  rereadTitleBlocks(forFile ? viewer.path : null);
+}
+
+// The table's title block details read again (filePath: only that file's), after an area changed
+let rereadTimer = null;
+const rereadPaths = new Set();
+function rereadTitleBlocks(filePath) {
+  rereadPaths.add(filePath);
+  clearTimeout(rereadTimer);
+  rereadTimer = setTimeout(() => {
+    const all = rereadPaths.has(null);
+    for (const key of [...state.fileDetails.keys()]) if (all || rereadPaths.has(key)) state.fileDetails.delete(key);
+    rereadPaths.clear();
+    if (isTitleBlockMode()) rebuild();
+    else loadFileDetails();
+  }, 300);
+}
+
+// The bar of fields to draw areas for, and what each read
+function updateAreaBar() {
+  const canAdjust = !!(viewer.isDrawing && viewer.sheet && state.targetDir && relOfPath(viewer.path) !== null);
+  if (!canAdjust) viewer.adjusting = false;
+  viewerFieldsBtn.disabled = !(viewer.isDrawing && viewer.sheet);
+  viewerAreasBtn.disabled = !canAdjust;
+  viewerAreasBtn.setAttribute('aria-pressed', String(viewer.adjusting));
+  viewerPages.classList.toggle('adjusting', viewer.adjusting);
+  areaBar.hidden = !viewer.adjusting;
+  if (!viewer.adjusting) return;
+  const details = viewer.details || { found: {} };
+  const tb = titleBlockLayout();
+  const own = tb.files[relOfPath(viewer.path)] || {};
+  areaFieldsEl.textContent = '';
+  for (const field of RegisterCore.TITLE_BLOCK_FIELDS) {
+    const st = FIELD_STYLES[field];
+    const found = details.found[field] || {};
+    const btn = document.createElement('button');
+    btn.className = 'area-field' + (field === viewer.field ? ' selected' : '') + (found.area ? ' has-area' : '');
+    btn.style.setProperty('--c', st.color);
+    const value = details[field] || '';
+    const from = found.area ? (Array.isArray(own[field]) ? `this drawing's area` : `the folder's area`) : 'its label';
+    btn.title = `${st.name}: ${value || 'not found'} (read from ${from})`;
+    const sw = document.createElement('span');
+    sw.className = 'swatch';
+    btn.append(sw, el('span', st.name, 'name'), el('span', value || 'not found', 'val' + (value ? '' : ' none')));
+    btn.addEventListener('click', () => {
+      viewer.field = field;
+      updateAreaBar();
+      renderOverlay();
+    });
+    areaFieldsEl.appendChild(btn);
+  }
+  // What taking the chosen field's area away does, for the scope chosen
+  const field = viewer.field;
+  const name = FIELD_STYLES[field].name.toLowerCase();
+  let clear = 'Remove area', can = !!tb.areas[field];
+  if (areaScope.value === 'file') {
+    if (Array.isArray(own[field])) { clear = 'Remove its area'; can = true; }
+    else if (own[field] === 'label') { clear = "Use the folder's area"; can = true; }
+    else if (tb.areas[field]) { clear = 'Find by label here'; can = true; }
+    else can = false;
+  }
+  areaClearBtn.textContent = clear;
+  areaClearBtn.disabled = !can;
+  areaHint.textContent = (details.found[field] || {}).area
+    ? `Drag the ${name} area to move it, or its corners to resize it; drag elsewhere to draw it again.`
+    : `Drag a box on the sheet around where the ${name} is printed.`;
+}
+
+viewerFieldsBtn.addEventListener('click', () => setOption('viewerFields', !settings.viewerFields));
+viewerAreasBtn.addEventListener('click', () => {
+  viewer.adjusting = !viewer.adjusting;
+  updateAreaBar();
+  renderOverlay();
+});
+document.getElementById('area-done').addEventListener('click', () => {
+  viewer.adjusting = false;
+  updateAreaBar();
+  renderOverlay();
+});
+areaScope.addEventListener('change', updateAreaBar);
+areaClearBtn.addEventListener('click', () => setFieldArea(viewer.field, null));
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && viewer.adjusting && !viewer.drag && !(e.target instanceof Element && e.target.closest('input, textarea, select, dialog'))) {
+    viewer.adjusting = false;
+    updateAreaBar();
+    renderOverlay();
+  }
+});
+
+// ---- zooming and panning
+viewerZoomInBtn.addEventListener('click', () => {
+  viewer.fit = null;
+  setViewerScale(viewer.scale * 1.25);
+});
+viewerZoomOutBtn.addEventListener('click', () => {
+  viewer.fit = null;
+  setViewerScale(viewer.scale / 1.25);
+});
+// Fit: the whole page, then (clicked again) its width
+viewerFitBtn.addEventListener('click', () => {
+  viewer.fit = viewer.fit === 'page' && Math.abs(viewer.scale - fitScale('page')) < 0.001 ? 'width' : 'page';
+  fitViewerPages();
+});
+viewerPages.addEventListener('wheel', (e) => {
+  if (!e.ctrlKey || !viewer.pages.length) return;
+  e.preventDefault();
+  viewer.fit = null;
+  setViewerScale(viewer.scale * Math.exp(-e.deltaY * 0.0015), e.clientX, e.clientY);
+}, { passive: false });
+viewerPages.addEventListener('pointerdown', (e) => {
+  if (e.button !== 0 && e.button !== 1) return;
+  if (e.button === 0 && viewer.adjusting && e.target.closest('.viewer-overlay')) return;
+  if (!viewer.pages.length) return;
+  e.preventDefault();
+  viewerPages.setPointerCapture(e.pointerId);
+  viewerPages.classList.add('panning');
+  const start = { x: e.clientX, y: e.clientY, left: viewerPages.scrollLeft, top: viewerPages.scrollTop };
+  const move = (ev) => {
+    viewerPages.scrollLeft = start.left - (ev.clientX - start.x);
+    viewerPages.scrollTop = start.top - (ev.clientY - start.y);
+  };
+  const up = () => {
+    viewerPages.removeEventListener('pointermove', move);
+    viewerPages.removeEventListener('pointerup', up);
+    viewerPages.removeEventListener('pointercancel', up);
+    viewerPages.classList.remove('panning');
+  };
+  viewerPages.addEventListener('pointermove', move);
+  viewerPages.addEventListener('pointerup', up);
+  viewerPages.addEventListener('pointercancel', up);
+});
+// Kept fitted as the viewer is resized
+new ResizeObserver(() => {
+  if (viewer.pages.length && viewer.fit) fitViewerPages();
+}).observe(viewerPages);
 
 // The register's PDF: the register itself, or the newest "...register..." PDF beside it
 async function registerPdf() {
@@ -5392,7 +5928,8 @@ async function loadSettings() {
       spellingWords: Array.isArray(data.spellingWords) ? data.spellingWords.filter(w => typeof w === 'string' && w) : [],
       defaultView: validView(data.defaultView),
       pdfViewer: data.pdfViewer !== false,
-      viewerWidth: typeof data.viewerWidth === 'number' && data.viewerWidth > 0 && data.viewerWidth < 1 ? data.viewerWidth : 0.5
+      viewerWidth: typeof data.viewerWidth === 'number' && data.viewerWidth > 0 && data.viewerWidth < 1 ? data.viewerWidth : 0.5,
+      viewerFields: data.viewerFields !== false
     };
   } catch (e) {
     // nothing saved yet: the defaults

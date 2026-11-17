@@ -260,10 +260,31 @@
     <aside id="pdf-viewer" hidden>
       <div class="viewer-bar">
         <button id="viewer-close" class="viewer-tab" title="Hide the PDF viewer">PDF viewer ▸</button>
-        <span id="viewer-name" class="muted">Click a drawing's row to see it here, or the table's header for the register</span>
-        <button id="viewer-external" title="Open it in the PDF program" disabled>Open ↗</button>
+        <span id="viewer-name" class="muted"></span>
+        <span class="viewer-tools">
+          <button id="viewer-zoom-out" class="viewer-btn" title="Zoom out (Ctrl + wheel)" disabled>−</button>
+          <span id="viewer-zoom" class="muted"></span>
+          <button id="viewer-zoom-in" class="viewer-btn" title="Zoom in (Ctrl + wheel)" disabled>+</button>
+          <button id="viewer-fit" class="viewer-btn" title="Fit the page in the viewer" disabled>Fit</button>
+          <button id="viewer-fields" class="viewer-btn" aria-pressed="true" title="Mark where the title block fields were read from" disabled>Fields</button>
+          <button id="viewer-areas" class="viewer-btn" aria-pressed="false" title="Draw or move the areas the fields are read from, for title blocks laid out differently" disabled>Areas…</button>
+          <button id="viewer-external" class="viewer-btn" title="Open it in the PDF program" disabled>Open ↗</button>
+        </span>
       </div>
-      <iframe id="viewer-frame" title="PDF viewer"></iframe>
+      <!-- Choosing where each title block field is read from -->
+      <div id="area-bar" class="area-bar" hidden>
+        <div id="area-fields" class="area-fields"></div>
+        <div class="area-actions">
+          <select id="area-scope" title="Which drawings the areas you draw are for">
+            <option value="folder">All drawings in this folder</option>
+            <option value="file">This drawing only</option>
+          </select>
+          <button id="area-clear" class="viewer-btn"></button>
+          <span id="area-hint" class="area-hint muted"></span>
+          <button id="area-done" class="viewer-btn">Done</button>
+        </div>
+      </div>
+      <div id="viewer-pages"><div class="viewer-empty muted">Click a drawing's row to see it here, or the table's header for the register</div></div>
     </aside>
 
     <!-- Right-click menu of a table row -->

@@ -41,23 +41,85 @@
   // as the sheet is displayed (rotation applied), y upwards; page is { width, height }. Items may
   // also give their reading direction { dx, dy } (y upwards), so a sheet plotted sideways on the
   // page can be turned to read its title block.
-  function readTitleBlock(items, page) {
+  //
+  // Items may also give their box on the sheet as displayed, as fractions of its width and height
+  // with y downwards: box [x0, y0, x1, y1]. Then the details also say where each field was found,
+  // found: { field: { boxes: [box...], label: box or null, area: rect or null } }, and areas
+  // { field: [x0, y0, x1, y1] } (the same units) read a field from the text inside its area instead
+  // of looking for its label, for title blocks laid out differently.
+  const TITLE_BLOCK_FIELDS = ['title', 'number', 'rev', 'scale', 'size', 'project', 'client'];
+  function readTitleBlock(items, page, areas = {}) {
     ({ items, page } = uprightSheet(items, page));
     // Only horizontal text; rotated notes and dimensions aren't title block fields
     const text = items.filter(i => i.str.trim() && !i.rotated);
-    const scaleField = readField(text, SCALE_LABEL_RE);
-    const sizeField = readField(text, SIZE_LABEL_RE);
-    const parsed = splitScale(scaleField);
-    return {
-      title: readLabelled(text, TITLE_LABEL_RE),
-      number: readDrawingNumber(text),
-      project: readLabelled(text, PROJECT_LABEL_RE),
-      client: readLabelled(text, CLIENT_LABEL_RE),
-      rev: readRevision(text),
-      scale: parsed.scale || scalesOnSheet(items),
-      size: (sizeField.match(SHEET_SIZE_RE) || [])[0] || parsed.size || (page ? sheetSizeOf(page.width, page.height) : ''),
-      sources: sourceFiles(items)
+    const found = {};
+    const boxesOf = list => list.filter(i => i.box).map(i => i.box);
+    // A field from its area if it has one, else by its label
+    const field = (name, byLabel, fromText) => {
+      const area = validArea(areas && areas[name]);
+      if (area) {
+        const inside = list => list.filter(i => i.box && centreIn(i.box, area));
+        // Upright text first; sideways text only where the area has nothing else
+        let parts = inside(text);
+        if (!parts.length) parts = inside(items.filter(i => i.str.trim()));
+        // Without the captions of the boxes the area covers ("Zone:", "Number:")
+        const values = parts.filter(i => !LABEL_WORD_RE.test(i.str));
+        if (values.length) parts = values;
+        const r = fromText(parts);
+        found[name] = { boxes: boxesOf(r.items), label: null, area };
+        return r;
+      }
+      const r = byLabel();
+      found[name] = { boxes: boxesOf(r.items), label: r.label && r.label.box || null, area: null };
+      return r;
     };
+    const lines = parts => joinLinesWithItems(parts, ' ', false);
+    const title = field('title', () => readLabelled(text, TITLE_LABEL_RE), lines);
+    const number = field('number', () => readDrawingNumber(text), parts => ({ value: joinNumber(parts), items: parts }));
+    const project = field('project', () => readLabelled(text, PROJECT_LABEL_RE), lines);
+    const client = field('client', () => readLabelled(text, CLIENT_LABEL_RE), lines);
+    const rev = field('rev', () => readRevision(text), lines);
+    const scaleField = field('scale', () => readField(text, SCALE_LABEL_RE), lines);
+    const parsed = splitScale(scaleField.value);
+    const sizeField = field('size', () => readField(text, SIZE_LABEL_RE), lines);
+    let scale = parsed.scale;
+    if (!scale && !found.scale.area) {
+      // Every scale on the sheet: shown where they are
+      const sheetScales = scalesOnSheet(items);
+      scale = sheetScales.value;
+      found.scale.boxes = boxesOf(sheetScales.items);
+    }
+    let size = (sizeField.value.match(SHEET_SIZE_RE) || [])[0];
+    if (size) size = size.toUpperCase();
+    else if (!found.size.area) {
+      size = parsed.size;
+      // The size printed with the scale ("1:50 @ A1")
+      if (size) found.size.boxes = found.scale.boxes.slice();
+      else size = page ? sheetSizeOf(page.width, page.height) : '';
+    }
+    return {
+      title: title.value,
+      number: number.value,
+      project: project.value,
+      client: client.value,
+      rev: rev.value,
+      scale,
+      size: size || '',
+      sources: sourceFiles(items),
+      found
+    };
+  }
+
+  // [x0, y0, x1, y1] within the sheet (0 to 1), or null
+  function validArea(a) {
+    if (!Array.isArray(a) || a.length !== 4 || !a.every(n => typeof n === 'number' && Number.isFinite(n))) return null;
+    const [x0, y0, x1, y1] = a;
+    return x0 >= -0.01 && y0 >= -0.01 && x1 <= 1.01 && y1 <= 1.01 && x1 - x0 > 0.001 && y1 - y0 > 0.001 ? a : null;
+  }
+
+  function centreIn(box, area) {
+    const x = (box[0] + box[2]) / 2, y = (box[1] + box[3]) / 2;
+    return x >= area[0] && x <= area[2] && y >= area[1] && y <= area[3];
   }
 
   // The drawing's source model or CAD file, when the sheet prints its path (Revit and AutoCAD can
@@ -126,16 +188,17 @@
   const TITLE_LABEL_RE = /^\s*(?:drawing\s+|dwg\.?\s+)?title\s*[.:]?\s*$/i;
   const PROJECT_LABEL_RE = /^\s*project\s*[.:]?\s*$/i;
   const CLIENT_LABEL_RE = /^\s*client\s*[.:]?\s*$/i;
+  // -> { value, items (the value's), label }
   function readLabelled(text, labelRe) {
-    let best = '';
+    let best = { value: '', items: [], label: null };
     for (const label of text.filter(i => labelRe.test(i.str))) {
       const sameColumn = i => Math.abs(i.x - label.x) < 2;
       const below = text.filter(i => i !== label && sameColumn(i) && i.y < label.y - 1);
       const floor = below.length ? Math.max(...below.map(i => i.y)) : label.y - label.h * 8;
       const top = label.y + label.h;
       const parts = text.filter(i => i.x > label.x + 1 && !sameColumn(i) && i.y < top && i.y > floor);
-      const title = joinLines(parts, ' ', true);
-      if (title.length > best.length) best = title;
+      const title = joinLinesWithItems(parts, ' ', true);
+      if (title.value.length > best.value.length) best = { ...title, label };
     }
     return best;
   }
@@ -145,6 +208,11 @@
   // next row of the title block below a field with nothing under it in its own column
   const LABEL_WORD_RE = /^\s*[A-Za-z][A-Za-z ]{0,20}[.:]\s*$/;
   function joinLines(parts, separator, stopAtLabels) {
+    return joinLinesWithItems(parts, separator, stopAtLabels).value;
+  }
+
+  // -> { value, items: the parts it was made from }
+  function joinLinesWithItems(parts, separator, stopAtLabels) {
     const lines = [];
     for (const p of parts) {
       const line = lines.find(l => Math.abs(l.y - p.y) < p.h * 0.4);
@@ -153,19 +221,17 @@
     }
     lines.sort((a, b) => b.y - a.y);
     const end = stopAtLabels ? lines.findIndex(l => l.parts.every(p => LABEL_WORD_RE.test(p.str))) : -1;
-    return (end < 0 ? lines : lines.slice(0, end))
-      .map(l => l.parts.sort((a, b) => a.x - b.x).map(p => p.str).join(''))
-      .join(separator).replace(/\s+/g, ' ').trim();
+    const kept = end < 0 ? lines : lines.slice(0, end);
+    return {
+      value: kept.map(l => l.parts.sort((a, b) => a.x - b.x).map(p => p.str).join(''))
+        .join(separator).replace(/\s+/g, ' ').trim(),
+      items: kept.flatMap(l => l.parts)
+    };
   }
 
   // Title strip fields have the label at the top of the cell and the value under it. The value
-  // is the first line below the label, from the label's left edge up to the next label along.
-  function fieldValue(text, label) {
-    const items = fieldItems(text, label);
-    return items.length ? joinLines(items, ' ') : '';
-  }
-
-  // The items of the first line under a label, in its cell (up to the next label along)
+  // is the first line below the label, from the label's left edge up to the next label along:
+  // the items of the first line under a label, in its cell (up to the next label along)
   function fieldItems(text, label) {
     const h = label.h;
     const labelRow = text.filter(i => i !== label && Math.abs(i.y - label.y) < h * 0.5 && i.x > label.x + 1);
@@ -183,12 +249,14 @@
     return text.filter(i => labelRe.test(i.str)).sort((a, b) => a.y - b.y);
   }
 
+  // -> { value, items, label }
   function readField(text, labelRe) {
     for (const label of lowestLabels(text, labelRe)) {
-      const value = fieldValue(text, label);
-      if (value) return value;
+      const items = fieldItems(text, label);
+      const value = items.length ? joinLines(items, ' ') : '';
+      if (value) return { value, items, label };
     }
-    return '';
+    return { value: '', items: [], label: null };
   }
 
   // "Rev. No.", "Rev.", "Revision" - but not the Rev column of a revision history table, which
@@ -200,10 +268,11 @@
       !text.some(i => HISTORY_HEADING_RE.test(i.str) && Math.abs(i.y - label.y) < label.h * 0.5 && Math.abs(i.x - label.x) < label.h * 60));
     // A revision is a short code (C07, P1, A, 03); anything longer isn't one
     for (const label of labels) {
-      const value = fieldValue(text, label);
-      if (value && value.length <= 8) return value;
+      const items = fieldItems(text, label);
+      const value = items.length ? joinLines(items, ' ') : '';
+      if (value && value.length <= 8) return { value, items, label };
     }
-    return '';
+    return { value: '', items: [], label: null };
   }
 
   // "Dwg. No.", "Drawing No.", "Drawing Number", "Drawing Codes." ISO 19650 title blocks may print
@@ -212,13 +281,20 @@
   const NUMBER_LABEL_RE = /^\s*(?:dwg|drawing)\.?\s*(?:no\.?|number|codes?)\s*[.:]?\s*$/i;
   function readDrawingNumber(text) {
     for (const label of lowestLabels(text, NUMBER_LABEL_RE)) {
-      const parts = fieldItems(text, label).filter(i => !/^[\s\-–]*$/.test(i.str)).sort((a, b) => a.x - b.x).map(i => i.str.trim());
-      const boxed = parts.length > 1 && parts.every(p => !/[-_.\s]/.test(p));
-      const value = parts.join(boxed ? '-' : ' ').replace(/\s*([-_.])\s*/g, '$1').replace(/\s+/g, ' ').trim();
+      const items = fieldItems(text, label);
+      const value = joinNumber(items);
       // A drawing number has a digit and is short; anything else isn't one
-      if (value && /\d/.test(value) && value.length <= 60) return value;
+      if (value && /\d/.test(value) && value.length <= 60) return { value, items, label };
     }
-    return '';
+    return { value: '', items: [], label: null };
+  }
+
+  // A number's items joined, line by line, each left to right: fields printed apart are closed up
+  // around their hyphens
+  function joinNumber(items) {
+    const parts = joinLinesWithItems(items, ' ', false).items.filter(i => !/^[\s\-–]*$/.test(i.str)).map(i => i.str.trim());
+    const boxed = parts.length > 1 && parts.every(p => !/[-_.\s]/.test(p));
+    return parts.join(boxed ? '-' : ' ').replace(/\s*([-_.])\s*/g, '$1').replace(/\s+/g, ' ').trim();
   }
 
   const SCALE_LABEL_RE = /^\s*scales?\s*[.:]?\s*$/i;
@@ -240,13 +316,16 @@
   // or gradients (FALL 1:40, RAMP 1:12).
   const SHEET_SCALE_RE = /(?<![\d.:])1\s*:\s*(\d+(?:\.\d+)?)(?![\d:])/g;
   const GRADIENT_RE = /\b(?:falls?|gradient|slope|pitch|ramp)\b/i;
+  // -> { value, items: those with a scale }
   function scalesOnSheet(items) {
     const found = new Set();
+    const withScale = [];
     for (const item of items) {
       if (GRADIENT_RE.test(item.str)) continue;
       for (const m of item.str.matchAll(SHEET_SCALE_RE)) found.add(Number(m[1]));
+      if (item.str.match(SHEET_SCALE_RE)) withScale.push(item);
     }
-    return [...found].sort((a, b) => b - a).map(n => `1:${n}`).join('/');
+    return { value: [...found].sort((a, b) => b - a).map(n => `1:${n}`).join('/'), items: withScale };
   }
 
   // ISO A sheet from the page size in points, allowing a few percent for plotter margins
@@ -1887,6 +1966,8 @@
     DRAWING_NUMBER,
     parsePdfText,
     readTitleBlock,
+    TITLE_BLOCK_FIELDS,
+    validArea,
     sourceFiles,
     splitScale,
     sheetSizeOf,
