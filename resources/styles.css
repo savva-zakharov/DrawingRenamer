@@ -125,8 +125,10 @@ html,body{
   font-size:14px;
 }
 
+/* The app on the left, and the PDF viewer on the right while it's open */
+body{ display:flex }
 /* Header / table / actions / log stacked; only the table scrolls */
-body{ display:flex; flex-direction:column; padding:12px 16px; gap:10px }
+#app-pane{ flex:1; min-width:0; display:flex; flex-direction:column; padding:12px 16px; gap:10px }
 header, footer, .action-bar{ flex:none }
 
 /* Tabs along the top: each shows its own set of controls above the table */
@@ -185,6 +187,19 @@ h3{ margin:0; font-size:14px }
 .toolbar{ margin-top:8px }
 .view-options{ margin:8px 0 0; gap:16px }
 .view-options label.inline{ white-space:nowrap }
+/* The display checkboxes: in the row while they fit, else in a menu under a ☰ Show button */
+.view-menu-wrap{ position:relative; display:flex; align-items:center }
+.view-columns{ display:flex; align-items:center; gap:16px }
+.view-menu-btn{ display:none; align-items:center; gap:5px; padding:3px 9px }
+.view-options.collapsed .view-menu-btn{ display:inline-flex }
+.view-options.collapsed .view-menu-btn[aria-expanded="true"]{ border-color:var(--accent); color:var(--accent) }
+.view-options.collapsed .view-columns{ display:none; position:absolute; top:calc(100% + 4px); left:0; z-index:20; flex-direction:column; align-items:stretch; gap:0; padding:4px 0; background:var(--bg); border:1px solid var(--border); border-radius:5px; box-shadow:0 6px 20px var(--dialog-shadow) }
+.view-options.collapsed .view-columns.open{ display:flex }
+.view-options.collapsed .view-columns label.inline{ padding:5px 14px 5px 10px }
+.view-options.collapsed .view-columns label.inline:hover{ background:var(--neutral-soft) }
+/* Measuring whether everything fits on one line */
+.view-options.measuring{ flex-wrap:nowrap }
+.view-options.measuring > *{ flex-shrink:0 }
 .table-filter{ display:flex; align-items:center; gap:12px; margin-left:auto }
 .table-filter input[type="search"]{ width:240px; padding:3px 8px }
 
@@ -452,3 +467,69 @@ table.name-preview .same{ color:var(--muted) }
 .option-row .app-actions .app-clear:hover{ color:var(--bad) }
 .option-row .app-browse svg{ display:block }
 .short-number{ font-size:11px }
+
+/* PDF viewer */
+#pdf-viewer{ flex:0 0 50%; min-width:0; display:flex; flex-direction:column; padding:12px 16px 12px 12px; gap:8px }
+/* The line between the table and the viewer, dragged to resize it */
+#viewer-divider{ flex:0 0 7px; margin:0 -3px; position:relative; z-index:2; cursor:col-resize; touch-action:none }
+#viewer-divider[hidden]{ display:none }
+#viewer-divider::after{ content:''; position:absolute; top:0; bottom:0; left:3px; width:1px; background:var(--border) }
+#viewer-divider:hover::after, body.resizing-viewer #viewer-divider::after{ left:2px; width:3px; background:var(--accent) }
+body.resizing-viewer{ cursor:col-resize; user-select:none }
+body.resizing-viewer #viewer-pages{ pointer-events:none }
+#viewer-pages.adjusting{ cursor:default }
+#pdf-viewer[hidden]{ display:none }
+.viewer-bar{ display:flex; align-items:center; flex-wrap:wrap; gap:4px 8px; border-bottom:1px solid var(--border) }
+#viewer-name{ flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:12px }
+#viewer-name.loaded{ color:var(--fg) }
+.viewer-tools{ display:flex; align-items:center; gap:4px; margin-bottom:4px; margin-left:auto }
+.viewer-btn{ padding:2px 8px; font-size:12px }
+.viewer-btn[aria-pressed="true"]{ border-color:var(--accent); color:var(--accent) }
+#viewer-zoom{ min-width:38px; text-align:center; font-size:11px; font-variant-numeric:tabular-nums }
+/* The pages, on a grey ground; dragged to pan, Ctrl + wheel to zoom */
+#viewer-pages{ flex:1; min-height:0; overflow:auto; padding:12px; border:1px solid var(--border); border-radius:4px; background:var(--neutral-soft); cursor:grab }
+#viewer-pages.panning{ cursor:grabbing; user-select:none }
+.viewer-empty{ padding:24px; text-align:center; font-size:12px; cursor:default }
+.viewer-page{ position:relative; margin:0 auto 12px; background:#fff; box-shadow:0 1px 4px var(--dialog-shadow) }
+.viewer-page:last-child{ margin-bottom:0 }
+.viewer-page canvas{ display:block; width:100%; height:100% }
+/* Where the title block fields were read from */
+.viewer-overlay{ position:absolute; inset:0; pointer-events:none }
+.viewer-overlay.adjusting{ pointer-events:auto; cursor:crosshair }
+.field-found, .field-label, .field-area{ position:absolute; box-sizing:border-box }
+.field-found{ border:1.5px solid var(--c); background:color-mix(in srgb, var(--c) 16%, transparent); border-radius:2px }
+.field-label{ border:1px dashed var(--c); opacity:.7 }
+/* Only the areas take the pointer: a press on a value inside one moves its area */
+.field-found, .field-label{ pointer-events:none }
+.field-area{ border:1.5px dashed var(--c); background:color-mix(in srgb, var(--c) 7%, transparent) }
+.adjusting .field-area{ cursor:move }
+.adjusting .field-area.dim, .adjusting .field-found.dim{ opacity:.45 }
+.field-area.selected{ border-style:solid; border-width:2px }
+.field-tag{ position:absolute; left:-1px; bottom:100%; padding:0 4px; border-radius:2px 2px 0 0; background:var(--c); color:#fff; font-size:10px; line-height:13px; white-space:nowrap; pointer-events:none }
+.area-handle{ position:absolute; width:9px; height:9px; margin:-5px 0 0 -5px; background:#fff; border:1.5px solid var(--c); box-sizing:border-box }
+.area-handle[data-corner="nw"]{ left:0; top:0; cursor:nwse-resize }
+.area-handle[data-corner="ne"]{ left:100%; top:0; cursor:nesw-resize }
+.area-handle[data-corner="sw"]{ left:0; top:100%; cursor:nesw-resize }
+.area-handle[data-corner="se"]{ left:100%; top:100%; cursor:nwse-resize }
+/* The fields to choose from while drawing areas */
+.area-bar{ display:flex; flex-direction:column; gap:6px; font-size:12px }
+.area-bar[hidden]{ display:none }
+.area-fields{ display:flex; flex-wrap:wrap; gap:4px }
+.area-field{ display:inline-flex; align-items:center; gap:5px; max-width:220px; padding:2px 8px; border:1px solid var(--border); border-radius:12px; background:none; color:var(--fg); font-size:12px }
+.area-field .swatch{ flex:none; width:9px; height:9px; border-radius:2px; background:var(--c) }
+.area-field .val{ min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--muted) }
+.area-field .val.none{ font-style:italic }
+.area-field.has-area .name{ text-decoration:underline dashed var(--c); text-underline-offset:3px }
+.area-field.selected{ border-color:var(--c); box-shadow:inset 0 0 0 1px var(--c) }
+.area-actions{ display:flex; align-items:center; flex-wrap:wrap; gap:6px }
+.area-actions select{ font-size:12px; padding:2px 4px }
+.area-hint{ flex:1; min-width:120px; font-size:11px }
+/* The buttons that hide and show it look like the tabs */
+nav.tabs .viewer-tab, .viewer-bar .viewer-tab{ padding:6px 14px; border:none; border-bottom:2px solid transparent; margin-bottom:-1px; background:none; color:var(--muted); font-size:13px }
+nav.tabs .viewer-tab{ margin-left:auto }
+.viewer-bar .viewer-tab{ border-bottom-color:var(--accent); color:var(--fg); font-weight:600 }
+nav.tabs .viewer-tab:hover, .viewer-bar .viewer-tab:hover{ color:var(--accent) }
+/* The row being shown */
+tbody tr.viewing td{ box-shadow:inset 0 2px 0 var(--accent), inset 0 -2px 0 var(--accent) }
+tbody tr.viewing td:first-child{ box-shadow:inset 2px 2px 0 var(--accent), inset 0 -2px 0 var(--accent) }
+#drawings thead th{ cursor:default }
