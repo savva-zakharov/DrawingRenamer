@@ -290,8 +290,7 @@ async function resolveRegisterPath(input) {
   throw new Error('Unsupported path type.');
 }
 
-// Titles and numbers can be edited in Word and Excel registers; new entries and moving rows
-// need Word
+// Titles, numbers and new entries can be saved to Word and Excel registers; moving rows needs Word
 function canEditRegister() {
   return state.registerKind === 'docx' || state.registerKind === 'xlsx';
 }
@@ -1208,11 +1207,12 @@ function updateButtons() {
   const isDocx = state.registerKind === 'docx';
   const editable = canEditRegister();
   wordBtn.hidden = !editable;
-  entryBtn.hidden = !isDocx;
+  entryBtn.hidden = !editable;
   entryBtn.disabled = state.busy;
+  entryBtn.title = `Add a drawing to the ${registerAppName()} register`;
   const changes = isDocx
     ? pendingTitleEdits().length + pendingDetailEdits().length + pendingProjectEdits().length + (pendingIssue() ? 1 : 0) + pendingNumberEdits().length + pendingNewEntries().length + state.movedTokens.size
-    : editable ? pendingTitleEdits().length + pendingDetailEdits().length + pendingProjectEdits().length + (pendingIssue() ? 1 : 0) + pendingNumberEdits().length : 0;
+    : editable ? pendingTitleEdits().length + pendingDetailEdits().length + pendingProjectEdits().length + (pendingIssue() ? 1 : 0) + pendingNumberEdits().length + pendingNewEntries().length : 0;
   wordBtn.textContent = changes ? `${saveButtonLabel()} (${changes})` : saveButtonLabel();
   wordBtn.title = `Write edited titles and numbers into the ${registerAppName()} register`;
   wordBtn.disabled = state.busy || changes === 0;
@@ -1859,7 +1859,7 @@ function renderRow(row, newFiles, alt, depth) {
   else if (row.status === 'superseded') target = displayPath(relJoin(relJoin(row.dir, ssDir()), supersededName(row.file)));
   else if (row.status === 'skip' || row.status === 'none') target = '';
   // Stacked, the new name goes under the current one, with what changes marked
-  const canAdd = row.status === 'unmatched' && state.registerKind === 'docx';
+  const canAdd = row.status === 'unmatched' && canEditRegister();
   const targetTd = stacked ? stackPart(fileTd, 'stack-bottom') : cell(tr, '');
   if (!stacked) targetTd.textContent = target;
   else if (target && row.rel && !row.group && row.status !== 'ok') {
@@ -1984,7 +1984,7 @@ function renderTitle(td, row) {
     const badge = document.createElement('button');
     badge.className = 'edit-badge new';
     badge.textContent = 'new ✕';
-    badge.title = 'Not in the register yet; press SAVE TO WORD to add it.\nClick to remove this entry';
+    badge.title = `Not in the register yet; press ${saveButtonLabel()} to add it.\nClick to remove this entry`;
     badge.addEventListener('click', (e) => {
       e.stopPropagation();
       removeNewEntry(row.token);
@@ -4272,14 +4272,45 @@ async function exportRegisterPdf() {
   }
 }
 
+// After rows were added to a sheet: pictures below them move down with the rows, and Excel's
+// formula calculation order (which names cells) is dropped for Excel to rebuild
+async function afterXlsxRowsInserted(zip, sheetPath, move) {
+  const relsFile = zip.file(RegisterCore.relsPathOf(sheetPath));
+  const rels = relsFile ? await relsFile.async('string') : '';
+  for (const m of rels.matchAll(/<Relationship\b[^>]*\/>/g)) {
+    if (!/\bType="[^"]*\/drawing"/.test(m[0])) continue;
+    const target = (/\bTarget="([^"]+)"/.exec(m[0]) || [])[1];
+    if (!target) continue;
+    // '../drawings/drawing7.xml' from xl/worksheets => xl/drawings/drawing7.xml
+    const parts = target.startsWith('/') ? [] : sheetPath.split('/').slice(0, -1);
+    for (const p of target.replace(/^\//, '').split('/')) {
+      if (p === '..') parts.pop();
+      else if (p !== '.') parts.push(p);
+    }
+    const path = parts.join('/');
+    const file = zip.file(path);
+    if (file) zip.file(path, RegisterCore.shiftDrawingRows(await file.async('string'), move));
+  }
+  if (zip.file('xl/calcChain.xml')) {
+    zip.remove('xl/calcChain.xml');
+    for (const [part, re] of [['[Content_Types].xml', /<Override\b[^>]*PartName="\/xl\/calcChain\.xml"[^>]*\/>/g],
+      ['xl/_rels/workbook.xml.rels', /<Relationship\b[^>]*Target="[^"]*calcChain\.xml"[^>]*\/>/g]]) {
+      const f = zip.file(part);
+      if (f) zip.file(part, (await f.async('string')).replace(re, ''));
+    }
+  }
+}
+
 async function saveToExcel() {
   const edits = pendingTitleEdits();
   const details = pendingDetailEdits();
   const numbers = pendingNumberEdits();
   const project = pendingProjectEdits();
   const issue = pendingIssue();
-  if (!edits.length && !details.length && !project.length && !issue && !numbers.length) return;
-  const options = await askWordOptions(edits, [], numbers, 0, details, project, issue);
+  const additions = pendingNewEntries();
+  if (!edits.length && !details.length && !project.length && !issue && !numbers.length && !additions.length) return;
+  const options = await askWordOptions(edits, additions, numbers, 0, details, project, issue);
+  const wantOrder = Object.keys(state.titles);
   if (!options) return;
 
   const xlsx = state.registerPath;
@@ -4301,15 +4332,38 @@ async function saveToExcel() {
       issue
     });
     if (result.errors.length) throw new Error(result.errors.join('; ') + '; nothing was saved.');
+    const newNumber = t => (result.applied.numbers[t] ? result.applied.numbers[t].to : t);
+    // New rows go in after the edits (numbers as they now are), each copying the formatting of a
+    // drawing row next to it
+    let edited = { ...parts, styles: result.styles, sheets: { ...parts.sheets, [result.path]: result.xml } };
+    const insert = additions.length
+      ? RegisterCore.insertXlsxRows(edited, additions.map(e => ({ ...e, after: e.after && newNumber(e.after) })))
+      : { inserted: [], skipped: [], errors: [] };
+    if (insert.errors.length) throw new Error(insert.errors.join('; ') + '; nothing was saved.');
+    if (insert.inserted.length) {
+      if (insert.path !== result.path) throw new Error('new rows would go on a different sheet from the other changes; nothing was saved.');
+      edited = { ...edited, styles: insert.styles, workbook: insert.workbook, sheets: { ...edited.sheets, [insert.path]: insert.xml } };
+    }
+    const added = additions.filter(e => insert.inserted.includes(e.token));
 
     // Check the edited sheet reads back exactly as intended before touching the file
-    const after = RegisterCore.readXlsxRegister({ ...parts, sheets: { ...parts.sheets, [result.path]: result.xml } });
-    const newNumber = t => (result.applied.numbers[t] ? result.applied.numbers[t].to : t);
+    const after = RegisterCore.readXlsxRegister(edited);
     const expected = {};
     for (const [code, title] of Object.entries(before.titles)) {
       expected[newNumber(code)] = result.applied.titles[code] ? result.applied.titles[code].to : title;
     }
+    for (const e of added) expected[e.token] = e.title.replace(/\s+/g, ' ').trim();
     const wrong = [...new Set([...Object.keys(expected), ...Object.keys(after.titles)])].filter(t => after.titles[t] !== expected[t]);
+    for (const e of added) {
+      const got = after.details[e.token] || {};
+      const place = after.places[e.token] || {};
+      const want = field => (place[field + 'Col'] !== undefined ? (e[field] || '').replace(/\s+/g, ' ').trim() : '');
+      if ((got.scale !== want('scale') || got.size !== want('size')) && !wrong.includes(e.token)) wrong.push(e.token);
+    }
+    // ...in the order shown in the table
+    const wantRows = wantOrder.filter(t => t in after.titles);
+    const gotRows = Object.keys(after.titles).filter(t => wantRows.includes(t));
+    if (wantRows.join('|') !== gotRows.join('|')) throw new Error('the rows came out in a different order from the table; nothing was saved.');
     for (const [code, was] of Object.entries(before.details)) {
       const want = {
         scale: result.applied.scales[code] ? result.applied.scales[code].to : was.scale,
@@ -4318,13 +4372,13 @@ async function saveToExcel() {
       const got = after.details[newNumber(code)];
       if ((!got || got.scale !== want.scale || got.size !== want.size) && !wrong.includes(code)) wrong.push(code);
     }
-    const headerAfter = RegisterCore.readXlsxProject({ ...parts, sheets: { ...parts.sheets, [result.path]: result.xml } }).fields;
+    const headerAfter = RegisterCore.readXlsxProject(edited).fields;
     for (const f of RegisterCore.readXlsxProject(parts).fields) {
       const got = headerAfter.find(g => g.label === f.label);
       if (!got || got.value !== (result.applied.project[f.label] ? result.applied.project[f.label].to : f.value)) wrong.push(f.label);
     }
     if (issue) {
-      const problem = issueReadBackProblem(issue, RegisterCore.readXlsxIssues({ ...parts, styles: result.styles, sheets: { ...parts.sheets, [result.path]: result.xml } }), newNumber,
+      const problem = issueReadBackProblem(issue, RegisterCore.readXlsxIssues(edited), newNumber,
         Object.keys(issue.marks).filter(t => result.notFound.includes(t)));
       if (problem) throw new Error(`${problem}; nothing was saved.`);
     }
@@ -4333,8 +4387,10 @@ async function saveToExcel() {
     }
 
     await backupToSS(xlsx);
-    zip.file(result.path, result.xml);
-    if (result.styles !== parts.styles) zip.file('xl/styles.xml', result.styles);
+    zip.file(result.path, edited.sheets[result.path]);
+    if (edited.styles !== parts.styles) zip.file('xl/styles.xml', edited.styles);
+    if (edited.workbook !== parts.workbook) zip.file('xl/workbook.xml', edited.workbook);
+    if (insert.inserted.length) await afterXlsxRowsInserted(zip, result.path, insert.move);
     const data = await zip.generateAsync({ type: 'arraybuffer', compression: 'DEFLATE', compressionOptions: { level: 6 } });
     await nfs.writeBinaryFile(xlsx, data);
 
@@ -4343,6 +4399,9 @@ async function saveToExcel() {
       for (const [code, { from, to }] of Object.entries(applied)) appendLog(`📝 ${code} ${DETAIL_NAMES[field]}: "${from}" → "${to}"`);
     }
     for (const [code, { to }] of Object.entries(result.applied.numbers)) appendLog(`# ${code} renumbered to ${to}`);
+    for (const e of added) appendLog(`➕ ${e.token}: added "${e.title}" ${describePlace(e.after)}`);
+    for (const code of insert.skipped) appendLog(`⚠️ ${code} is already in ${baseName(xlsx)}, so it wasn't added again.`);
+    state.layout.newEntries = state.layout.newEntries.filter(e => !insert.inserted.includes(e.token) && !insert.skipped.includes(e.token));
     for (const code of result.notFound) appendLog(`⚠️ ${code} wasn't found on sheet "${result.sheet}"; its edit was kept.`);
     for (const code of Object.keys(result.applied.titles)) delete state.layout.titleEdits[code];
     clearSavedDetails(result.applied.scales, result.applied.sizes);
@@ -4358,7 +4417,7 @@ async function saveToExcel() {
     await saveLayout();
     const detailCount = Object.keys(result.applied.scales).length + Object.keys(result.applied.sizes).length;
     const issueText = result.applied.issue ? (issue.mode === 'new' ? ', a new issue' : ', an issue update') : '';
-    appendLog(`✅ Saved ${Object.keys(result.applied.titles).length} title change(s), ${detailCount} scale/size change(s), ${Object.keys(result.applied.project).length} project detail change(s)${issueText} and ${Object.keys(result.applied.numbers).length} new number(s) to sheet "${result.sheet}" of ${baseName(xlsx)}.`);
+    appendLog(`✅ Saved ${Object.keys(result.applied.titles).length} title change(s), ${detailCount} scale/size change(s), ${Object.keys(result.applied.project).length} project detail change(s)${issueText}, ${Object.keys(result.applied.numbers).length} new number(s) and ${added.length} new entr${added.length === 1 ? 'y' : 'ies'} to sheet "${result.sheet}" of ${baseName(xlsx)}.`);
 
     if (options.exportPdf) {
       const pdf = options.pdf;
@@ -4427,9 +4486,11 @@ function guessFromFileName(fileName) {
 
 function updateEntryPreview() {
   const after = entryFields.after.value;
-  const details = state.registerXml && after ? RegisterCore.readDocxDetails(state.registerXml)[after] : null;
+  const details = after ? state.registerDetails[after] : null;
   entryFields.scale.placeholder = details && details.scale ? `e.g. ${details.scale}` : 'e.g. 1:100';
-  const marks = state.registerXml && after ? RegisterCore.readRowMarks(state.registerXml, after).filter(Boolean) : [];
+  const marks = !after ? []
+    : state.registerXml ? RegisterCore.readRowMarks(state.registerXml, after).filter(Boolean)
+    : ((state.registerIssues && state.registerIssues.marks[after]) || []).filter(Boolean);
   const label = document.getElementById('entry-marks-label');
   label.textContent = after
     ? `Copy the issue marks from ${after} (${marks.length ? marks.join(' ') : 'none'})`
@@ -4465,7 +4526,9 @@ async function fillEntryFromTitleBlock(rel) {
 // fromRow: the table row of a file not in the register (its number and title are guessed from the
 // file name, the scale and size from its title block), or null for a blank entry
 function openEntryDialog(fromRow) {
-  if (state.registerKind !== 'docx' || state.busy) return;
+  if (!canEditRegister() || state.busy) return;
+  document.getElementById('entry-dialog-note').textContent =
+    `Added to the ${registerAppName()} register when you press ${saveButtonLabel()}, copying the formatting of the row it follows. Until then it's used for matching and renaming.`;
   const fromFile = fromRow ? fromRow.file : null;
   const guess = fromFile ? guessFromFileName(fromFile) : { token: '', title: '' };
   entryFields.token.value = guess.token;
@@ -4540,7 +4603,7 @@ function openEntryDialog(fromRow) {
       };
       state.layout.newEntries.push(entry);
       await saveLayout();
-      appendLog(`➕ ${token} "${title}" will be added ${describePlace(entry.after)} when you press SAVE TO WORD.`);
+      appendLog(`➕ ${token} "${title}" will be added ${describePlace(entry.after)} when you press ${saveButtonLabel()}.`);
       finish();
       await refresh();
     };

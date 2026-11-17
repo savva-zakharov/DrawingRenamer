@@ -889,6 +889,214 @@
     return place ? place.codeCols.length : 1;
   }
 
+  // --------------------
+  // Adding rows to an Excel register
+  // --------------------
+
+  // Row numbers in cell references ("B12", "$B$12", "B12:J12", "A1:AD415 B3") changed by move(row)
+  function shiftCellRefs(text, move) {
+    return text.replace(/(\$?[A-Z]{1,3}\$?)(\d+)(?![\d(])/g, (m, col, row) => col + move(parseInt(row, 10)));
+  }
+
+  // Rows of drawing anchors (0-based <xdr:row>) moved as the sheet's rows are by move(row)
+  function shiftDrawingRows(drawingXml, move) {
+    return drawingXml.replace(/(<xdr:row>)(\d+)(<\/xdr:row>)/g, (m, open, row, close) => open + (move(parseInt(row, 10) + 1) - 1) + close);
+  }
+
+  // Path of a part's relationships ('xl/worksheets/sheet7.xml' => 'xl/worksheets/_rels/sheet7.xml.rels')
+  function relsPathOf(path) {
+    const i = path.lastIndexOf('/');
+    return `${path.slice(0, i)}/_rels/${path.slice(i + 1)}.rels`;
+  }
+
+  // Insert new drawing rows on the current register sheet, each copying the formatting of a drawing
+  // row next to where it goes: after the row of entry.after (after the last drawing when that isn't
+  // found; before the first drawing when it is ''). Rows below move down, with their merged cells,
+  // page breaks, the print area and pictures. Cell formulas aren't adjusted.
+  // entries: [{ token, title, scale, size, after, copyMarks }]. parts as for editXlsxRegister.
+  // Returns { path, xml, workbook, inserted: [token], skipped: [token already in the register],
+  // errors: [message], move: row => its new row number }
+  function insertXlsxRows(parts, entries) {
+    const reg = readXlsxRegister(parts);
+    if (!reg.path) throw new Error('No drawings found in the workbook.');
+    const sheetXml = parts.sheets[reg.path];
+    const zeroPad = zeroPadStyles(parts.styles);
+    const sharedStrings = parts.sharedStrings ? findElements(parts.sharedStrings, 'si').map(si => stringItemText(si.xml)) : [];
+    const rowCells = {};
+    for (const r of readSheetRows(sheetXml, sharedStrings, zeroPad)) rowCells[r.row] = r.cells;
+    const rowNumOf = xml => parseInt((/^<row\b[^>]*?\br="(\d+)"/.exec(xml) || [])[1], 10);
+    const rowXml = {};
+    for (const r of findElements(sheetXml, 'row')) rowXml[rowNumOf(r.xml)] = r.xml;
+    const issueCols = readXlsxIssues(parts).columns.map(c => c.col);
+    const styles = cellStyles(sheetXml);
+    const book = styleBook(parts.styles);
+
+    const codeFields = entry => entry.token.split('-');
+    const codes = Object.keys(reg.places);
+    const drawingRows = new Set(codes.map(c => reg.places[c].row));
+    const first = reg.places[codes[0]];
+    const last = reg.places[codes[codes.length - 1]];
+    const inserted = [];
+    const skipped = [];
+    const errors = [];
+    const groups = new Map(); // row the new rows go after => [{ entry, template, anchor }]
+    const groupOf = {}; // new code => its group's list
+    for (const entry of entries) {
+      if (entry.token in reg.places || entry.token in groupOf) {
+        skipped.push(entry.token);
+        continue;
+      }
+      let list;
+      let at;
+      let anchor;
+      if (entry.after && groupOf[entry.after]) {
+        // After another new row
+        list = groupOf[entry.after];
+        const prev = list.find(x => x.entry.token === entry.after);
+        at = list.indexOf(prev) + 1;
+        anchor = prev.anchor;
+      } else {
+        const atStart = entry.after === '';
+        anchor = atStart ? first : reg.places[entry.after] || last;
+        const point = atStart ? first.row - 1 : anchor.row;
+        if (!groups.has(point)) groups.set(point, []);
+        list = groups.get(point);
+        at = list.length;
+      }
+      // Format like a row in the middle of the list (not the first one under a header, which
+      // often has its own top border) where there is one
+      let template = anchor;
+      if (!drawingRows.has(anchor.row - 1)) {
+        const next = codes.map(c => reg.places[c]).find(pl => pl.row === anchor.row + 1);
+        if (next && next.codeCols.length === anchor.codeCols.length) template = next;
+      }
+      const fields = codeFields(entry);
+      if (template.codeCols.length > 1 && fields.length !== template.codeCols.length) {
+        errors.push(`${entry.token} has ${fields.length} parts, but the register's numbers are split over ${template.codeCols.length} cells`);
+        continue;
+      }
+      list.splice(at, 0, { entry, template, anchor });
+      groupOf[entry.token] = list;
+      inserted.push(entry.token);
+    }
+
+    const points = [...groups.keys()].sort((a, b) => a - b);
+    // A row's number once the new rows are in
+    const move = row => row + points.filter(p => p < row).reduce((n, p) => n + groups.get(p).length, 0);
+
+    // A new row: the template row's cells with their styles but no values, then the entry's values
+    const newMerges = [];
+    const buildXlsxRow = ({ entry, template, anchor }, num) => {
+      const t = template.row;
+      const cellsOf = xml => childElements(splitElement(xml).inner).filter(c => tagName(c) === 'c');
+      const colOf = c => columnIndex((/\br="([A-Z]+)\d+"/.exec(c) || [])[1] || 'A');
+      const anchorCells = {};
+      for (const c of cellsOf(rowXml[anchor.row] || '<row></row>')) anchorCells[colOf(c)] = c;
+      const cells = cellsOf(rowXml[t]).map(c => {
+        const col = colOf(c);
+        const ref = columnName(col) + num;
+        if (issueCols.includes(col)) {
+          // Issue marks: copied from the drawing it follows (with their highlight), or left empty
+          // in the column's usual shading
+          if (entry.copyMarks && anchorCells[col]) {
+            return anchorCells[col].replace(/\br="[A-Z]+\d+"/, `r="${ref}"`).replace(/<f\b[^>]*\/>|<f\b[^>]*>[\s\S]*?<\/f>/g, '');
+          }
+          let style = styles[columnName(col) + t] || 0;
+          const neighbour = neighbourStyle(styles, t, col, issueCols[0]);
+          if (book.solidColor(book.fillOf(style)) && neighbour !== undefined && book.fillOf(neighbour) !== book.fillOf(style)) {
+            style = book.withFill(style, book.fillOf(neighbour));
+          }
+          return `<c r="${ref}" s="${style}"/>`;
+        }
+        const s = (/\bs="(\d+)"/.exec(c) || [])[1];
+        return `<c r="${ref}"${s !== undefined ? ` s="${s}"` : ''}/>`;
+      });
+      const open = /^<row\b[^>]*?(?=\/?>)/.exec(rowXml[t])[0].replace(/\br="\d+"/, `r="${num}"`);
+      const values = {};
+      const old = rowCells[t] || {};
+      const isNumber = col => {
+        const c = cellsOf(rowXml[t]).find(x => colOf(x) === col);
+        return !!c && !/\bt="/.test(/^<c\b[^>]*/.exec(c)[0]) && /<v>/.test(c);
+      };
+      const valueFor = (col, text) => {
+        const s = styles[columnName(col) + t];
+        const padded = s !== undefined && zeroPad[s] === text.length;
+        return isNumber(col) && /^\d+$/.test(text) && (!/^0\d/.test(text) || padded) ? { text, number: true } : text;
+      };
+      if (template.codeCols.length === 1) values[template.codeCols[0]] = entry.token;
+      else template.codeCols.forEach((col, i) => {
+        values[col] = valueFor(col, codeFields(entry)[i] + (/-\s*$/.test(old[col] || '') ? '-' : ''));
+      });
+      values[template.titleCol] = collapse(entry.title);
+      if (template.scaleCol !== undefined && entry.scale) values[template.scaleCol] = collapse(entry.scale);
+      if (template.sizeCol !== undefined && entry.size) values[template.sizeCol] = collapse(entry.size);
+      // Merged cells of the template row (the title over two columns...) are merged in the new row too
+      for (const m of sheetXml.matchAll(/<mergeCell\s+ref="([A-Z]+)(\d+):([A-Z]+)(\d+)"\s*\/>/g)) {
+        if (Number(m[2]) === t && Number(m[4]) === t) newMerges.push(`<mergeCell ref="${m[1]}${num}:${m[3]}${num}"/>`);
+      }
+      return setRowCells(`${open}>${cells.join('')}</row>`, num, values, zeroPad);
+    };
+
+    // The rows: renumbered, with the new ones after their rows
+    const data = findElements(sheetXml, 'sheetData')[0];
+    const { open: dataOpen, close: dataClose } = splitElement(data.xml);
+    let body = '';
+    const pending = [...points];
+    const flush = before => {
+      while (pending.length && (before === null || pending[0] < before)) {
+        const p = pending.shift();
+        groups.get(p).forEach((x, i) => (body += buildXlsxRow(x, move(p) + i + 1)));
+      }
+    };
+    for (const r of findElements(data.xml, 'row')) {
+      const n = rowNumOf(r.xml);
+      flush(n);
+      const to = move(n);
+      body += to === n ? r.xml : r.xml
+        .replace(/^(<row\b[^>]*?\br=")\d+"/, `$1${to}"`)
+        .replace(/(<c\b[^>]*?\br="[A-Z]+)\d+"/g, `$1${to}"`)
+        .replace(/(<f\b[^>]*?\bref=")([^"]*)"/g, (m, a, ref) => `${a}${shiftCellRefs(ref, move)}"`);
+    }
+    flush(null);
+
+    // Everything else on the sheet that points at rows
+    const shiftAttr = (xml, tags, attr) => xml.replace(new RegExp(`(<(?:${tags})\\b[^>]*?\\b${attr}=")([^"]*)"`, 'g'),
+      (m, a, ref) => `${a}${shiftCellRefs(ref, move)}"`);
+    const rest = xml => {
+      let out = shiftAttr(xml, 'dimension|mergeCell|hyperlink|autoFilter|protectedRange', 'ref');
+      out = shiftAttr(out, 'conditionalFormatting|dataValidation|selection', 'sqref');
+      out = shiftAttr(out, 'selection', 'activeCell');
+      out = shiftAttr(out, 'pane', 'topLeftCell');
+      out = out.replace(/(<xm:sqref>)([^<]*)(<\/xm:sqref>)/g, (m, a, ref, b) => a + shiftCellRefs(ref, move) + b);
+      // Page breaks (id: the 0-based row they're above) stay above the same row, so rows added
+      // after the last row of a page stay on that page
+      out = out.replace(/<rowBreaks\b[\s\S]*?<\/rowBreaks>/, breaks => breaks.replace(/(<brk\b[^>]*?\bid=")(\d+)"/g,
+        (m, a, id) => `${a}${move(parseInt(id, 10) + 1) - 1}"`));
+      return out;
+    };
+    let xml = rest(sheetXml.slice(0, data.start)) + dataOpen + body + dataClose + rest(sheetXml.slice(data.end));
+    if (newMerges.length) {
+      xml = xml.replace(/<mergeCells\b([^>]*?)(?:\s+count="\d+")?>([\s\S]*?)<\/mergeCells>/, (m, attrs, inner) => {
+        const all = inner + newMerges.join('');
+        return `<mergeCells${attrs} count="${(all.match(/<mergeCell\b/g) || []).length}">${all}</mergeCells>`;
+      });
+      if (!/<mergeCells\b/.test(xml)) {
+        // After sheetData and anything that must come before mergeCells
+        xml = xml.replace(/(<\/sheetData>(?:<sheetCalcPr\b[^>]*\/>)?(?:<sheetProtection\b[^>]*\/>)?(?:<protectedRanges>[\s\S]*?<\/protectedRanges>)?(?:<scenarios>[\s\S]*?<\/scenarios>)?(?:<autoFilter\b[\s\S]*?(?:\/>|<\/autoFilter>))?(?:<sortState\b[\s\S]*?(?:\/>|<\/sortState>))?(?:<dataConsolidate\b[\s\S]*?(?:\/>|<\/dataConsolidate>))?(?:<customSheetViews>[\s\S]*?<\/customSheetViews>)?)/,
+          `$1<mergeCells count="${newMerges.length}">${newMerges.join('')}</mergeCells>`);
+      }
+    }
+
+    // The print area and other names on this sheet
+    const sheetName = reg.sheet;
+    const workbook = (parts.workbook || '').replace(/(<definedName\b[^>]*>)([^<]*)(<\/definedName>)/g, (m, a, value, b) => {
+      const shifted = decodeXml(value).replace(/('(?:[^']|'')+'|[^\s'!,()=+\-*/&^<>:;]+)!(\$?[A-Z]{1,3}\$?\d+(?::\$?[A-Z]{1,3}\$?\d+)?)/g,
+        (whole, sheet, ref) => (sheet.replace(/^'|'$/g, '').replace(/''/g, "'") === sheetName ? `${sheet}!${shiftCellRefs(ref, move)}` : whole));
+      return a + escapeXml(shifted) + b;
+    });
+    return { path: reg.path, sheet: reg.sheet, xml, workbook, styles: book.toXml(), inserted, skipped, errors, move };
+  }
+
   // The worksheet parts readXlsxRegister needs, from a JSZip archive
   async function loadXlsxParts(zip) {
     const text = async p => (zip.file(p) ? zip.file(p).async('string') : null);
@@ -2004,6 +2212,9 @@
     isLooseCode,
     readXlsxRegister,
     editXlsxRegister,
+    insertXlsxRows,
+    shiftDrawingRows,
+    relsPathOf,
     xlsxCodeCells,
     loadXlsxParts,
     makeMatcher,
