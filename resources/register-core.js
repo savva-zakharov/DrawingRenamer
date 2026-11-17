@@ -114,6 +114,31 @@
     };
   }
 
+  // The originator of an ISO 19650 drawing number found in text (a number, or a file name with
+  // one in it), or null. Both orders of fields are recognised, by the information type code:
+  //   UK annex:    Project-Originator-Volume-Level-Type-Role-Number   PAWE-DA-BF-XX-DR-A-6002
+  //   Irish annex: Project-...-Level-Type-Originator-Role-Number     KARUNA-BA-01-DR-DAR-AR-1001
+  const ISO_TYPES = new Set(['AF', 'AN', 'BQ', 'CA', 'CM', 'CO', 'CP', 'CR', 'DB', 'DR', 'FN', 'HS', 'IE', 'M2', 'M3', 'MI', 'MR', 'MS',
+    'PH', 'PP', 'PR', 'RD', 'RI', 'RP', 'SA', 'SC', 'SH', 'SK', 'SN', 'SP', 'SU', 'TS', 'VS']);
+  const ISO_ROLE_RE = /^[A-Z]{1,2}$/;
+  const ISO_ORIGINATOR_RE = /^[A-Z][A-Z0-9]{1,5}$/;
+  const ISO_NUMBER_RE = /^[A-Z]?\d{3,}[A-Z0-9]*$/;
+  function isoOriginator(text) {
+    const parts = String(text || '').toUpperCase().split(/[-_\s]+/).filter(Boolean);
+    for (let i = 0; i < parts.length; i++) {
+      if (!ISO_TYPES.has(parts[i])) continue;
+      // Irish: type, originator, role, number
+      if (i >= 2 && ISO_ORIGINATOR_RE.test(parts[i + 1] || '') && ISO_ROLE_RE.test(parts[i + 2] || '') && ISO_NUMBER_RE.test(parts[i + 3] || '')) {
+        return parts[i + 1];
+      }
+      // UK: project, originator, volume, level, type, role, number
+      if (i >= 4 && ISO_ROLE_RE.test(parts[i + 1] || '') && ISO_NUMBER_RE.test(parts[i + 2] || '') && ISO_ORIGINATOR_RE.test(parts[i - 3])) {
+        return parts[i - 3];
+      }
+    }
+    return null;
+  }
+
   // [x0, y0, x1, y1] within the sheet (0 to 1), or null
   function validArea(a) {
     if (!Array.isArray(a) || a.length !== 4 || !a.every(n => typeof n === 'number' && Number.isFinite(n))) return null;
@@ -1972,6 +1997,7 @@
     readTitleBlock,
     TITLE_BLOCK_FIELDS,
     validArea,
+    isoOriginator,
     sourceFiles,
     splitScale,
     sheetSizeOf,

@@ -360,11 +360,27 @@ async function readFileDetails(filePath, worker) {
   const doc = await PDFJS.getDocument(worker ? { data, worker } : { data });
   try {
     const sheet = await titleBlockItems(await doc.getPage(1));
-    const set = titleBlockAreasFor(filePath);
-    return RegisterCore.readTitleBlock(sheet.items, sheet.page, set.areas, set.fallback);
+    return readTitleBlockWithAreas(filePath, sheet).details;
   } finally {
     doc.destroy();
   }
+}
+
+// A file's title block read with the areas set for it: { details, set }. A drawing whose
+// originator isn't in its register number or file name is read first to find it in the title
+// block's number, and then again with its originator's areas.
+function readTitleBlockWithAreas(filePath, sheet) {
+  let set = titleBlockAreasFor(filePath);
+  let details = RegisterCore.readTitleBlock(sheet.items, sheet.page, set.areas, set.fallback);
+  const tb = state.layout && state.layout.titleBlock;
+  if (!set.originator && details.number && tb && Object.keys(tb.originators || {}).length) {
+    const again = titleBlockAreasFor(filePath, details.number);
+    if (again.originator && tb.originators[again.originator]) {
+      set = again;
+      details = RegisterCore.readTitleBlock(sheet.items, sheet.page, set.areas, set.fallback);
+    }
+  }
+  return { details, set };
 }
 
 // A page's text items for RegisterCore.readTitleBlock, each with its box on the page as shown
@@ -399,12 +415,14 @@ async function titleBlockItems(page) {
 // ([x0, y0, x1, y1], y downwards). Each is { field: area }:
 //   areas: for every drawing
 //   folders: { folder: areas } for the drawings in a drawing folder ('' the top folder), over those
+//   originators: { originator: areas } for the drawings by an originator (from their ISO 19650
+//     numbers), over those
 //   files: { path in the working folder: areas } for one drawing, over both; 'label' there finds
 //     that field by its label despite an area above
 //   missing: read only where a field isn't found by its label (or an area above)
 function titleBlockLayout() {
   const tb = state.layout.titleBlock || (state.layout.titleBlock = {});
-  for (const key of ['areas', 'folders', 'files', 'missing']) if (!tb[key]) tb[key] = {};
+  for (const key of ['areas', 'folders', 'originators', 'files', 'missing']) if (!tb[key]) tb[key] = {};
   return tb;
 }
 
@@ -417,16 +435,30 @@ function titleBlockFolderOf(filePath) {
   return rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : '';
 }
 
+// The originator in a file's ISO 19650 number (UK or Irish annex order): from its drawing number
+// in the register, its file name, or else number (read from its title block), or null
+function originatorOf(filePath, number) {
+  const rel = relOfPath(filePath);
+  const row = rel !== null ? state.rows.find(r => r.rel === rel) : null;
+  for (const text of [row && row.token, baseName(filePath).replace(/\.[^.]+$/, ''), number]) {
+    const originator = text && RegisterCore.isoOriginator(text);
+    if (originator) return originator;
+  }
+  return null;
+}
+
 // A file's path in the working folder, or null if it isn't in it
 function relOfPath(filePath) {
   const base = state.targetDir ? state.targetDir + '/' : null;
   return base && filePath && filePath.startsWith(base) ? filePath.slice(base.length) : null;
 }
 
-// The areas a file's fields are read from: { areas, fallback, source: { field: 'all', 'folder' or 'file' } }
-function titleBlockAreasFor(filePath) {
+// The areas a file's fields are read from: { areas, fallback, originator,
+// source: { field: 'all', 'folder', 'originator' or 'file' } } (number: as read from its title block)
+function titleBlockAreasFor(filePath, number) {
+  const originator = originatorOf(filePath, number);
   const tb = state.layout && state.layout.titleBlock;
-  if (!tb) return { areas: {}, fallback: {}, source: {} };
+  if (!tb) return { areas: {}, fallback: {}, source: {}, originator };
   const areas = {}, source = {};
   const add = (set, from) => {
     for (const [field, area] of Object.entries(set || {})) {
@@ -442,9 +474,10 @@ function titleBlockAreasFor(filePath) {
   add(tb.areas, 'all');
   const folder = titleBlockFolderOf(filePath);
   if (folder !== null) add((tb.folders || {})[folder], 'folder');
+  if (originator) add((tb.originators || {})[originator], 'originator');
   const rel = relOfPath(filePath);
   if (rel) add((tb.files || {})[rel], 'file');
-  return { areas, fallback: { ...(tb.missing || {}) }, source };
+  return { areas, fallback: { ...(tb.missing || {}) }, source, originator };
 }
 
 function validTitleBlock(data) {
@@ -469,6 +502,7 @@ function validTitleBlock(data) {
   return {
     areas: areasOf(data && data.areas, false),
     folders: byKey(data && data.folders, false),
+    originators: byKey(data && data.originators, false),
     files: byKey(data && data.files, true),
     missing: areasOf(data && data.missing, false)
   };
@@ -598,7 +632,7 @@ function layoutPath() {
 }
 
 async function loadLayout() {
-  state.layout = { folders: [], assignments: {}, titleEdits: {}, detailEdits: {}, projectEdits: {}, issueEdit: null, numberEdits: {}, numberHistory: {}, newEntries: [], moves: [], foldersToRemove: [], nameTemplate: DEFAULT_TEMPLATE, options: {}, ignoredWarnings: [], spellingWords: [], view: null, titleBlock: { areas: {}, folders: {}, files: {}, missing: {} }, fileFolders: {} };
+  state.layout = { folders: [], assignments: {}, titleEdits: {}, detailEdits: {}, projectEdits: {}, issueEdit: null, numberEdits: {}, numberHistory: {}, newEntries: [], moves: [], foldersToRemove: [], nameTemplate: DEFAULT_TEMPLATE, options: {}, ignoredWarnings: [], spellingWords: [], view: null, titleBlock: { areas: {}, folders: {}, originators: {}, files: {}, missing: {} }, fileFolders: {} };
   state.layoutBroken = false;
   if (!(await getStatsOrNull(layoutPath()))) return;
   try {
@@ -765,7 +799,7 @@ async function saveLayout() {
 
 function titleBlockSaved() {
   const tb = state.layout.titleBlock;
-  return tb && ['areas', 'folders', 'files', 'missing'].some(k => Object.keys(tb[k] || {}).length) ? tb : undefined;
+  return tb && ['areas', 'folders', 'originators', 'files', 'missing'].some(k => Object.keys(tb[k] || {}).length) ? tb : undefined;
 }
 
 // A drawing's folder: the one it was put in ('' for the top folder), or with recursive scanning
@@ -5526,11 +5560,13 @@ async function renderViewerPages() {
 function readViewerFields() {
   if (!viewer.sheet) {
     viewer.details = null;
+    viewer.originator = null;
     return;
   }
-  const set = titleBlockAreasFor(viewer.path);
-  viewer.details = RegisterCore.readTitleBlock(viewer.sheet.items, viewer.sheet.page, set.areas, set.fallback);
+  const { details, set } = readTitleBlockWithAreas(viewer.path, viewer.sheet);
+  viewer.details = details;
   viewer.areaSource = set.source;
+  viewer.originator = set.originator || originatorOf(viewer.path, details.number);
 }
 
 // The box of boxes [x0, y0, x1, y1]
@@ -5684,10 +5720,14 @@ async function setFieldArea(field, rect) {
   if (forFile) {
     const own = tb.files[rel] || {};
     // Taking away an area it doesn't have: it finds the field by its label despite the others'
-    const inherited = tb.areas[field] || (tb.folders[titleBlockFolderOf(viewer.path)] || {})[field];
+    const inherited = tb.areas[field] || (tb.folders[titleBlockFolderOf(viewer.path)] || {})[field] ||
+      (viewer.originator && (tb.originators[viewer.originator] || {})[field]);
     put(tb.files, rel, area || (own[field] ? null : inherited ? 'label' : null));
   } else if (scope === 'section') {
     put(tb.folders, titleBlockFolderOf(viewer.path), area);
+  } else if (scope === 'originator') {
+    if (!viewer.originator) return;
+    put(tb.originators, viewer.originator, area);
   } else if (scope === 'missing') {
     if (area) tb.missing[field] = area;
     else delete tb.missing[field];
@@ -5697,24 +5737,26 @@ async function setFieldArea(field, rect) {
   updateAreaBar();
   renderOverlay();
   await saveLayout();
-  rereadTitleBlocks(forFile ? [viewer.path] : affectedByArea(field, scope, titleBlockFolderOf(viewer.path)));
+  rereadTitleBlocks(forFile ? [viewer.path] : affectedByArea(field, scope, titleBlockFolderOf(viewer.path), viewer.originator));
 }
 
 // The read drawings whose field a changed area (for the scope given) may change: not those with
 // an area of their own (or their folder's) above it, nor those whose field is found without it.
 // Drawings not read yet are read with it when they are.
-function affectedByArea(field, scope, folder) {
+function affectedByArea(field, scope, folder, originator) {
   const paths = [];
   for (const [filePath, entry] of state.fileDetails) {
-    const source = titleBlockAreasFor(filePath).source[field];
+    const set = titleBlockAreasFor(filePath, entry.details && entry.details.number);
+    const source = set.source[field];
     let affected;
-    if (scope === 'section') affected = titleBlockFolderOf(filePath) === folder && source !== 'file';
+    if (scope === 'section') affected = titleBlockFolderOf(filePath) === folder && source !== 'file' && source !== 'originator';
+    else if (scope === 'originator') affected = set.originator === originator && source !== 'file';
     else if (scope === 'missing') {
       // Missing the field, read from the area for drawings missing it, or not readable
       const details = entry.details;
       const found = details && details.found && details.found[field];
       affected = !details || !details[field] || !!(found && found.fallback);
-    } else affected = source !== 'file' && source !== 'folder';
+    } else affected = source === undefined || source === 'all';
     if (affected) paths.push(filePath);
   }
   return paths;
@@ -5753,6 +5795,10 @@ function updateAreaBar() {
   const section = titleBlockFolderOf(viewer.path);
   const folderLabel = section ? `drawings in ${displayPath(section)}` : 'drawings in the top folder';
   areaScope.querySelector('option[value="section"]').textContent = section ? `Drawings in ${folderLeaf(section)}` : 'Drawings in the top folder';
+  const byOriginator = areaScope.querySelector('option[value="originator"]');
+  byOriginator.textContent = viewer.originator ? `Drawings by originator ${viewer.originator}` : 'Drawings by the same originator (none in its number)';
+  byOriginator.disabled = !viewer.originator;
+  if (areaScope.value === 'originator' && !viewer.originator) areaScope.value = 'all';
   areaFieldsEl.textContent = '';
   for (const field of RegisterCore.TITLE_BLOCK_FIELDS) {
     const st = FIELD_STYLES[field];
@@ -5766,6 +5812,7 @@ function updateAreaBar() {
       : found.fallback ? 'the area for drawings missing it'
       : source === 'file' ? "this drawing's area"
       : source === 'folder' ? `the area for ${folderLabel}`
+      : source === 'originator' ? `the area for originator ${viewer.originator}`
       : 'the area for all drawings';
     btn.title = `${st.name}: ${value || 'not found'} (read from ${from})`;
     const sw = document.createElement('span');
@@ -5783,9 +5830,10 @@ function updateAreaBar() {
   const name = FIELD_STYLES[field].name.toLowerCase();
   let clear = 'Remove area', can = !!tb.areas[field];
   if (areaScope.value === 'section') can = !!(tb.folders[section] || {})[field];
+  else if (areaScope.value === 'originator') can = !!(viewer.originator && (tb.originators[viewer.originator] || {})[field]);
   else if (areaScope.value === 'missing') can = !!tb.missing[field];
   else if (areaScope.value === 'file') {
-    const inherited = tb.areas[field] || (tb.folders[section] || {})[field];
+    const inherited = tb.areas[field] || (tb.folders[section] || {})[field] || (viewer.originator && (tb.originators[viewer.originator] || {})[field]);
     if (Array.isArray(own[field])) { clear = 'Remove its area'; can = true; }
     else if (own[field] === 'label') { clear = 'Use the shared area'; can = true; }
     else if (inherited) { clear = 'Find by label here'; can = true; }
