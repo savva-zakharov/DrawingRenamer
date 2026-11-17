@@ -125,8 +125,10 @@ html,body{
   font-size:14px;
 }
 
+/* The app on the left, and the PDF viewer on the right while it's open */
+body{ display:flex }
 /* Header / table / actions / log stacked; only the table scrolls */
-body{ display:flex; flex-direction:column; padding:12px 16px; gap:10px }
+#app-pane{ flex:1; min-width:0; display:flex; flex-direction:column; padding:12px 16px; gap:10px }
 header, footer, .action-bar{ flex:none }
 
 /* Tabs along the top: each shows its own set of controls above the table */
@@ -185,6 +187,19 @@ h3{ margin:0; font-size:14px }
 .toolbar{ margin-top:8px }
 .view-options{ margin:8px 0 0; gap:16px }
 .view-options label.inline{ white-space:nowrap }
+/* The display checkboxes: in the row while they fit, else in a menu under a ☰ Show button */
+.view-menu-wrap{ position:relative; display:flex; align-items:center }
+.view-columns{ display:flex; align-items:center; gap:16px }
+.view-menu-btn{ display:none; align-items:center; gap:5px; padding:3px 9px }
+.view-options.collapsed .view-menu-btn{ display:inline-flex }
+.view-options.collapsed .view-menu-btn[aria-expanded="true"]{ border-color:var(--accent); color:var(--accent) }
+.view-options.collapsed .view-columns{ display:none; position:absolute; top:calc(100% + 4px); left:0; z-index:20; flex-direction:column; align-items:stretch; gap:0; padding:4px 0; background:var(--bg); border:1px solid var(--border); border-radius:5px; box-shadow:0 6px 20px var(--dialog-shadow) }
+.view-options.collapsed .view-columns.open{ display:flex }
+.view-options.collapsed .view-columns label.inline{ padding:5px 14px 5px 10px }
+.view-options.collapsed .view-columns label.inline:hover{ background:var(--neutral-soft) }
+/* Measuring whether everything fits on one line */
+.view-options.measuring{ flex-wrap:nowrap }
+.view-options.measuring > *{ flex-shrink:0 }
 .table-filter{ display:flex; align-items:center; gap:12px; margin-left:auto }
 .table-filter input[type="search"]{ width:240px; padding:3px 8px }
 
@@ -452,3 +467,28 @@ table.name-preview .same{ color:var(--muted) }
 .option-row .app-actions .app-clear:hover{ color:var(--bad) }
 .option-row .app-browse svg{ display:block }
 .short-number{ font-size:11px }
+
+/* PDF viewer */
+#pdf-viewer{ flex:0 0 50%; min-width:0; display:flex; flex-direction:column; padding:12px 16px 12px 12px; gap:8px }
+/* The line between the table and the viewer, dragged to resize it */
+#viewer-divider{ flex:0 0 7px; margin:0 -3px; position:relative; z-index:2; cursor:col-resize; touch-action:none }
+#viewer-divider[hidden]{ display:none }
+#viewer-divider::after{ content:''; position:absolute; top:0; bottom:0; left:3px; width:1px; background:var(--border) }
+#viewer-divider:hover::after, body.resizing-viewer #viewer-divider::after{ left:2px; width:3px; background:var(--accent) }
+body.resizing-viewer{ cursor:col-resize; user-select:none }
+body.resizing-viewer iframe{ pointer-events:none }
+#pdf-viewer[hidden]{ display:none }
+.viewer-bar{ display:flex; align-items:center; gap:8px; border-bottom:1px solid var(--border) }
+#viewer-name{ flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:12px }
+#viewer-name.loaded{ color:var(--fg) }
+.viewer-bar > button:last-child{ margin-bottom:4px; padding:2px 8px }
+#viewer-frame{ flex:1; min-height:0; width:100%; border:1px solid var(--border); border-radius:4px; background:var(--neutral-soft) }
+/* The buttons that hide and show it look like the tabs */
+nav.tabs .viewer-tab, .viewer-bar .viewer-tab{ padding:6px 14px; border:none; border-bottom:2px solid transparent; margin-bottom:-1px; background:none; color:var(--muted); font-size:13px }
+nav.tabs .viewer-tab{ margin-left:auto }
+.viewer-bar .viewer-tab{ border-bottom-color:var(--accent); color:var(--fg); font-weight:600 }
+nav.tabs .viewer-tab:hover, .viewer-bar .viewer-tab:hover{ color:var(--accent) }
+/* The row being shown */
+tbody tr.viewing td{ box-shadow:inset 0 2px 0 var(--accent), inset 0 -2px 0 var(--accent) }
+tbody tr.viewing td:first-child{ box-shadow:inset 2px 2px 0 var(--accent), inset 0 -2px 0 var(--accent) }
+#drawings thead th{ cursor:default }

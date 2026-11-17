@@ -47,6 +47,8 @@ const DEFAULT_SETTINGS = {
   apps: { word: '', excel: '', pdf: '', revit: '', autocad: '' }, // programs to open files with ('' = the system default)
   dictionary: null,                 // { aff, dic, name } of a Hunspell dictionary to use, or null for the built-in English (UK)
   spellingWords: [],                // words added to the dictionary, for every folder
+  pdfViewer: true,                  // drawings shown beside the table when their row is clicked
+  viewerWidth: 0.5,                 // the viewer's share of the window's width
   defaultView: null                 // what the table and Warnings tab show in a folder opened for the first time (null: the built-in view)
 };
 let settings = JSON.parse(JSON.stringify(DEFAULT_SETTINGS));
@@ -1520,6 +1522,14 @@ function renderRow(row, newFiles, alt, depth) {
     e.preventDefault();
     openRowMenu(e.clientX, e.clientY, row, copy);
   });
+  // Clicking the row's background shows its drawing in the viewer
+  if (row.rel) {
+    tr.addEventListener('click', (e) => {
+      if (e.target.closest('input, button, label, select, a, .drag-handle') || !window.getSelection().isCollapsed) return;
+      showPdf(absPath(row.rel), row.key);
+    });
+    if (viewer.key === row.key) tr.classList.add('viewing');
+  }
   // Double-clicking the row opens its file, except where double-clicking edits (titles, numbers)
   if (row.rel) {
     tr.addEventListener('dblclick', (e) => {
@@ -3987,7 +3997,8 @@ async function exportRegisterPdf() {
     if (excel) await exportPdfWithExcel(register, state.xlsxSheet, pdf);
     else await exportPdfWithWord(register, pdf);
     appendLog(`✅ Exported ${baseName(pdf)}.`);
-    await openPath(pdf, baseName(pdf));
+    if (settings.pdfViewer) await showPdf(pdf);
+    else await openPath(pdf, baseName(pdf));
   } catch (err) {
     appendLog(`❌ Could not export ${baseName(pdf)}: ${err.message || err}`);
   } finally {
@@ -5063,6 +5074,171 @@ onlyWarningsCheckbox.addEventListener('change', () => {
   if (onlyWarningsCheckbox.checked) loadFileDetails();
 });
 
+// ---------- PDF viewer ----------
+// The right half of the window: WebView2's own PDF viewer in a frame, given the file as a blob
+const viewerEl = document.getElementById('pdf-viewer');
+const viewerFrame = document.getElementById('viewer-frame');
+const viewerName = document.getElementById('viewer-name');
+const viewerOpenBtn = document.getElementById('viewer-open');
+const viewerExternalBtn = document.getElementById('viewer-external');
+const optPdfViewer = document.getElementById('opt-pdf-viewer');
+const viewerDivider = document.getElementById('viewer-divider');
+const viewer = { open: false, path: null, key: null, url: null, run: 0 };
+
+function updateViewer() {
+  viewerEl.hidden = !settings.pdfViewer || !viewer.open;
+  viewerDivider.hidden = viewerEl.hidden;
+  setViewerWidth(settings.viewerWidth);
+  viewerOpenBtn.hidden = !settings.pdfViewer || viewer.open;
+  viewerExternalBtn.disabled = !viewer.path;
+  for (const tr of rowsEl.querySelectorAll('tr.viewing')) if (tr.dataset.key !== viewer.key) tr.classList.remove('viewing');
+  if (viewer.key) {
+    const tr = [...rowsEl.querySelectorAll('tr')].find(t => t.dataset.key === viewer.key);
+    if (tr) tr.classList.add('viewing');
+  }
+}
+
+function setViewerOpen(open) {
+  viewer.open = open;
+  updateViewer();
+}
+
+// Shows a PDF (rowKey: the table row it's for, to mark it), opening the viewer
+async function showPdf(filePath, rowKey = null) {
+  if (!settings.pdfViewer) return;
+  viewer.key = rowKey;
+  setViewerOpen(true);
+  if (viewer.path === filePath) return;
+  const run = ++viewer.run;
+  viewer.path = filePath;
+  viewerName.textContent = `Loading ${baseName(filePath)}…`;
+  viewerName.classList.remove('loaded');
+  updateViewer();
+  try {
+    const data = await nfs.readBinaryFile(filePath);
+    if (run !== viewer.run) return;
+    if (viewer.url) URL.revokeObjectURL(viewer.url);
+    viewer.url = URL.createObjectURL(new Blob([data], { type: 'application/pdf' }));
+    // The whole sheet in view
+    viewerFrame.src = `${viewer.url}#view=Fit&navpanes=0`;
+    viewerName.textContent = baseName(filePath);
+    viewerName.title = displayPath(filePath);
+    viewerName.classList.add('loaded');
+  } catch (err) {
+    if (run !== viewer.run) return;
+    viewer.path = null;
+    viewerName.textContent = `Could not open ${baseName(filePath)}`;
+    appendLog(`❌ Could not show ${baseName(filePath)}: ${err.message || err}`);
+    updateViewer();
+  }
+}
+
+// The register's PDF: the register itself, or the newest "...register..." PDF beside it
+async function registerPdf() {
+  if (!state.registerPath || isTitleBlockMode()) return null;
+  if (state.registerKind === 'pdf') return state.registerPath;
+  const dir = dirName(state.registerPath);
+  const pdfs = (await listFiles(dir)).filter(f => /register/i.test(f) && f.toLowerCase().endsWith('.pdf'))
+    .sort((a, b) => a.localeCompare(b));
+  // dated exports ("26-10-01 ...") sort by date; the newest is last
+  return pdfs.length ? joinPath(dir, pdfs[pdfs.length - 1]) : null;
+}
+
+// Clicking the table's header shows the register
+tableEl.querySelector('thead').addEventListener('click', async (e) => {
+  if (!settings.pdfViewer || e.target.closest('input, button, label, select, a')) return;
+  const pdf = await registerPdf();
+  if (pdf) showPdf(pdf);
+  else if (state.registerPath) appendLog(isTitleBlockMode() ? 'ℹ️ There is no register: drawings are read from their title blocks.' : `ℹ️ No PDF of ${baseName(state.registerPath)} was found beside it; export one first.`);
+});
+
+// Dragging the divider resizes the viewer; both sides keep at least VIEWER_MIN px
+const VIEWER_MIN = 320;
+
+// share: the viewer's fraction of the window's width, kept within the minimums
+function setViewerWidth(share) {
+  const width = window.innerWidth;
+  const px = Math.max(VIEWER_MIN, Math.min(width - VIEWER_MIN, share * width));
+  viewerEl.style.flexBasis = width > 2 * VIEWER_MIN ? `${px}px` : '50%';
+}
+
+viewerDivider.addEventListener('pointerdown', (e) => {
+  if (e.button !== 0) return;
+  e.preventDefault();
+  viewerDivider.setPointerCapture(e.pointerId);
+  document.body.classList.add('resizing-viewer');
+  const move = (ev) => {
+    settings.viewerWidth = (window.innerWidth - ev.clientX) / window.innerWidth;
+    setViewerWidth(settings.viewerWidth);
+  };
+  const up = () => {
+    viewerDivider.removeEventListener('pointermove', move);
+    viewerDivider.removeEventListener('pointerup', up);
+    viewerDivider.removeEventListener('pointercancel', up);
+    document.body.classList.remove('resizing-viewer');
+    // saved as the share actually shown, after the minimums
+    const shown = viewerEl.getBoundingClientRect().width / window.innerWidth;
+    setOption('viewerWidth', Math.round(shown * 1000) / 1000);
+  };
+  viewerDivider.addEventListener('pointermove', move);
+  viewerDivider.addEventListener('pointerup', up);
+  viewerDivider.addEventListener('pointercancel', up);
+});
+viewerDivider.addEventListener('dblclick', () => setOption('viewerWidth', 0.5));
+window.addEventListener('resize', () => {
+  if (!viewerEl.hidden) setViewerWidth(settings.viewerWidth);
+});
+
+viewerOpenBtn.addEventListener('click', () => setViewerOpen(true));
+
+// ---------- display checkboxes menu ----------
+// When the window (or the table's half of it, beside the viewer) is too narrow for the display
+// checkboxes and the filter on one line, the checkboxes fold into a ☰ Show menu
+const viewOptionsEl = document.querySelector('.view-options');
+const viewMenuBtn = document.getElementById('view-menu-btn');
+const viewColumnsEl = viewOptionsEl.querySelector('.view-columns');
+
+function setViewMenuOpen(open) {
+  viewColumnsEl.classList.toggle('open', open);
+  viewMenuBtn.setAttribute('aria-expanded', String(open));
+}
+
+function fitViewOptions() {
+  if (!viewOptionsEl.clientWidth) return; // not shown
+  const wasCollapsed = viewOptionsEl.classList.contains('collapsed');
+  viewOptionsEl.classList.remove('collapsed');
+  viewOptionsEl.classList.add('measuring');
+  const tooNarrow = viewOptionsEl.scrollWidth > viewOptionsEl.clientWidth + 1;
+  viewOptionsEl.classList.remove('measuring');
+  viewOptionsEl.classList.toggle('collapsed', tooNarrow);
+  if (!tooNarrow && wasCollapsed) setViewMenuOpen(false);
+}
+
+// Only width changes matter; folding the checkboxes away changes the row's height
+let viewOptionsWidth = 0;
+new ResizeObserver(() => {
+  if (viewOptionsEl.clientWidth === viewOptionsWidth) return;
+  viewOptionsWidth = viewOptionsEl.clientWidth;
+  fitViewOptions();
+}).observe(viewOptionsEl);
+viewMenuBtn.addEventListener('click', () => setViewMenuOpen(!viewColumnsEl.classList.contains('open')));
+document.addEventListener('mousedown', (e) => {
+  if (viewColumnsEl.classList.contains('open') && !e.target.closest('.view-menu-wrap')) setViewMenuOpen(false);
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && viewColumnsEl.classList.contains('open')) {
+    setViewMenuOpen(false);
+    viewMenuBtn.focus();
+  }
+});
+window.addEventListener('blur', () => setViewMenuOpen(false));
+document.getElementById('viewer-close').addEventListener('click', () => setViewerOpen(false));
+viewerExternalBtn.addEventListener('click', () => {
+  if (viewer.path) openPath(viewer.path, baseName(viewer.path));
+});
+optPdfViewer.addEventListener('change', () =>
+  setOption('pdfViewer', optPdfViewer.checked, optPdfViewer.checked ? 'Drawings show beside the table when their row is clicked.' : 'The PDF viewer is off.'));
+
 // ---------- view ----------
 // What the table and Warnings tab show: kept per folder in its layout file, so a folder opens as
 // it was left. A folder opened for the first time gets the default saved in the Options tab.
@@ -5176,6 +5352,8 @@ function ssFolderProblem(name) {
 // Shows the current options
 function renderOptions() {
   renderSpellingOptions();
+  optPdfViewer.checked = settings.pdfViewer;
+  updateViewer();
   renderViewOptions();
   const today = new Date();
   const loaded = !!state.registerPath;
@@ -5212,7 +5390,9 @@ async function loadSettings() {
       apps: Object.fromEntries(Object.keys(DEFAULT_SETTINGS.apps).map(k => [k, typeof apps[k] === 'string' ? apps[k] : ''])),
       dictionary: dict && typeof dict.aff === 'string' && typeof dict.dic === 'string' ? { aff: dict.aff, dic: dict.dic, name: String(dict.name || baseName(dict.dic)) } : null,
       spellingWords: Array.isArray(data.spellingWords) ? data.spellingWords.filter(w => typeof w === 'string' && w) : [],
-      defaultView: validView(data.defaultView)
+      defaultView: validView(data.defaultView),
+      pdfViewer: data.pdfViewer !== false,
+      viewerWidth: typeof data.viewerWidth === 'number' && data.viewerWidth > 0 && data.viewerWidth < 1 ? data.viewerWidth : 0.5
     };
   } catch (e) {
     // nothing saved yet: the defaults
