@@ -451,3 +451,4 @@ table.name-preview .same{ color:var(--muted) }
 .option-row .app-actions button:hover{ color:var(--accent) }
 .option-row .app-actions .app-clear:hover{ color:var(--bad) }
 .option-row .app-browse svg{ display:block }
+.short-number{ font-size:11px }

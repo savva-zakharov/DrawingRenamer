@@ -824,6 +824,7 @@ function matchFiles(tokenMap, files, registerRels) {
   }
   const matchOld = RegisterCore.makeMatcher(Object.keys(aliases));
   const matchReordered = RegisterCore.makeReorderedMatcher(Object.keys(tokenMap));
+  const matchShort = RegisterCore.makeShortNumberMatcher(Object.keys(tokenMap));
   const matchToken = name => {
     const current = matchCurrent(name);
     const old = matchOld(name);
@@ -841,6 +842,7 @@ function matchFiles(tokenMap, files, registerRels) {
   const byToken = {};
   const unmatched = [];
   const reordered = new Set(); // files whose code has the right fields in a different order
+  const short = new Set(); // files named with only the last part of the number ("5100.pdf")
   const mismatched = new Map(); // no register: file rel => the other number its name starts with
   for (const file of pdfs) {
     // Without a register, a file is the drawing its title block says it is (its name is only a
@@ -856,11 +858,15 @@ function matchFiles(tokenMap, files, registerRels) {
       token = matchReordered(file.name);
       if (token) reordered.add(file.rel);
     }
+    if (!token) {
+      token = matchShort(file.name);
+      if (token) short.add(file.rel);
+    }
     if (token) (byToken[token] = byToken[token] || []).push(file);
     // A register's own PDF (e.g. exported from the Excel register) isn't a drawing
     else if (!/register/i.test(file.name)) unmatched.push(file);
   }
-  return { byToken, unmatched, reordered, mismatched };
+  return { byToken, unmatched, reordered, mismatched, short };
 }
 
 // When several files match one drawing, the user picks which to use.
@@ -920,6 +926,10 @@ function computeRows(tokenMap, match, files, addedTimes, choices) {
         key: f.rel, token, origToken, title, edited, renumbered, moved, isNew, registerTitle, folder, file: f.name, dir: f.dir, rel: f.rel, newName, targetRel,
         group, chosen: f === chosen, first: i === 0, last: i === ordered.length - 1
       };
+      if (match.short && match.short.has(f.rel)) {
+        const parts = token.split('-');
+        row.shortNumber = `Matched by its number, ${parts[parts.length - 1]}, the end of ${token}`;
+      }
       if (match.reordered && match.reordered.has(f.rel)) {
         row.reordered = true;
         row.reason = `The code in this file name has the same parts as ${token} in a different order`;
@@ -1625,6 +1635,11 @@ function renderRow(row, newFiles, alt, depth) {
     detailEntry.projectWarn.className = 'status-icon';
     statusTd.appendChild(detailEntry.projectWarn);
     renderProjectWarning(detailEntry.projectWarn, row);
+  }
+  if (row.shortNumber) {
+    const note = el('div', 'by number', 'short-number muted');
+    note.title = row.shortNumber;
+    statusTd.appendChild(note);
   }
   if (row.reordered) {
     const warn = document.createElement('div');

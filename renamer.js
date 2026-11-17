@@ -168,11 +168,13 @@ async function renameFiles() {
     const separator = separatorFor(targetDir);
     const matchToken = core.makeMatcher(Object.keys(tokenMap));
     const matchReordered = core.makeReorderedMatcher(Object.keys(tokenMap));
+    const matchShort = core.makeShortNumberMatcher(Object.keys(tokenMap));
     const files = fs.readdirSync(targetDir);
     for (let file of files) {
         if (!file.toLowerCase().endsWith(".pdf") || file === registerBasename || file === registerPdf) continue;
 
-        const match = matchToken(file);
+        // A file named with only the drawing's number ("5100.pdf") is that drawing
+        const match = matchToken(file) || matchShort(file);
         if (!match) {
             // Not renamed without asking: use the app to check and tick these
             const reordered = matchReordered(file);

@@ -35,6 +35,7 @@ build/
 test/
 test 2/
 test 3/
+test 4/
 
 # Optional: npm package lock files (if you don't want to track them)
 package-lock.json

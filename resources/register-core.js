@@ -844,6 +844,29 @@
     };
   }
 
+  // For long codes (5 or more fields, as in ISO 19650 names) only: returns a function
+  // fileName -> the register code whose number (its last field, e.g. 5100 for
+  // KARUNA-XX-XX-DR-DAR-AR-5100) is in the file name on its own ("5100.pdf", "External
+  // details-5100.pdf"), or null. A number that ends more than one register code, or a file name
+  // with numbers for more than one, matches nothing; so does the end of another long code.
+  function makeShortNumberMatcher(tokens) {
+    const byNumber = {};
+    for (const token of tokens) {
+      const parts = token.split('-');
+      const number = parts[parts.length - 1];
+      if (parts.length < 5 || number.length < 3 || !/\d/.test(number)) continue;
+      (byNumber[number] = byNumber[number] || []).push(token);
+    }
+    const unique = Object.entries(byNumber).filter(([, list]) => list.length === 1)
+      .map(([number, list]) => ({ token: list[0], re: new RegExp('(?<![A-Z0-9])' + number.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?![A-Z0-9])') }));
+    return function match(fileName) {
+      // Long codes in the name are someone else's numbers, not this shorthand
+      const name = fileName.toUpperCase().replace(/\.[A-Z0-9]+$/, '').replace(/[A-Z0-9]+(?:-[A-Z0-9]+){3,}/g, ' ');
+      const hits = new Set(unique.filter(u => u.re.test(name)).map(u => u.token));
+      return hits.size === 1 ? [...hits][0] : null;
+    };
+  }
+
   // --------------------
   // Word (.docx) XML helpers
   // --------------------
@@ -1874,6 +1897,7 @@
     loadXlsxParts,
     makeMatcher,
     makeReorderedMatcher,
+    makeShortNumberMatcher,
     readDocxTitles,
     readDocxDetails,
     readDocxProject,
