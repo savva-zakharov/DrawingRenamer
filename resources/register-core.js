@@ -1486,7 +1486,7 @@
   // Replace the text of one column (0 = number, 1 = title, 2 = scale, 3 = size) in the rows of
   // the given drawings. A row without that column counts as not found.
   function editDocxCells(xml, edits, column, opts) {
-    const rev = makeRevisions(xml, opts.author || 'Drawing Renamer', opts.date || new Date().toISOString().replace(/\.\d+Z$/, 'Z'));
+    const rev = makeRevisions(xml, opts.author || 'Drawing registrar', opts.date || new Date().toISOString().replace(/\.\d+Z$/, 'Z'));
     const applied = {};
     const changes = [];
     for (const { token, cells } of registerRows(xml)) {
@@ -1602,7 +1602,7 @@
   // entries: [{ token, title, scale, size, after, copyMarks }]; opts as for editDocxTitles.
   // Returns { xml, inserted: [token], skipped: [token already in the register] }
   function insertDocxRows(xml, entries, opts = {}) {
-    const rev = makeRevisions(xml, opts.author || 'Drawing Renamer', opts.date || new Date().toISOString().replace(/\.\d+Z$/, 'Z'));
+    const rev = makeRevisions(xml, opts.author || 'Drawing registrar', opts.date || new Date().toISOString().replace(/\.\d+Z$/, 'Z'));
     const rows = registerRows(xml);
     if (!rows.length) throw new Error('No drawing rows found in the document to copy formatting from.');
     const existing = new Set(rows.map(r => r.token));
@@ -1666,7 +1666,7 @@
   // copy is inserted at the new place (Word can't track moves of table rows).
   // Returns { xml, moved: [token], notFound: [token] }
   function moveDocxRows(xml, moves, opts = {}) {
-    const rev = makeRevisions(xml, opts.author || 'Drawing Renamer', opts.date || new Date().toISOString().replace(/\.\d+Z$/, 'Z'));
+    const rev = makeRevisions(xml, opts.author || 'Drawing registrar', opts.date || new Date().toISOString().replace(/\.\d+Z$/, 'Z'));
     const moved = [];
     const notFound = [];
     let out = xml;
@@ -1789,7 +1789,7 @@
   // gives them, "Heading" for the heading). opts as editDocxTitles.
   // Returns { xml, applied: { label: { from, to } }, notFound: [label] }
   function editDocxProject(xml, edits, opts = {}) {
-    const rev = makeRevisions(xml, opts.author || 'Drawing Renamer', opts.date || new Date().toISOString().replace(/\.\d+Z$/, 'Z'));
+    const rev = makeRevisions(xml, opts.author || 'Drawing registrar', opts.date || new Date().toISOString().replace(/\.\d+Z$/, 'Z'));
     const { fields } = readDocxProject(xml);
     const rows = findElements(xml, 'w:tr');
     const applied = {};
@@ -1938,7 +1938,7 @@
   // goes back to the one beside it. opts as editDocxTitles.
   // Returns { xml, applied: { index, date: { from, to } | null, marks: { token: { from, to } } }, notFound: [token] }
   function editDocxIssue(xml, issue, opts = {}) {
-    const rev = makeRevisions(xml, opts.author || 'Drawing Renamer', opts.date || new Date().toISOString().replace(/\.\d+Z$/, 'Z'));
+    const rev = makeRevisions(xml, opts.author || 'Drawing registrar', opts.date || new Date().toISOString().replace(/\.\d+Z$/, 'Z'));
     const info = readDocxIssues(xml);
     const column = info.columns[issue.index];
     if (!column) throw new Error(`the register has no issue column ${issue.index + 1}`);

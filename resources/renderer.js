@@ -79,7 +79,7 @@ function ssDir() {
   return folderOption('ssFolder');
 }
 // Saved next to the register: which folder each drawing belongs in, for later runs
-const LAYOUT_FILE = 'drawing-renamer.json';
+const LAYOUT_FILE = 'drawing-registrar.json';
 
 // File paths inside targetDir are "relative paths" using '/', e.g. "Plans/PA-100 - Plan.pdf"
 const state = {
@@ -1164,7 +1164,7 @@ function selectedRows() {
   return state.rows.filter(isSelected);
 }
 
-function renameRows() {
+function registrarows() {
   return selectedRows().filter(r => ACTION_STATUSES.includes(r.status) || r.pendingMove);
 }
 
@@ -1196,7 +1196,7 @@ function rowShown() {
 
 function updateButtons() {
   updateToolbarActions();
-  const n = renameRows().length;
+  const n = registrarows().length;
   renameBtn.textContent = n ? `RENAME (${n})` : 'RENAME';
   renameBtn.disabled = state.busy || n === 0;
 
@@ -3770,7 +3770,7 @@ async function supersede(file) {
 }
 
 async function renameSelected() {
-  const toRename = renameRows();
+  const toRename = registrarows();
   if (!toRename.length) return;
 
   state.busy = true;
@@ -4055,10 +4055,10 @@ async function saveToWord() {
       throw new Error(`${baseName(docx)} is open in Word. Close it there first, then save again.`);
     }
     const { zip, xml } = await readDocumentXml(docx);
-    let author = 'Drawing Renamer';
+    let author = 'Drawing registrar';
     try {
       const user = await Neutralino.os.getEnv('USERNAME');
-      if (user) author = `${user} (Drawing Renamer)`;
+      if (user) author = `${user} (Drawing registrar)`;
     } catch (e) {
       // keep the default author
     }
@@ -5082,7 +5082,7 @@ function renderSpellingOptions() {
   const all = settings.spellingWords.length;
   document.getElementById('opt-dict-note').textContent =
     `Titles, projects and clients are checked when Spelling is ticked above the table or in the Warnings tab. Words added: ${all} for every folder` +
-    (state.registerPath ? `, ${here} in this folder's drawing-renamer.json` : '') + '.';
+    (state.registerPath ? `, ${here} in this folder's drawing-registrar.json` : '') + '.';
 }
 
 document.getElementById('opt-dict-load').addEventListener('click', async () => {

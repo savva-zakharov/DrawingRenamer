@@ -1,10 +1,10 @@
 [package]
-name = "drawing_renamer"
+name = "drawing_registrar"
 version = "0.1.0"
 edition = "2021"
 
 [package]
-name = "drawing_renamer"
+name = "drawing_registrar"
 version = "0.1.0"
 edition = "2021"
 

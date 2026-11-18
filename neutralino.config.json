@@ -1,8 +1,8 @@
 {
   "$schema": "https://raw.githubusercontent.com/neutralinojs/neutralinojs/main/schemas/neutralino.config.schema.json",
-  "applicationId": "com.drawingrenamer",
+  "applicationId": "com.drawingRegistrar",
   "version": "1.0.0",
-  "applicationName": "Drawing Renamer",
+  "applicationName": "Drawing Registrar",
   "description": "Renames AutoCAD PDF drawings from a drawing register",
   "defaultMode": "window",
   "port": 0,
@@ -25,7 +25,7 @@
   ],
   "modes": {
     "window": {
-      "title": "Drawing Renamer",
+      "title": "Drawing Registrar",
       "icon": "/resources/icons/appIcon.png",
       "width": 1150,
       "height": 780,
@@ -40,7 +40,7 @@
     }
   },
   "cli": {
-    "binaryName": "DrawingRenamer",
+    "binaryName": "DrawingRegistrar",
     "resourcesPath": "/resources/",
     "extensionsPath": "/extensions/",
     "clientLibrary": "/resources/js/neutralino.js",

@@ -84,10 +84,10 @@ function sanitizeFilename(name) {
 }
 
 // What goes between the drawing number and title: the separator the app saved for this folder in
-// drawing-renamer.json, else " - "
+// drawing-registrar.json, else " - "
 function separatorFor(dir) {
     try {
-        const data = JSON.parse(fs.readFileSync(path.join(dir, "drawing-renamer.json"), "utf8"));
+        const data = JSON.parse(fs.readFileSync(path.join(dir, "drawing-registrar.json"), "utf8"));
         if (typeof data.separator === "string" && data.separator && !/[\\/:*?"<>|\x00-\x1f]/.test(data.separator)) {
             return data.separator;
         }

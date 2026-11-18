@@ -1,14 +1,14 @@
 {
-  "name": "drawing-renamer",
+  "name": "drawing-Registrar",
   "version": "1.0.0",
   "description": "CLI tool to automatically rename AutoCAD PDF drawings using a PDF drawing register.",
-  "main": "renamer.js",
+  "main": "Registrar.js",
   "type": "commonjs",
   "bin": {
-    "rename-drawings": "./renamer.js"
+    "rename-drawings": "./Registrar.js"
   },
   "scripts": {
-    "start": "node renamer.js",
+    "start": "node Registrar.js",
     "copy-libs": "node scripts/copy-libs.js",
     "start-gui": "npm run copy-libs && neu run",
     "build-gui": "npm run copy-libs && neu build --release --embed-resources"
