@@ -486,6 +486,8 @@
     let section = '';
     let subsection = '';
     let heading = null; // a heading seen since the last header or drawing row
+    let headingCell = null; // where it is: { row, col }
+    const headingCells = []; // every heading cell: { row, col, path }, path the headings it names
     // Sheets with header rows only read rows under a header (not the project details above it)
     const headers = rows.map(r => headerColumns(r.cells)).filter(Boolean);
     const hasHeader = headers.length > 0;
@@ -493,9 +495,12 @@
       const cols = Object.keys(cells).map(Number).sort((a, b) => a - b);
       const header = headerColumns(cells);
       if (header) {
-        if (heading !== null && heading !== section) {
-          section = heading;
-          subsection = '';
+        if (heading !== null) {
+          if (heading !== section) {
+            section = heading;
+            subsection = '';
+          }
+          headingCells.push({ ...headingCell, path: [section] });
         }
         heading = null;
         codeFrom = header.code;
@@ -531,6 +536,7 @@
         if (heading !== null) {
           if (section) subsection = heading;
           else section = heading;
+          headingCells.push({ ...headingCell, path: [section, subsection].filter(Boolean) });
           heading = null;
         }
         sections[code] = [section, subsection].filter(Boolean);
@@ -546,9 +552,10 @@
       const titleCell = titleCol !== null ? titleCol : hasHeader ? headers[0].title : undefined;
       if (text && !NOT_HEADINGS.test(norm(text)) && !isLooseCode(text.toUpperCase()) && !(titleCell !== undefined && cells[titleCell] && collapse(cells[titleCell]))) {
         heading = text;
+        headingCell = { row, col: headCol };
       }
     }
-    return { titles, details, issue, places, sections };
+    return { titles, details, issue, places, sections, headingCells };
   }
 
   // parts: { workbook, rels, sharedStrings, styles, sheets: { 'xl/worksheets/sheet1.xml': xml } }
@@ -579,7 +586,7 @@
     sheets.forEach((sheet, order) => {
       const found = readSheetDrawings(readSheetRows(parts.sheets[sheet.path], sharedStrings, zeroPad));
       if (!Object.keys(found.titles).length) return;
-      const candidate = { titles: found.titles, details: found.details, places: found.places, sections: found.sections, sheet: sheet.name, path: sheet.path, issue: found.issue, order };
+      const candidate = { titles: found.titles, details: found.details, places: found.places, sections: found.sections, headingCells: found.headingCells, sheet: sheet.name, path: sheet.path, issue: found.issue, order };
       all.push(candidate);
       if (!best) best = candidate;
       else if (candidate.issue !== null && best.issue !== null) {
@@ -592,8 +599,8 @@
       .sort((a, b) => { const [ai, ao] = age(a); const [bi, bo] = age(b); return bi - ai || bo - ao; })
       .map(c => ({ sheet: c.sheet, path: c.path, places: c.places, issue: c.issue }));
     return best
-      ? { titles: best.titles, details: best.details, places: best.places, sections: best.sections, sheet: best.sheet, path: best.path, issue: best.issue, earlier }
-      : { titles: {}, details: {}, places: {}, sections: {}, sheet: null, path: null, issue: null, earlier: [] };
+      ? { titles: best.titles, details: best.details, places: best.places, sections: best.sections, headingCells: best.headingCells, sheet: best.sheet, path: best.path, issue: best.issue, earlier }
+      : { titles: {}, details: {}, places: {}, sections: {}, headingCells: [], sheet: null, path: null, issue: null, earlier: [] };
   }
 
   // --------------------
@@ -1274,6 +1281,35 @@
       }
     }
     return { xml, workbook: shiftDefinedNames(parts.workbook, reg.sheet, refs), styles: book.toXml() };
+  }
+
+  // Rename headings on the current register sheet: renames [{ path, to }], path the headings as
+  // read ([section] or [section, subsection]); every cell showing that heading (repeated at the top
+  // of later pages too) gets the new text. Returns { path, sheet, xml, renamed: [path], notFound: [path] }
+  function renameXlsxHeadings(parts, renames) {
+    const reg = readXlsxRegister(parts);
+    if (!reg.path) throw new Error('No drawings found in the workbook.');
+    const zeroPad = zeroPadStyles(parts.styles);
+    const same = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
+    const edits = {}; // row => { col: text }
+    const renamed = [];
+    const notFound = [];
+    for (const { path, to } of renames) {
+      const cells = (reg.headingCells || []).filter(c => same(c.path, path));
+      if (!cells.length) {
+        notFound.push(path);
+        continue;
+      }
+      for (const c of cells) (edits[c.row] = edits[c.row] || {})[c.col] = collapse(to);
+      renamed.push(path);
+    }
+    let xml = parts.sheets[reg.path];
+    for (const r of findElements(xml, 'row').reverse()) {
+      const num = parseInt((/^<row\b[^>]*?\br="(\d+)"/.exec(r.xml) || [])[1], 10);
+      if (!edits[num]) continue;
+      xml = xml.slice(0, r.start) + setRowCells(r.xml, num, edits[num], zeroPad) + xml.slice(r.end);
+    }
+    return { path: reg.path, sheet: reg.sheet, xml, renamed, notFound };
   }
 
   // Put the register's sections in another order. wanted: heading paths ([section] or
@@ -2466,6 +2502,7 @@
     insertXlsxRows,
     moveXlsxRows,
     moveXlsxSections,
+    renameXlsxHeadings,
     shiftDrawingRows,
     relsPathOf,
     xlsxCodeCells,

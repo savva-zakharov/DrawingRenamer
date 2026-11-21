@@ -633,18 +633,39 @@ function headingFolderName(heading) {
 function headingFolderPath(headings) {
   const known = [...state.layout.folders, ...state.diskFolders];
   let path = '';
-  for (const part of headings.map(headingFolderName).filter(Boolean)) {
+  for (const part of renamedHeadings(headings).map(headingFolderName).filter(Boolean)) {
     const candidate = relJoin(path, part);
     path = known.find(f => f.toLowerCase() === candidate.toLowerCase()) || candidate;
   }
   return path;
 }
 
+function sameHeadings(a, b) {
+  return a.length === b.length && a.every((h, i) => h === b[i]);
+}
+
+// Headings ([section, subsection]) with any renames made in the app
+function renamedHeadings(headings) {
+  const renames = state.layout.headingRenames || [];
+  return headings.map((h, i) => {
+    const r = renames.find(x => sameHeadings(x.path, headings.slice(0, i + 1)));
+    return r ? r.to : h;
+  });
+}
+
+// Heading renames still to be written to the register (for headings it has)
+function pendingHeadingRenames() {
+  if (state.registerKind !== 'xlsx') return [];
+  const lists = Object.values(state.registerSections || {});
+  return (state.layout.headingRenames || []).filter(r => r.to !== r.path[r.path.length - 1] &&
+    lists.some(list => list.length >= r.path.length && sameHeadings(list.slice(0, r.path.length), r.path)));
+}
+
 // Every heading folder, in register order (kept until the register or the folders change)
 let headingFolderCache = { key: null, sections: null, list: [], headings: new Map() };
 function headingFolderList() {
   if (!useHeadingFolders()) return [];
-  const key = state.layout.folders.join('|') + '\n' + state.diskFolders.join('|');
+  const key = state.layout.folders.join('|') + '\n' + state.diskFolders.join('|') + '\n' + JSON.stringify(state.layout.headingRenames || []);
   if (headingFolderCache.sections === state.registerSections && headingFolderCache.key === key) return headingFolderCache.list;
   const seen = new Set();
   const headings = new Map(); // folder (and its parent folders) => the register headings it's for
@@ -775,7 +796,7 @@ function layoutPath() {
 }
 
 async function loadLayout() {
-  state.layout = { folders: [], assignments: {}, titleEdits: {}, detailEdits: {}, projectEdits: {}, issueEdit: null, numberEdits: {}, numberHistory: {}, newEntries: [], moves: [], foldersToRemove: [], nameTemplate: DEFAULT_TEMPLATE, options: {}, ignoredWarnings: [], spellingWords: [], view: null, titleBlock: { areas: {}, folders: {}, originators: {}, files: {}, missing: {} }, fileFolders: {}, folderOrder: [] };
+  state.layout = { folders: [], assignments: {}, titleEdits: {}, detailEdits: {}, projectEdits: {}, issueEdit: null, numberEdits: {}, numberHistory: {}, newEntries: [], moves: [], foldersToRemove: [], nameTemplate: DEFAULT_TEMPLATE, options: {}, ignoredWarnings: [], spellingWords: [], view: null, titleBlock: { areas: {}, folders: {}, originators: {}, files: {}, missing: {} }, fileFolders: {}, folderOrder: [], headingRenames: [] };
   state.layoutBroken = false;
   if (!(await getStatsOrNull(layoutPath()))) return;
   try {
@@ -859,7 +880,10 @@ async function loadLayout() {
     }
     // Folders put in a different order (dragged): their paths, in that order
     const folderOrder = Array.isArray(data.folderOrder) ? data.folderOrder.filter(f => typeof f === 'string' && f) : [];
-    state.layout = { folders: withAncestors(folders), assignments, titleEdits, detailEdits, projectEdits, issueEdit, otherDrafts: drafts, numberEdits, numberHistory, newEntries, moves, foldersToRemove, nameTemplate, options, ignoredWarnings, spellingWords, view, externalRegister, titleBlock, fileFolders, folderOrder };
+    // Register headings renamed (by renaming their folders), not yet saved: [{ path, to }]
+    const headingRenames = (Array.isArray(data.headingRenames) ? data.headingRenames : [])
+      .filter(r => r && Array.isArray(r.path) && r.path.length && r.path.every(h => typeof h === 'string') && typeof r.to === 'string' && r.to.trim());
+    state.layout = { folders: withAncestors(folders), assignments, titleEdits, detailEdits, projectEdits, issueEdit, otherDrafts: drafts, numberEdits, numberHistory, newEntries, moves, foldersToRemove, nameTemplate, options, ignoredWarnings, spellingWords, view, externalRegister, titleBlock, fileFolders, folderOrder, headingRenames };
     appendLog(`📁 Loaded folder layout from ${LAYOUT_FILE} (${folders.length} folders).`);
   } catch (err) {
     state.layoutBroken = true;
@@ -936,6 +960,8 @@ async function saveLayout() {
     fileFolders: Object.keys(state.layout.fileFolders || {}).length ? state.layout.fileFolders : undefined,
     // Folders dragged into a different order
     folderOrder: (state.layout.folderOrder || []).length ? state.layout.folderOrder : undefined,
+    // Register headings renamed by renaming their folders, until saved to the register
+    headingRenames: (state.layout.headingRenames || []).length ? state.layout.headingRenames : undefined,
     newEntries: state.layout.newEntries
   };
   try {
@@ -1379,7 +1405,7 @@ function updateButtons() {
   entryBtn.disabled = state.busy;
   entryBtn.title = `Add a drawing to the ${registerAppName()} register`;
   const changes = editable
-    ? pendingTitleEdits().length + pendingDetailEdits().length + pendingProjectEdits().length + (pendingIssue() ? 1 : 0) + pendingNumberEdits().length + pendingNewEntries().length + state.movedTokens.size + (pendingSectionOrder() ? 1 : 0)
+    ? pendingTitleEdits().length + pendingDetailEdits().length + pendingProjectEdits().length + (pendingIssue() ? 1 : 0) + pendingNumberEdits().length + pendingNewEntries().length + state.movedTokens.size + (pendingSectionOrder() ? 1 : 0) + pendingHeadingRenames().length
     : 0;
   wordBtn.textContent = changes ? `${saveButtonLabel()} (${changes})` : saveButtonLabel();
   wordBtn.title = `Write edited titles and numbers into the ${registerAppName()} register`;
@@ -1508,13 +1534,11 @@ function renderSectionHeader(section, visible, inside) {
   if (section.unmatched) name.textContent = 'Files not in the register';
   else if (section.folder) {
     name.textContent = '📁 ' + folderLeaf(section.folder);
-    if (isHeadingFolder(section.folder)) {
-      name.title = `${displayPath(section.folder)}\nA heading in the register: drop drawings here to move them under it`;
-    } else {
-      name.title = `${displayPath(section.folder)}\nDouble-click to rename`;
-      name.classList.add('editable');
-      name.addEventListener('dblclick', () => startFolderRename(name, section.folder));
-    }
+    name.title = isHeadingFolder(section.folder)
+      ? `${displayPath(section.folder)}\nA heading in the register: drop drawings here to move them under it.\nDouble-click to rename it (and the heading)`
+      : `${displayPath(section.folder)}\nDouble-click to rename`;
+    name.classList.add('editable');
+    name.addEventListener('dblclick', () => startFolderRename(name, section.folder));
     td.style.paddingLeft = `${8 + (depth - 1) * 22}px`;
   } else {
     name.textContent = '📂 Top Folder';
@@ -1932,7 +1956,25 @@ async function moveFolder(folder, parent) {
 async function renameFolder(folder, name) {
   const dest = relJoin(parentFolder(folder), name);
   if (dest === folder || state.busy) return;
-  await relocateFolder(folder, dest, 'renamed');
+  headingFolderList();
+  const headings = isHeadingFolder(folder) && headingFolderCache.headings.get(folder);
+  if (!headings) {
+    await relocateFolder(folder, dest, 'renamed');
+    return;
+  }
+  // A heading folder: its heading is renamed too (in the register on save), and the folder on disk
+  // straight away, so its files stay in it
+  const before = (state.layout.headingRenames || []).slice();
+  const renames = before.filter(r => !sameHeadings(r.path, headings));
+  if (name !== headings[headings.length - 1]) renames.push({ path: headings, to: name });
+  state.layout.headingRenames = renames;
+  if (await relocateFolder(folder, dest, 'renamed')) {
+    appendLog(`🗂️ Heading "${headings[headings.length - 1]}" → "${name}" (press ${saveButtonLabel()} to rename it in the register).`);
+  } else {
+    state.layout.headingRenames = before;
+    await saveLayout();
+    rebuild();
+  }
 }
 
 // Give a folder a new path: its subfolders, drawing assignments and files go with it
@@ -1941,7 +1983,7 @@ async function relocateFolder(folder, dest, verb) {
   const sameName = dest.toLowerCase() === folder.toLowerCase();
   if (state.layout.folders.some(f => f !== folder && f.toLowerCase() === dest.toLowerCase()) || (!sameName && await getStatsOrNull(absPath(dest)))) {
     appendLog(`❌ There's already a folder called ${displayPath(dest)}; ${displayPath(folder)} wasn't ${verb}.`);
-    return;
+    return false;
   }
   state.busy = true;
   updateButtons();
@@ -1990,6 +2032,7 @@ async function relocateFolder(folder, dest, verb) {
     state.picked = new Set([...state.picked].map(remapRel));
     await saveLayout();
     appendLog(`📁 ${verb === 'renamed' ? 'Renamed' : 'Moved'} folder ${displayPath(folder)} → ${displayPath(dest)}${stats ? '' : ' (it had no files yet)'}.`);
+    return true;
   } catch (err) {
     appendLog(`❌ Could not ${verb === 'renamed' ? 'rename' : 'move'} ${displayPath(folder)}: ${err.message || err}. Close any window showing files in it and try again.`);
   } finally {
@@ -4182,7 +4225,8 @@ async function askWordOptions(edits, additions, numbers, movedCount, details = [
   document.getElementById('word-tracked').closest('label').hidden = excel;
   document.getElementById('word-export-label').textContent = `Also update the register PDF using ${registerAppName()}`;
   const sectionOrder = pendingSectionOrder();
-  const total = edits.length + additions.length + numbers.length + movedCount + details.length + project.length + (issue ? 1 : 0) + (sectionOrder ? 1 : 0);
+  const headingRenames = pendingHeadingRenames();
+  const total = edits.length + additions.length + numbers.length + movedCount + details.length + project.length + (issue ? 1 : 0) + (sectionOrder ? 1 : 0) + headingRenames.length;
   document.getElementById('word-dialog-title').textContent =
     `Save ${total === 1 ? '1 change' : total + ' changes'} to ${baseName(state.registerPath)}`;
   const list = document.getElementById('word-changes');
@@ -4190,6 +4234,15 @@ async function askWordOptions(edits, additions, numbers, movedCount, details = [
   if (sectionOrder) {
     const li = document.createElement('li');
     li.textContent = `📁 Sections move into the folder order: ${sectionOrder.filter(h => h.length === 1).map(h => h[0]).join(', ')}`;
+    list.appendChild(li);
+  }
+  for (const r of headingRenames) {
+    const li = document.createElement('li');
+    const from = document.createElement('del');
+    from.textContent = r.path[r.path.length - 1];
+    const to = document.createElement('ins');
+    to.textContent = r.to;
+    li.append('🗂️ Heading ', from, ' → ', to);
     list.appendChild(li);
   }
   for (const e of additions) {
@@ -4598,7 +4651,8 @@ async function saveToExcel() {
   const additions = pendingNewEntries();
   const moves = pendingMoves();
   const sectionOrder = pendingSectionOrder();
-  if (!edits.length && !details.length && !project.length && !issue && !numbers.length && !additions.length && !moves.length && !sectionOrder) return;
+  const headingRenames = pendingHeadingRenames();
+  if (!edits.length && !details.length && !project.length && !issue && !numbers.length && !additions.length && !moves.length && !sectionOrder && !headingRenames.length) return;
   const options = await askWordOptions(edits, additions, numbers, state.movedTokens.size, details, project, issue);
   let wantOrder = Object.keys(state.titles);
   // With the sections reordered, the drawings come folder by folder in the order shown
@@ -4643,6 +4697,13 @@ async function saveToExcel() {
     if (sections.moved.length) {
       if (sections.path !== result.path) throw new Error('sections would move on a different sheet from the other changes; nothing was saved.');
       edited = { ...edited, styles: sections.styles, workbook: sections.workbook, sheets: { ...edited.sheets, [sections.path]: sections.xml } };
+    }
+    // Then headings renamed (found by their names before the rename)
+    const headed = headingRenames.length ? RegisterCore.renameXlsxHeadings(edited, headingRenames) : { renamed: [], notFound: [] };
+    if (headed.notFound.length) throw new Error(`the heading${headed.notFound.length === 1 ? '' : 's'} ${headed.notFound.map(p => p.join(' › ')).join(', ')} weren't found; nothing was saved.`);
+    if (headed.renamed.length) {
+      if (headed.path !== result.path) throw new Error('headings would be renamed on a different sheet from the other changes; nothing was saved.');
+      edited = { ...edited, sheets: { ...edited.sheets, [headed.path]: headed.xml } };
     }
     const insert = additions.length
       ? RegisterCore.insertXlsxRows(edited, additions.map(e => ({ ...e, after: e.after && newNumber(e.after) })))
@@ -4714,6 +4775,8 @@ async function saveToExcel() {
       appendLog(`📁 Moved the section${sections.moved.length === 1 ? '' : 's'} ${sections.moved.map(h => h.join(' › ')).join(', ')} into the folder order`);
     }
     if (sectionOrder) clearSectionOrder();
+    for (const r of headingRenames) appendLog(`🗂️ Heading "${r.path[r.path.length - 1]}" renamed "${r.to}"`);
+    state.layout.headingRenames = (state.layout.headingRenames || []).filter(r => !headingRenames.includes(r));
     for (const code of moved.notFound) appendLog(`⚠️ ${code} wasn't found on sheet "${result.sheet}", so it wasn't moved.`);
     // Saved moves are done; any later ones (made after this save started) stay
     state.layout.moves = state.layout.moves.filter(m => !moves.includes(m));
@@ -4733,7 +4796,7 @@ async function saveToExcel() {
     await saveLayout();
     const detailCount = Object.keys(result.applied.scales).length + Object.keys(result.applied.sizes).length;
     const issueText = result.applied.issue ? (issue.mode === 'new' ? ', a new issue' : ', an issue update') : '';
-    appendLog(`✅ Saved ${Object.keys(result.applied.titles).length} title change(s), ${detailCount} scale/size change(s), ${Object.keys(result.applied.project).length} project detail change(s)${issueText}, ${Object.keys(result.applied.numbers).length} new number(s), ${new Set(moved.moved).size} move(s)${sections.moved.length ? `, ${sections.moved.length} section move(s)` : ''} and ${added.length} new entr${added.length === 1 ? 'y' : 'ies'} to sheet "${result.sheet}" of ${baseName(xlsx)}.`);
+    appendLog(`✅ Saved ${Object.keys(result.applied.titles).length} title change(s), ${detailCount} scale/size change(s), ${Object.keys(result.applied.project).length} project detail change(s)${issueText}, ${Object.keys(result.applied.numbers).length} new number(s), ${new Set(moved.moved).size} move(s)${sections.moved.length ? `, ${sections.moved.length} section move(s)` : ''}${headed.renamed.length ? `, ${headed.renamed.length} heading rename(s)` : ''} and ${added.length} new entr${added.length === 1 ? 'y' : 'ies'} to sheet "${result.sheet}" of ${baseName(xlsx)}.`);
 
     if (options.exportPdf) {
       const pdf = options.pdf;
@@ -6712,7 +6775,8 @@ function unsavedRegisterChanges() {
     numbers: pendingNumberEdits().length,
     entries: pendingNewEntries().length,
     moves: state.movedTokens.size,
-    sections: pendingSectionOrder() ? 1 : 0
+    sections: pendingSectionOrder() ? 1 : 0,
+    headings: pendingHeadingRenames().length
   };
   const parts = [];
   if (counts.titles) parts.push(`${counts.titles} title change(s)`);
@@ -6723,7 +6787,8 @@ function unsavedRegisterChanges() {
   if (counts.entries) parts.push(`${counts.entries} new entr${counts.entries === 1 ? 'y' : 'ies'}`);
   if (counts.moves) parts.push(`${counts.moves} moved drawing(s)`);
   if (counts.sections) parts.push('the new order of the register\'s sections');
-  return { ...counts, total: counts.titles + counts.details + counts.project + counts.issue + counts.numbers + counts.entries + counts.moves + counts.sections, summary: parts.join(', ') };
+  if (counts.headings) parts.push(`${counts.headings} renamed heading(s)`);
+  return { ...counts, total: counts.titles + counts.details + counts.project + counts.issue + counts.numbers + counts.entries + counts.moves + counts.sections + counts.headings, summary: parts.join(', ') };
 }
 
 // Forget title and number edits, new entries and moves that haven't been saved to the register.
@@ -6754,7 +6819,10 @@ async function discardRegisterChanges() {
   for (const e of state.layout.newEntries) {
     if (!(e.token in state.tokenMap)) delete assignments[e.token];
   }
-  if (state.registerKind === 'xlsx') clearSectionOrder();
+  if (state.registerKind === 'xlsx') {
+    clearSectionOrder();
+    state.layout.headingRenames = [];
+  }
   state.layout.titleEdits = {};
   state.layout.detailEdits = {};
   state.layout.projectEdits = {};
@@ -7081,8 +7149,7 @@ function openFolderMenu(x, y, folder, tr) {
   const sortNote = canReorder() ? undefined : 'Sorting reorders the register, which needs a Word or Excel register';
   const sortItem = (label, mode) => rowMenuItem(label, sortNote, canReorder() && !state.busy ? () => sortFolderContents(folder, mode) : null);
   const rename = !folder ? rowMenuItem('Rename folder', 'The top folder is the project folder')
-    : heading ? rowMenuItem('Rename folder', 'Named after its heading in the register')
-    : rowMenuItem('Rename folder', undefined, () => {
+    : rowMenuItem('Rename folder', heading ? 'Renames its heading in the register too' : undefined, () => {
       const name = tr.querySelector('.section-name');
       if (name) startFolderRename(name, folder);
     });
