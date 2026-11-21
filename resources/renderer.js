@@ -58,6 +58,7 @@ let settings = JSON.parse(JSON.stringify(DEFAULT_SETTINGS));
 // number–title separator; these are the defaults for a folder that hasn't set them
 const DEFAULT_FOLDER_OPTIONS = {
   recursive: false,                 // also scan subfolders on disk
+  headingFolders: true,             // an Excel register's headings ("PLANS - 1") are drawing folders
   fileDate: 'yy-mm-dd',             // date in front of superseded, backed up and exported files
   ssFolder: 'SS',                   // folder for superseded drawings and backups
   issueNumbering: 'number',         // new issues, when the register doesn't show a style
@@ -87,6 +88,8 @@ const state = {
   registerKind: null,    // 'docx', 'xlsx' (Excel, incl. .xlsm) or 'pdf'
   registerInfo: '',      // e.g. which Excel sheet the drawings came from
   xlsxPlaces: {},        // Excel register: code => where its cells are (to check renumbering)
+  registerSections: {},  // Excel register: code => the headings it's under ([section, subsection])
+  sectionFolders: {},    // drawing number shown => the heading folder it's under (moves applied)
   excelAvailable: null,  // whether Excel can be driven to export PDFs (checked on first use)
   registerModified: null,
   targetDir: null,       // the working folder: usually the register's (the parent of any drawing folders)
@@ -519,6 +522,7 @@ async function readDocumentXml(docxPath) {
 
 async function parseRegister(filePath) {
   state.registerInfo = '';
+  state.registerSections = {};
   state.registerDetails = {};
   state.registerColumns = { scale: false, size: false };
   state.registerProject = null;
@@ -541,6 +545,7 @@ async function parseRegister(filePath) {
     if (found.sheet) state.registerInfo = `sheet "${found.sheet}"` + (found.issue !== null ? `, issue ${found.issue}` : '');
     state.xlsxSheet = found.sheet;
     state.xlsxPlaces = found.places;
+    state.registerSections = found.sections || {};
     state.registerDetails = found.details;
     const places = Object.values(found.places);
     state.registerColumns = { scale: places.some(pl => pl.scaleCol !== undefined), size: places.some(pl => pl.sizeCol !== undefined) };
@@ -605,8 +610,86 @@ async function findSubfolders() {
 
 // The layout's folders, and with recursive scanning every subfolder on disk
 function drawingFolders() {
-  return folderOption('recursive') ? withAncestors([...state.layout.folders, ...state.diskFolders]) : state.layout.folders;
+  const heads = headingFolderList();
+  if (!folderOption('recursive') && !heads.length) return state.layout.folders;
+  return withAncestors([...state.layout.folders, ...(folderOption('recursive') ? state.diskFolders : []), ...heads]);
 }
+
+// --------------------
+// Register headings as folders: an Excel register's headings ("PLANS - 1", with subheadings inside
+// them) are drawing folders, and each drawing goes in the folder of the heading it's under
+// --------------------
+function useHeadingFolders() {
+  return state.registerKind === 'xlsx' && folderOption('headingFolders') && Object.keys(state.registerSections || {}).length > 0;
+}
+
+// A heading as a folder name: characters Windows doesn't allow in names become '-'
+function headingFolderName(heading) {
+  return heading.replace(/[<>:"/\\|?*\x00-\x1f]/g, '-').replace(/[. ]+$/, '').trim();
+}
+
+// The folder for a drawing's headings, in the capitalisation of a folder already in the layout or
+// on disk ("Plans - 1" for PLANS - 1)
+function headingFolderPath(headings) {
+  const known = [...state.layout.folders, ...state.diskFolders];
+  let path = '';
+  for (const part of headings.map(headingFolderName).filter(Boolean)) {
+    const candidate = relJoin(path, part);
+    path = known.find(f => f.toLowerCase() === candidate.toLowerCase()) || candidate;
+  }
+  return path;
+}
+
+// Every heading folder, in register order (kept until the register or the folders change)
+let headingFolderCache = { key: null, sections: null, list: [] };
+function headingFolderList() {
+  if (!useHeadingFolders()) return [];
+  const key = state.layout.folders.join('|') + '\n' + state.diskFolders.join('|');
+  if (headingFolderCache.sections === state.registerSections && headingFolderCache.key === key) return headingFolderCache.list;
+  const seen = new Set();
+  for (const headings of Object.values(state.registerSections)) {
+    const folder = headingFolderPath(headings);
+    if (folder) seen.add(folder);
+  }
+  headingFolderCache = { key, sections: state.registerSections, list: [...seen] };
+  return headingFolderCache.list;
+}
+
+function isHeadingFolder(folder) {
+  return !!folder && headingFolderList().some(f => isInside(f, folder));
+}
+
+// The heading folder of every drawing in the order rows will be in: a drawing that moves, or a new
+// entry, goes under the heading of the drawing it follows (the first drawing's, at the top)
+function computeSectionFolders() {
+  const out = {};
+  if (useHeadingFolders()) {
+    const base = {};
+    for (const [token, headings] of Object.entries(state.registerSections)) base[token] = headingFolderPath(headings);
+    const original = Object.keys(state.tokenMap);
+    const first = original.length ? base[original[0]] || '' : '';
+    const moved = new Set(pendingMoves().map(m => m.token));
+    const byRegister = {};
+    let prev = null;
+    for (const token of registerOrder()) {
+      const folder = moved.has(token) ? (prev === null ? first : prev) : (base[token] || '');
+      byRegister[token] = folder;
+      out[state.layout.numberEdits[token] || token] = folder;
+      prev = folder;
+    }
+    const entries = pendingNewEntries();
+    const entryFolder = (entry, depth = 0) => {
+      if (entry.after === '') return first;
+      if (entry.after in byRegister) return byRegister[entry.after];
+      const before = entries.find(e => e.token === entry.after);
+      return before && depth < entries.length ? entryFolder(before, depth + 1) : prev === null ? first : prev;
+    };
+    for (const e of entries) out[e.token] = entryFolder(e);
+  }
+  state.sectionFolders = out;
+  return out;
+}
+
 
 async function scanFiles() {
   const files = [];
@@ -726,6 +809,7 @@ function validFolderOptions(data) {
   const o = data && typeof data === 'object' ? data : {};
   const options = {};
   if (typeof o.recursive === 'boolean') options.recursive = o.recursive;
+  if (typeof o.headingFolders === 'boolean') options.headingFolders = o.headingFolders;
   if (FILE_DATE_FORMATS.includes(o.fileDate)) options.fileDate = o.fileDate;
   if (typeof o.ssFolder === 'string' && o.ssFolder && !/[\\/:*?"<>|]/.test(o.ssFolder)) options.ssFolder = o.ssFolder;
   if (RegisterCore.NUMBERING_SCHEMES.includes(o.issueNumbering)) options.issueNumbering = o.issueNumbering;
@@ -805,12 +889,14 @@ function titleBlockSaved() {
 // the subfolder its file was found in
 function folderOf(token) {
   if (token in state.layout.assignments) return state.layout.assignments[token];
+  if (state.sectionFolders[token]) return state.sectionFolders[token];
   return state.implicitFolders[token] || '';
 }
 
-// Back to the top folder: a drawing found in a subfolder is put there explicitly ('')
+// Back to the top folder: a drawing found in a subfolder (or under a register heading) is put
+// there explicitly ('')
 function clearAssignment(token) {
-  if (state.implicitFolders[token]) state.layout.assignments[token] = '';
+  if (state.implicitFolders[token] || state.sectionFolders[token]) state.layout.assignments[token] = '';
   else delete state.layout.assignments[token];
 }
 
@@ -829,11 +915,21 @@ function isInside(folder, ancestor) {
   return folder === ancestor || folder.startsWith(ancestor + '/');
 }
 
-// Tree order: parents before their subfolders, siblings alphabetically
+// Tree order: parents before their subfolders, siblings alphabetically (heading folders in the
+// order of the register, before other folders)
 function compareFolders(a, b) {
+  const heads = headingFolderList();
+  const rank = folder => {
+    const i = heads.findIndex(f => isInside(f, folder));
+    return i < 0 ? Infinity : i;
+  };
   const pa = a.split('/');
   const pb = b.split('/');
   for (let i = 0; i < Math.min(pa.length, pb.length); i++) {
+    if (pa[i] === pb[i]) continue;
+    const ra = rank(pa.slice(0, i + 1).join('/'));
+    const rb = rank(pb.slice(0, i + 1).join('/'));
+    if (ra !== rb) return ra - rb;
     const c = pa[i].localeCompare(pb[i]);
     if (c) return c;
   }
@@ -1308,7 +1404,7 @@ function renderSectionHeader(section, visible, inside) {
   tr.className = 'section';
   const dragTd = cell(tr, '', 'drag');
   if (!section.unmatched) {
-    if (section.folder) addFolderHandle(dragTd, tr, section.folder);
+    if (section.folder && !isHeadingFolder(section.folder)) addFolderHandle(dragTd, tr, section.folder);
     makeFolderDropTarget(tr, section.folder);
   }
   const selectable = inside.filter(isSelectable);
@@ -1334,9 +1430,13 @@ function renderSectionHeader(section, visible, inside) {
   if (section.unmatched) name.textContent = 'Files not in the register';
   else if (section.folder) {
     name.textContent = '📁 ' + folderLeaf(section.folder);
-    name.title = `${displayPath(section.folder)}\nDouble-click to rename`;
-    name.classList.add('editable');
-    name.addEventListener('dblclick', () => startFolderRename(name, section.folder));
+    if (isHeadingFolder(section.folder)) {
+      name.title = `${displayPath(section.folder)}\nA heading in the register: drop drawings here to move them under it`;
+    } else {
+      name.title = `${displayPath(section.folder)}\nDouble-click to rename`;
+      name.classList.add('editable');
+      name.addEventListener('dblclick', () => startFolderRename(name, section.folder));
+    }
     td.style.paddingLeft = `${8 + (depth - 1) * 22}px`;
   } else name.textContent = `📂 ${baseName(state.targetDir)} (top folder)`;
   td.appendChild(name);
@@ -1557,6 +1657,11 @@ function makeFolderDropTarget(tr, folder) {
     state.drag = null;
     clearDropMarks();
     if (drag.kind === 'drawing') {
+      // Into a register heading: the row moves to the end of that heading's drawings too (unless
+      // it's already under that heading, and was only put in another folder)
+      const last = isHeadingFolder(folder) && canReorder() && state.sectionFolders[drag.token] !== folder &&
+        Object.keys(state.titles).filter(t => t !== drag.token && state.sectionFolders[t] === folder).pop();
+      if (last) return moveDrawing(drag.token, last, false, folder);
       setDrawingFolder(drag.token, folder);
       await saveLayout();
       rebuild();
@@ -1598,6 +1703,13 @@ function setFileFolder(row, folder, log = true) {
 
 // Put a drawing in a folder ('' = the top folder); its files move there on RENAME
 function setDrawingFolder(token, folder) {
+  computeSectionFolders();
+  if (folder && state.sectionFolders[token] === folder && token in state.layout.assignments) {
+    // Back in the folder of the heading it's under
+    delete state.layout.assignments[token];
+    appendLog(`📁 ${token} will go into ${displayPath(folder)} when you press RENAME.`);
+    return true;
+  }
   if (folderOf(token) === folder) return false;
   if (folder) state.layout.assignments[token] = folder;
   else clearAssignment(token);
@@ -1728,6 +1840,8 @@ function describePlace(after) {
 async function undoMove(token) {
   const orig = state.origOf[token];
   state.layout.moves = state.layout.moves.filter(m => m.token !== orig);
+  // Its folder follows its heading again
+  if (useHeadingFolders() && state.layout.assignments[token]) delete state.layout.assignments[token];
   appendLog(`↕️ ${token} is back in its register position.`);
   await saveLayout();
   rebuild();
@@ -3295,6 +3409,7 @@ function effectiveTitles() {
     addAfter(token);
   }
   for (const e of pending) if (!(e.token in titles)) titles[e.token] = e.title;
+  computeSectionFolders();
   return titles;
 }
 
@@ -6184,6 +6299,7 @@ const optFileDate = document.getElementById('opt-file-date');
 const optSsFolder = document.getElementById('opt-ss-folder');
 const optSsNote = document.getElementById('opt-ss-note');
 const optRecursive = document.getElementById('opt-recursive');
+const optHeadingFolders = document.getElementById('opt-heading-folders');
 const optIssueNumbering = document.getElementById('opt-issue-numbering');
 const optIssueDate = document.getElementById('opt-issue-date');
 const optHighlight = document.getElementById('opt-highlight');
@@ -6221,6 +6337,7 @@ function renderOptions() {
   optSsNote.classList.remove('error');
   optSsNote.textContent = `e.g. ${ssDir()}\\${datePrefix(today)} ${newNameFor(Object.keys(state.titles)[0] || 'PA-001', { 'PA-001': 'Masterplan', ...state.titles })}`;
   optRecursive.checked = folderOption('recursive');
+  optHeadingFolders.checked = folderOption('headingFolders');
   fillSelect(optIssueNumbering, RegisterCore.NUMBERING_SCHEMES.map(sc => [sc, SCHEME_LABELS[sc]]), folderOption('issueNumbering'));
   const parts = todayParts();
   fillSelect(optIssueDate, RegisterCore.DATE_FORMATS.map(f => [f.id, RegisterCore.formatDate(parts, f.id)]), folderOption('issueDateFormat'));
@@ -6333,6 +6450,28 @@ optSsFolder.addEventListener('change', async () => {
 optRecursive.addEventListener('change', async () => {
   await setFolderOption('recursive', optRecursive.checked, optRecursive.checked ? 'Scanning subfolders on disk too.' : 'Scanning only the top folder and drawing folders.');
   // Files found in the subfolders aren't new, so they aren't logged or flashed as new
+  state.knownFiles = null;
+  await refresh();
+});
+optHeadingFolders.addEventListener('change', async () => {
+  const sections = computeSectionFolders();
+  if (!optHeadingFolders.checked) {
+    // The heading folders become ordinary folders, with each drawing kept in the one it's in
+    for (const [token, folder] of Object.entries(sections)) {
+      if (folder && !(token in state.layout.assignments)) state.layout.assignments[token] = folder;
+    }
+    state.layout.folders = withAncestors([...state.layout.folders, ...Object.values(sections).filter(Boolean)]);
+  }
+  await setFolderOption('headingFolders', optHeadingFolders.checked, optHeadingFolders.checked
+    ? 'Drawings go in a folder for the register heading they\'re under (when you press RENAME).'
+    : 'Register headings are no longer used as folders.');
+  if (optHeadingFolders.checked) {
+    // Drawings put in the folder of their own heading now follow the heading instead
+    for (const [token, folder] of Object.entries(computeSectionFolders())) {
+      if (folder && state.layout.assignments[token] === folder) delete state.layout.assignments[token];
+    }
+    await saveLayout();
+  }
   state.knownFiles = null;
   await refresh();
 });
@@ -6858,6 +6997,7 @@ async function resetFolders() {
   if (answer !== 'YES') return;
   state.layout.assignments = {};
   for (const token of Object.keys(state.implicitFolders)) state.layout.assignments[token] = '';
+  for (const [token, folder] of Object.entries(state.sectionFolders)) if (folder) state.layout.assignments[token] = '';
   state.layout.foldersToRemove = folders;
   appendLog(`📁 Took ${assigned} drawing(s) out of their folders; files move to the top folder when you press RENAME.`);
   await saveLayout();

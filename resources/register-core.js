@@ -463,24 +463,41 @@
     return { code, title, scale: after(SCALE_HEADERS), size: after(SIZE_HEADERS) };
   }
 
+  // Words in the code column of rows above the drawings that aren't headings
+  const NOT_HEADINGS = /^(ISSUE DATE|DATE|DAY|MONTH|YEAR|REVISION( NUMBER)?)$/;
+
   // Drawings on one sheet: rows under a "DRAWING CODE" / "DRAWING TITLE" header, the code joined
   // from every cell between the two headers (codes split into one cell per field work too);
-  // without such a header, a row whose first text is a code and whose next text is its title
+  // without such a header, a row whose first text is a code and whose next text is its title.
+  // sections: code => the headings it's under, [section] or [section, subsection]. A heading is
+  // text in the code column of a row that isn't a drawing (and has no title); one followed by a
+  // "DRAWING CODE" header row starts a section ("PLANS - 1", repeated on later pages), one followed
+  // straight by drawings a subsection within it ("PARK WEST_BLOCK F_INTERIOR DETAILS").
   function readSheetDrawings(rows) {
     const titles = {};
     const details = {}; // code => { scale, size } ('' where the sheet has no such column)
     const places = {}; // code => { row, codeCols, titleCol, scaleCol, sizeCol }: where the drawing's cells are
+    const sections = {};
     let issue = null;
     let codeFrom = null;
     let titleCol = null;
     let scaleCol;
     let sizeCol;
+    let section = '';
+    let subsection = '';
+    let heading = null; // a heading seen since the last header or drawing row
     // Sheets with header rows only read rows under a header (not the project details above it)
-    const hasHeader = rows.some(r => headerColumns(r.cells));
+    const headers = rows.map(r => headerColumns(r.cells)).filter(Boolean);
+    const hasHeader = headers.length > 0;
     for (const { row, cells } of rows) {
       const cols = Object.keys(cells).map(Number).sort((a, b) => a - b);
       const header = headerColumns(cells);
       if (header) {
+        if (heading !== null && heading !== section) {
+          section = heading;
+          subsection = '';
+        }
+        heading = null;
         codeFrom = header.code;
         titleCol = header.title;
         scaleCol = header.scale;
@@ -511,13 +528,27 @@
       }
       code = code && code.replace(/-+$/, '');
       if (code && isLooseCode(code) && title && collapse(title) && !(code in titles)) {
+        if (heading !== null) {
+          if (section) subsection = heading;
+          else section = heading;
+          heading = null;
+        }
+        sections[code] = [section, subsection].filter(Boolean);
         titles[code] = collapse(title);
         places[code] = place;
         const cellOf = col => (col !== undefined && cells[col] ? collapse(cells[col]) : '');
         details[code] = { scale: cellOf(place.scaleCol), size: cellOf(place.sizeCol) };
+        continue;
+      }
+      // A heading: text in the code column (the first header's, above it) with no title beside it
+      const headCol = codeFrom !== null ? codeFrom : hasHeader ? headers[0].code : undefined;
+      const text = headCol !== undefined && cells[headCol] ? collapse(cells[headCol]) : '';
+      const titleCell = titleCol !== null ? titleCol : hasHeader ? headers[0].title : undefined;
+      if (text && !NOT_HEADINGS.test(norm(text)) && !isLooseCode(text.toUpperCase()) && !(titleCell !== undefined && cells[titleCell] && collapse(cells[titleCell]))) {
+        heading = text;
       }
     }
-    return { titles, details, issue, places };
+    return { titles, details, issue, places, sections };
   }
 
   // parts: { workbook, rels, sharedStrings, styles, sheets: { 'xl/worksheets/sheet1.xml': xml } }
@@ -548,7 +579,7 @@
     sheets.forEach((sheet, order) => {
       const found = readSheetDrawings(readSheetRows(parts.sheets[sheet.path], sharedStrings, zeroPad));
       if (!Object.keys(found.titles).length) return;
-      const candidate = { titles: found.titles, details: found.details, places: found.places, sheet: sheet.name, path: sheet.path, issue: found.issue, order };
+      const candidate = { titles: found.titles, details: found.details, places: found.places, sections: found.sections, sheet: sheet.name, path: sheet.path, issue: found.issue, order };
       all.push(candidate);
       if (!best) best = candidate;
       else if (candidate.issue !== null && best.issue !== null) {
@@ -561,8 +592,8 @@
       .sort((a, b) => { const [ai, ao] = age(a); const [bi, bo] = age(b); return bi - ai || bo - ao; })
       .map(c => ({ sheet: c.sheet, path: c.path, places: c.places, issue: c.issue }));
     return best
-      ? { titles: best.titles, details: best.details, places: best.places, sheet: best.sheet, path: best.path, issue: best.issue, earlier }
-      : { titles: {}, details: {}, places: {}, sheet: null, path: null, issue: null, earlier: [] };
+      ? { titles: best.titles, details: best.details, places: best.places, sections: best.sections, sheet: best.sheet, path: best.path, issue: best.issue, earlier }
+      : { titles: {}, details: {}, places: {}, sections: {}, sheet: null, path: null, issue: null, earlier: [] };
   }
 
   // --------------------
