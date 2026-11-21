@@ -6458,7 +6458,8 @@ function rowMenuItem(label, detail, onClick) {
 // null when there's nothing to copy. Badges, buttons and the new name's arrow are left out.
 function copyTarget(target) {
   const td = target.closest('td');
-  if (!td || !td.closest('#rows') || td.classList.contains('pending')) return null;
+  // The drag handle's column has nothing to copy (and the button would cover the handle)
+  if (!td || !td.closest('#rows') || td.classList.contains('pending') || td.classList.contains('drag')) return null;
   const line = target.closest('.stack-top, .stack-bottom');
   const part = line && td.contains(line) ? line : td;
   if (part.classList.contains('pending') || part.classList.contains('none') || td.classList.contains('missing')) return null;
