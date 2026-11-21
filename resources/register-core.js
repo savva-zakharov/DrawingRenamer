@@ -1136,14 +1136,18 @@
     });
   }
 
-  // Cell references with rows changed by a reordering of rows, perm(row): single cells and ranges
-  // within one row follow their row; ranges over several rows (the print area, the used range)
-  // still cover the same rows, so they stay as they are
+  // Cell references with rows changed by a reordering of rows, perm(row): single cells, and ranges
+  // whose rows all move together (a merged cell over a few rows of a section that moves), follow
+  // their rows; other ranges over several rows (the print area, the used range) still cover the
+  // same rows, so they stay as they are
   function permuteCellRefs(text, perm) {
     return text.replace(/(\$?[A-Z]{1,3}\$?)(\d+)(?::(\$?[A-Z]{1,3}\$?)(\d+))?(?![\d(])/g, (m, c1, r1, c2, r2) => {
-      if (r2 !== undefined && r2 !== r1) return m;
-      const to = perm(parseInt(r1, 10));
-      return r2 !== undefined ? `${c1}${to}:${c2}${to}` : `${c1}${to}`;
+      const a = parseInt(r1, 10);
+      const to = perm(a);
+      if (r2 === undefined) return `${c1}${to}`;
+      const b = parseInt(r2, 10);
+      for (let r = a; r <= b; r++) if (perm(r) !== to + (r - a)) return m;
+      return `${c1}${to}:${c2}${to + (b - a)}`;
     });
   }
 
@@ -1186,8 +1190,20 @@
     if (seq.every((r, i) => r === lo + i)) {
       return { path: reg.path, sheet: reg.sheet, xml: sheetXml, workbook: parts.workbook, styles: parts.styles, moved: [], notFound, perm };
     }
+    const out = permuteXlsxRows(parts, reg, perm, { restyle: true, moveBreaks: false });
+    return { path: reg.path, sheet: reg.sheet, ...out, moved, notFound, perm };
+  }
 
-    // Borders of rows whose place in their block changed (first/last row under a heading)
+  // The register sheet with its rows reordered by perm(row) => new row (a reordering of a range of
+  // rows). With restyle, drawings that end up first or last in a block of drawing rows, or stop
+  // being, take the borders and fonts of a row that was in that place (keeping their own fills).
+  // With moveBreaks, page breaks go with the rows below them; otherwise they stay where they are.
+  // Returns { xml, workbook, styles }
+  function permuteXlsxRows(parts, reg, perm, opts) {
+    const sheetXml = parts.sheets[reg.path];
+    const codes = Object.keys(reg.places);
+    const rowOf = code => reg.places[code].row;
+    const drawingRows = new Set(codes.map(rowOf));
     const book = styleBook(parts.styles);
     const styles = cellStyles(sheetXml);
     const newDrawingRows = new Set([...drawingRows].map(perm));
@@ -1195,7 +1211,7 @@
     const roleAfter = r => `${newDrawingRows.has(r - 1) ? '' : 'first'}-${newDrawingRows.has(r + 1) ? '' : 'last'}`;
     const colsOf = row => Object.keys(styles).filter(ref => Number(/\d+$/.exec(ref)[0]) === row).map(ref => /^[A-Z]+/.exec(ref)[0]);
     const restyle = {};
-    for (const code of codes) {
+    for (const code of opts.restyle ? codes : []) {
       const row = rowOf(code);
       const role = roleAfter(perm(row));
       if (role === roleBefore(row)) continue;
@@ -1241,12 +1257,93 @@
       };
     }).sort((a, b) => a.to - b.to).map(r => r.xml).join('');
 
-    // Page breaks stay where they are: the rows are the same, in a different order
+    // Page breaks (id: the 0-based row they're above) stay where they are, or go with their row
     const refs = ref => permuteCellRefs(ref, perm);
-    const keep = id => id;
-    const xml = shiftSheetRefs(source.slice(0, data.start), refs, keep) + dataOpen + body + dataClose +
-      shiftSheetRefs(source.slice(data.end), refs, keep);
-    return { path: reg.path, sheet: reg.sheet, xml, workbook: shiftDefinedNames(parts.workbook, reg.sheet, refs), styles: book.toXml(), moved, notFound, perm };
+    const breakId = opts.moveBreaks ? id => perm(id + 1) - 1 : id => id;
+    const xml = shiftSheetRefs(source.slice(0, data.start), refs, breakId) + dataOpen + body + dataClose +
+      shiftSheetRefs(source.slice(data.end), refs, breakId);
+    // Excel won't open a sheet with overlapping merged cells (a merge over rows that were split up)
+    const merges = [...xml.matchAll(/<mergeCell\s+ref="([A-Z]+)(\d+):([A-Z]+)(\d+)"/g)]
+      .map(m => ({ ref: `${m[1]}${m[2]}:${m[3]}${m[4]}`, c1: columnIndex(m[1]), r1: +m[2], c2: columnIndex(m[3]), r2: +m[4] }))
+      .sort((a, b) => a.r1 - b.r1);
+    for (let i = 0; i < merges.length; i++) {
+      for (let j = i + 1; j < merges.length && merges[j].r1 <= merges[i].r2; j++) {
+        const a = merges[i];
+        const b = merges[j];
+        if (a.c1 <= b.c2 && b.c1 <= a.c2) throw new Error(`the merged cells ${a.ref} and ${b.ref} would overlap after moving rows`);
+      }
+    }
+    return { xml, workbook: shiftDefinedNames(parts.workbook, reg.sheet, refs), styles: book.toXml() };
+  }
+
+  // Put the register's sections in another order. wanted: heading paths ([section] or
+  // [section, subsection]) in the order wanted; sections with the same parent are put in that
+  // order, top-level sections first, then the subsections within each. A section's block of rows
+  // runs from the rows just above its first drawing (its heading, the DRAWING CODE row, and the
+  // ISSUE DATE / DAY / MONTH / YEAR rows when it starts a page) to the row before the next
+  // section's block (the last section's to its last drawing). Blocks move whole, with their page
+  // breaks. Headings without drawings go with the section above them.
+  // Returns { path, sheet, xml, workbook, styles, moved: [heading path] }
+  function moveXlsxSections(parts, wanted) {
+    const key = path => path.join(' // ');
+    const rank = new Map(wanted.map((p, i) => [key(p), i]));
+    const rankOf = k => (rank.has(k) ? rank.get(k) : Infinity);
+    const zeroPad = zeroPadStyles(parts.styles);
+    const sharedStrings = parts.sharedStrings ? findElements(parts.sharedStrings, 'si').map(si => stringItemText(si.xml)) : [];
+    let current = parts;
+    let reg = readXlsxRegister(current);
+    if (!reg.path) throw new Error('No drawings found in the workbook.');
+    const moved = [];
+    const depth = Math.max(0, ...Object.values(reg.sections || {}).map(p => p.length));
+    for (let level = 1; level <= depth; level++) {
+      reg = readXlsxRegister(current);
+      const sheetXml = current.sheets[reg.path];
+      const filled = new Set(readSheetRows(sheetXml, sharedStrings, zeroPad)
+        .filter(r => Object.values(r.cells).some(v => collapse(v))).map(r => r.row));
+      const drawingRows = new Set(Object.values(reg.places).map(pl => pl.row));
+      // Sections at this level: their first and last drawing rows, grouped by parent
+      const info = new Map();
+      const groups = new Map();
+      for (const code of Object.keys(reg.places).sort((a, b) => reg.places[a].row - reg.places[b].row)) {
+        const path = (reg.sections || {})[code] || [];
+        if (path.length < level) continue;
+        const k = key(path.slice(0, level));
+        const row = reg.places[code].row;
+        if (!info.has(k)) {
+          info.set(k, { path: path.slice(0, level), first: row, last: row });
+          const parent = key(path.slice(0, level - 1));
+          if (!groups.has(parent)) groups.set(parent, []);
+          groups.get(parent).push(k);
+        }
+        info.get(k).last = row;
+      }
+      const newRow = new Map();
+      for (const children of groups.values()) {
+        if (children.length < 2) continue;
+        const want = children.slice().sort((a, b) => rankOf(a) - rankOf(b) || children.indexOf(a) - children.indexOf(b));
+        if (want.join('|') === children.join('|')) continue;
+        const start = k => {
+          let r = info.get(k).first;
+          while (r > 1 && filled.has(r - 1) && !drawingRows.has(r - 1)) r--;
+          return r;
+        };
+        const starts = children.map(start);
+        const blocks = {};
+        children.forEach((k, i) => {
+          const end = i + 1 < children.length ? starts[i + 1] - 1 : info.get(k).last;
+          blocks[k] = [];
+          for (let r = starts[i]; r <= end; r++) blocks[k].push(r);
+        });
+        const lo = starts[0];
+        want.flatMap(k => blocks[k]).forEach((r, i) => newRow.set(r, lo + i));
+        for (const k of want) if (want.indexOf(k) !== children.indexOf(k)) moved.push(info.get(k).path);
+      }
+      if (!newRow.size) continue;
+      const perm = row => newRow.get(row) ?? row;
+      const out = permuteXlsxRows(current, reg, perm, { restyle: false, moveBreaks: true });
+      current = { ...current, styles: out.styles, workbook: out.workbook, sheets: { ...current.sheets, [reg.path]: out.xml } };
+    }
+    return { path: reg.path, sheet: reg.sheet, xml: current.sheets[reg.path], workbook: current.workbook, styles: current.styles, moved };
   }
 
   // The worksheet parts readXlsxRegister needs, from a JSZip archive
@@ -2231,7 +2328,9 @@
       }
     }
     if (startCol === undefined) startCol = blocks[0].labelCol + 1;
-    const dayRowXml = (findElements(sheetXml, 'row').find(r => (/\br="(\d+)"/.exec(r.xml) || [])[1] === String(blocks[0].day)) || { xml: '' }).xml;
+    // The widest DAY row (repeats lower down can have fewer cells, and sections can be reordered)
+    const dayRows = new Set(blocks.map(b => String(b.day)));
+    const dayRowXml = findElements(sheetXml, 'row').filter(r => dayRows.has((/\br="(\d+)"/.exec(r.xml) || [])[1])).map(r => r.xml).join('');
     const lastCol = Math.max(startCol, ...[...dayRowXml.matchAll(/<c\s[^>]*\br="([A-Z]+)\d+"/g)].map(m => columnIndex(m[1])));
     const cols = [];
     for (let c = startCol; c <= lastCol; c++) cols.push(c);
@@ -2366,6 +2465,7 @@
     editXlsxRegister,
     insertXlsxRows,
     moveXlsxRows,
+    moveXlsxSections,
     shiftDrawingRows,
     relsPathOf,
     xlsxCodeCells,

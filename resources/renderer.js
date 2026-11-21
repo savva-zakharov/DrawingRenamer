@@ -641,18 +641,54 @@ function headingFolderPath(headings) {
 }
 
 // Every heading folder, in register order (kept until the register or the folders change)
-let headingFolderCache = { key: null, sections: null, list: [] };
+let headingFolderCache = { key: null, sections: null, list: [], headings: new Map() };
 function headingFolderList() {
   if (!useHeadingFolders()) return [];
   const key = state.layout.folders.join('|') + '\n' + state.diskFolders.join('|');
   if (headingFolderCache.sections === state.registerSections && headingFolderCache.key === key) return headingFolderCache.list;
   const seen = new Set();
-  for (const headings of Object.values(state.registerSections)) {
-    const folder = headingFolderPath(headings);
+  const headings = new Map(); // folder (and its parent folders) => the register headings it's for
+  for (const list of Object.values(state.registerSections)) {
+    const folder = headingFolderPath(list);
     if (folder) seen.add(folder);
+    for (let i = 1; i <= list.length; i++) {
+      const f = headingFolderPath(list.slice(0, i));
+      if (f && !headings.has(f)) headings.set(f, list.slice(0, i));
+    }
   }
-  headingFolderCache = { key, sections: state.registerSections, list: [...seen] };
+  headingFolderCache = { key, sections: state.registerSections, list: [...seen], headings };
   return headingFolderCache.list;
+}
+
+// The register headings in the order their folders are shown, when folders were dragged into an
+// order other than the register's ([[section], [section, subsection]...]), else null
+function pendingSectionOrder() {
+  if (state.registerKind !== 'xlsx') return null;
+  const heads = headingFolderList();
+  if (heads.length < 2) return null;
+  const all = withAncestors(heads).filter(f => headingFolderCache.headings.has(f));
+  const shown = all.slice().sort(compareFolders);
+  // The register's own order: each folder where its first drawing is
+  const registerRank = new Map();
+  heads.forEach((f, i) => {
+    for (const a of withAncestors([f])) if (!registerRank.has(a)) registerRank.set(a, i);
+  });
+  const inRegister = all.slice().sort((a, b) => {
+    const pa = a.split('/');
+    const pb = b.split('/');
+    for (let i = 0; i < Math.min(pa.length, pb.length); i++) {
+      if (pa[i] === pb[i]) continue;
+      return registerRank.get(pa.slice(0, i + 1).join('/')) - registerRank.get(pb.slice(0, i + 1).join('/'));
+    }
+    return pa.length - pb.length;
+  });
+  return shown.join('|') === inRegister.join('|') ? null : shown.map(f => headingFolderCache.headings.get(f));
+}
+
+// Forget the dragged order of heading folders (back to the register's order)
+function clearSectionOrder() {
+  const heads = new Set(withAncestors(headingFolderList()));
+  state.layout.folderOrder = (state.layout.folderOrder || []).filter(f => !heads.has(f));
 }
 
 function isHeadingFolder(folder) {
@@ -668,14 +704,39 @@ function computeSectionFolders() {
     for (const [token, headings] of Object.entries(state.registerSections)) base[token] = headingFolderPath(headings);
     const original = Object.keys(state.tokenMap);
     const first = original.length ? base[original[0]] || '' : '';
-    const moved = new Set(pendingMoves().map(m => m.token));
+    // The register's rows as drawings and headings, with the moves made as saving makes them (a
+    // drawing goes straight after the row of the one it's moved after, before the first drawing for
+    // '', after the last when that isn't found); each drawing is then under the heading above it
+    const items = [];
+    let last = null;
+    for (const token of original) {
+      if (base[token] !== last) items.push({ heading: base[token] || '' });
+      items.push({ token });
+      last = base[token];
+    }
+    for (const { token, after } of pendingMoves()) {
+      const from = items.findIndex(x => x.token === token);
+      if (from < 0 || token === after) continue;
+      const [item] = items.splice(from, 1);
+      let at;
+      if (after === '') at = items.findIndex(x => x.token);
+      else {
+        const i = items.findIndex(x => x.token === after);
+        at = i >= 0 ? i + 1 : items.length - [...items].reverse().findIndex(x => x.token);
+      }
+      items.splice(at, 0, item);
+    }
     const byRegister = {};
+    let heading = first;
     let prev = null;
-    for (const token of registerOrder()) {
-      const folder = moved.has(token) ? (prev === null ? first : prev) : (base[token] || '');
-      byRegister[token] = folder;
-      out[state.layout.numberEdits[token] || token] = folder;
-      prev = folder;
+    for (const x of items) {
+      if (!x.token) {
+        heading = x.heading;
+        continue;
+      }
+      byRegister[x.token] = heading;
+      out[state.layout.numberEdits[x.token] || x.token] = heading;
+      prev = heading;
     }
     const entries = pendingNewEntries();
     const entryFolder = (entry, depth = 0) => {
@@ -714,7 +775,7 @@ function layoutPath() {
 }
 
 async function loadLayout() {
-  state.layout = { folders: [], assignments: {}, titleEdits: {}, detailEdits: {}, projectEdits: {}, issueEdit: null, numberEdits: {}, numberHistory: {}, newEntries: [], moves: [], foldersToRemove: [], nameTemplate: DEFAULT_TEMPLATE, options: {}, ignoredWarnings: [], spellingWords: [], view: null, titleBlock: { areas: {}, folders: {}, originators: {}, files: {}, missing: {} }, fileFolders: {} };
+  state.layout = { folders: [], assignments: {}, titleEdits: {}, detailEdits: {}, projectEdits: {}, issueEdit: null, numberEdits: {}, numberHistory: {}, newEntries: [], moves: [], foldersToRemove: [], nameTemplate: DEFAULT_TEMPLATE, options: {}, ignoredWarnings: [], spellingWords: [], view: null, titleBlock: { areas: {}, folders: {}, originators: {}, files: {}, missing: {} }, fileFolders: {}, folderOrder: [] };
   state.layoutBroken = false;
   if (!(await getStatsOrNull(layoutPath()))) return;
   try {
@@ -796,7 +857,9 @@ async function loadLayout() {
       fileFolders[name] = folder;
       if (folder && !folders.includes(folder)) folders.push(folder);
     }
-    state.layout = { folders: withAncestors(folders), assignments, titleEdits, detailEdits, projectEdits, issueEdit, otherDrafts: drafts, numberEdits, numberHistory, newEntries, moves, foldersToRemove, nameTemplate, options, ignoredWarnings, spellingWords, view, externalRegister, titleBlock, fileFolders };
+    // Folders put in a different order (dragged): their paths, in that order
+    const folderOrder = Array.isArray(data.folderOrder) ? data.folderOrder.filter(f => typeof f === 'string' && f) : [];
+    state.layout = { folders: withAncestors(folders), assignments, titleEdits, detailEdits, projectEdits, issueEdit, otherDrafts: drafts, numberEdits, numberHistory, newEntries, moves, foldersToRemove, nameTemplate, options, ignoredWarnings, spellingWords, view, externalRegister, titleBlock, fileFolders, folderOrder };
     appendLog(`📁 Loaded folder layout from ${LAYOUT_FILE} (${folders.length} folders).`);
   } catch (err) {
     state.layoutBroken = true;
@@ -871,6 +934,8 @@ async function saveLayout() {
     titleBlock: titleBlockSaved(),
     // Files not in the register put in a folder (by file name)
     fileFolders: Object.keys(state.layout.fileFolders || {}).length ? state.layout.fileFolders : undefined,
+    // Folders dragged into a different order
+    folderOrder: (state.layout.folderOrder || []).length ? state.layout.folderOrder : undefined,
     newEntries: state.layout.newEntries
   };
   try {
@@ -915,18 +980,26 @@ function isInside(folder, ancestor) {
   return folder === ancestor || folder.startsWith(ancestor + '/');
 }
 
-// Tree order: parents before their subfolders, siblings alphabetically (heading folders in the
-// order of the register, before other folders)
+// Tree order: parents before their subfolders; siblings in the order they were dragged into, else
+// heading folders in the order of the register, then the others alphabetically
 function compareFolders(a, b) {
   const heads = headingFolderList();
+  const order = state.layout.folderOrder || [];
   const rank = folder => {
     const i = heads.findIndex(f => isInside(f, folder));
+    return i < 0 ? Infinity : i;
+  };
+  const dragged = folder => {
+    const i = order.indexOf(folder);
     return i < 0 ? Infinity : i;
   };
   const pa = a.split('/');
   const pb = b.split('/');
   for (let i = 0; i < Math.min(pa.length, pb.length); i++) {
     if (pa[i] === pb[i]) continue;
+    const da = dragged(pa.slice(0, i + 1).join('/'));
+    const db = dragged(pb.slice(0, i + 1).join('/'));
+    if (da !== db) return da - db;
     const ra = rank(pa.slice(0, i + 1).join('/'));
     const rb = rank(pb.slice(0, i + 1).join('/'));
     if (ra !== rb) return ra - rb;
@@ -1306,7 +1379,7 @@ function updateButtons() {
   entryBtn.disabled = state.busy;
   entryBtn.title = `Add a drawing to the ${registerAppName()} register`;
   const changes = editable
-    ? pendingTitleEdits().length + pendingDetailEdits().length + pendingProjectEdits().length + (pendingIssue() ? 1 : 0) + pendingNumberEdits().length + pendingNewEntries().length + state.movedTokens.size
+    ? pendingTitleEdits().length + pendingDetailEdits().length + pendingProjectEdits().length + (pendingIssue() ? 1 : 0) + pendingNumberEdits().length + pendingNewEntries().length + state.movedTokens.size + (pendingSectionOrder() ? 1 : 0)
     : 0;
   wordBtn.textContent = changes ? `${saveButtonLabel()} (${changes})` : saveButtonLabel();
   wordBtn.title = `Write edited titles and numbers into the ${registerAppName()} register`;
@@ -1404,8 +1477,13 @@ function renderSectionHeader(section, visible, inside) {
   tr.className = 'section';
   const dragTd = cell(tr, '', 'drag');
   if (!section.unmatched) {
-    if (section.folder && !isHeadingFolder(section.folder)) addFolderHandle(dragTd, tr, section.folder);
+    if (section.folder) addFolderHandle(dragTd, tr, section.folder);
     makeFolderDropTarget(tr, section.folder);
+    tr.addEventListener('contextmenu', (e) => {
+      if (e.target.closest('input')) return;
+      e.preventDefault();
+      openFolderMenu(e.clientX, e.clientY, section.folder, tr);
+    });
   }
   const selectable = inside.filter(isSelectable);
   const depth = folderDepth(section.folder);
@@ -1591,7 +1669,9 @@ function draggedFile() {
 }
 
 function addFolderHandle(td, tr, folder) {
-  const handle = makeHandle('Drag onto another folder to put this folder inside it, or onto the top folder to take it out');
+  const handle = makeHandle(isHeadingFolder(folder)
+    ? 'Drag above or below another folder to change the order'
+    : 'Drag above or below another folder to change the order, onto the middle of a folder to put this folder inside it, or onto the top folder to take it out');
   handle.addEventListener('dragstart', (e) => startDrag(e, tr, { kind: 'folder', folder }, folder));
   td.appendChild(handle);
 }
@@ -1650,14 +1730,27 @@ function makeFolderDropTarget(tr, folder) {
       const file = draggedFile();
       return !!file && file.folder !== folder;
     }
-    // Not into itself, its own subfolders, or the folder it's already in
-    return d.folder !== folder && !(folder && isInside(folder, d.folder)) && parentFolder(d.folder) !== folder;
+    return !!folderDropZone(d.folder, folder);
+  };
+  // Where a dragged folder goes: 'above' or 'below' a folder beside it (the top or bottom third of
+  // its header), 'into' it (not for a heading folder, whose place comes from the register), or null
+  const folderDropZone = (dragged, e) => {
+    const into = !isHeadingFolder(dragged) && dragged !== folder && !(folder && isInside(folder, dragged)) && parentFolder(dragged) !== folder;
+    const sibling = !!folder && folder !== dragged && parentFolder(folder) === parentFolder(dragged);
+    if (!sibling) return into ? 'into' : null;
+    if (!e) return 'above';
+    const r = tr.getBoundingClientRect();
+    const at = (e.clientY - r.top) / r.height;
+    if (at < 1 / 3 || !into) return at < 0.5 ? 'above' : 'below';
+    if (at > 2 / 3) return 'below';
+    return 'into';
   };
   tr.addEventListener('dragover', (e) => {
     if (!accepts()) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
-    markDrop(tr, 'drop-into');
+    const zone = state.drag.kind === 'folder' ? folderDropZone(state.drag.folder, e) : 'into';
+    markDrop(tr, zone === 'above' ? 'drop-above' : zone === 'below' ? 'drop-below' : 'drop-into');
   });
   tr.addEventListener('drop', async (e) => {
     if (!accepts()) return;
@@ -1681,9 +1774,73 @@ function makeFolderDropTarget(tr, folder) {
         rebuild();
       }
     } else {
-      await moveFolder(drag.folder, folder);
+      const zone = folderDropZone(drag.folder, e);
+      if (zone === 'into') await moveFolder(drag.folder, folder);
+      else if (zone) await reorderFolder(drag.folder, folder, zone === 'above');
     }
   });
+}
+
+// Put a folder just before or after another folder in the same parent (in the table; heading
+// folders stay in their place in the register)
+async function reorderFolder(folder, target, before) {
+  const parent = parentFolder(folder);
+  const siblings = drawingFolders().filter(f => parentFolder(f) === parent).sort(compareFolders).filter(f => f !== folder);
+  const at = siblings.indexOf(target);
+  if (at < 0) return;
+  siblings.splice(before ? at : at + 1, 0, folder);
+  state.layout.folderOrder = [...(state.layout.folderOrder || []).filter(f => !siblings.includes(f)), ...siblings];
+  const inRegister = isHeadingFolder(folder) && isHeadingFolder(target);
+  appendLog(`📁 ${displayPath(folder)} moved ${before ? 'above' : 'below'} ${displayPath(target)}${inRegister ? ` (press ${saveButtonLabel()} to move its section in the register)` : ''}.`);
+  await saveLayout();
+  rebuild();
+}
+
+// --------------------
+// Sorting the drawings in a folder
+// --------------------
+
+// The last run of digits in a drawing number: 1022 for PAWE-DA-BF-06-DR-A-1022 (ISO 19650 numbers
+// sort by their number field, not the codes in front of it)
+function lastNumberOf(token) {
+  const m = /(\d+)\D*$/.exec(token);
+  return m ? parseInt(m[1], 10) : Infinity;
+}
+
+// Reorder the register drawings in a folder (not its subfolders) by title ('title') or by the
+// last number in their drawing number ('number'), with moves like dragging them
+async function sortFolderContents(folder, mode) {
+  if (!canReorder()) return;
+  const where = folder ? displayPath(folder) : 'the top folder';
+  const inFolder = Object.keys(state.titles).filter(t => state.origOf[t] !== undefined && folderOf(t) === folder);
+  const byNumber = (a, b) => lastNumberOf(a) - lastNumberOf(b) || compareNumbers(a, b);
+  const byTitle = (a, b) => (state.titles[a] || '').localeCompare(state.titles[b] || '', undefined, { numeric: true, sensitivity: 'base' }) || byNumber(a, b);
+  const sorted = inFolder.slice().sort(mode === 'number' ? byNumber : byTitle);
+  const how = mode === 'number' ? 'by number' : 'alphabetically';
+  if (sorted.join('|') === inFolder.join('|')) {
+    appendLog(`↕️ The drawings in ${where} are already sorted ${how}.`);
+    return;
+  }
+  // Moves worked out on the register's order as it will be: the first drawing goes after the
+  // folder's current first one (which then moves to its own place), each next after the one before
+  const orig = t => state.origOf[t];
+  let order = registerOrder();
+  const moves = [];
+  const apply = (m) => {
+    order = applyMoves(order, [m]);
+    moves.push(m);
+  };
+  if (sorted[0] !== inFolder[0]) apply({ token: orig(sorted[0]), after: orig(inFolder[0]) });
+  for (let i = 1; i < sorted.length; i++) {
+    const prev = orig(sorted[i - 1]);
+    const token = orig(sorted[i]);
+    if (order[order.indexOf(prev) + 1] !== token) apply({ token, after: prev });
+  }
+  state.layout.moves.push(...moves);
+  if (!pendingMoves().length) state.layout.moves = [];
+  appendLog(`↕️ Sorted the drawings in ${where} ${how} (press ${saveButtonLabel()} to reorder the register).`);
+  await saveLayout();
+  rebuild();
 }
 
 function parentFolder(folder) {
@@ -1810,6 +1967,7 @@ async function relocateFolder(folder, dest, verb) {
     const remapRel = rel => (rel.startsWith(folder + '/') ? dest + rel.slice(folder.length) : rel);
     state.layout.folders = withAncestors(state.layout.folders.map(remap));
     state.layout.foldersToRemove = (state.layout.foldersToRemove || []).map(remap);
+    state.layout.folderOrder = (state.layout.folderOrder || []).map(remap);
     for (const token of Object.keys(state.layout.assignments)) {
       state.layout.assignments[token] = remap(state.layout.assignments[token]);
     }
@@ -4023,11 +4181,17 @@ async function askWordOptions(edits, additions, numbers, movedCount, details = [
   // Excel has no tracked changes
   document.getElementById('word-tracked').closest('label').hidden = excel;
   document.getElementById('word-export-label').textContent = `Also update the register PDF using ${registerAppName()}`;
-  const total = edits.length + additions.length + numbers.length + movedCount + details.length + project.length + (issue ? 1 : 0);
+  const sectionOrder = pendingSectionOrder();
+  const total = edits.length + additions.length + numbers.length + movedCount + details.length + project.length + (issue ? 1 : 0) + (sectionOrder ? 1 : 0);
   document.getElementById('word-dialog-title').textContent =
     `Save ${total === 1 ? '1 change' : total + ' changes'} to ${baseName(state.registerPath)}`;
   const list = document.getElementById('word-changes');
   list.textContent = '';
+  if (sectionOrder) {
+    const li = document.createElement('li');
+    li.textContent = `📁 Sections move into the folder order: ${sectionOrder.filter(h => h.length === 1).map(h => h[0]).join(', ')}`;
+    list.appendChild(li);
+  }
   for (const e of additions) {
     const li = document.createElement('li');
     const num = document.createElement('b');
@@ -4433,9 +4597,15 @@ async function saveToExcel() {
   const issue = pendingIssue();
   const additions = pendingNewEntries();
   const moves = pendingMoves();
-  if (!edits.length && !details.length && !project.length && !issue && !numbers.length && !additions.length && !moves.length) return;
+  const sectionOrder = pendingSectionOrder();
+  if (!edits.length && !details.length && !project.length && !issue && !numbers.length && !additions.length && !moves.length && !sectionOrder) return;
   const options = await askWordOptions(edits, additions, numbers, state.movedTokens.size, details, project, issue);
-  const wantOrder = Object.keys(state.titles);
+  let wantOrder = Object.keys(state.titles);
+  // With the sections reordered, the drawings come folder by folder in the order shown
+  if (sectionOrder) {
+    const titlesOrder = wantOrder;
+    wantOrder = ['', ...drawingFolders().slice().sort(compareFolders)].flatMap(f => titlesOrder.filter(t => (state.sectionFolders[t] || '') === f));
+  }
   if (!options) return;
 
   const xlsx = state.registerPath;
@@ -4467,6 +4637,12 @@ async function saveToExcel() {
     if (moved.moved.length) {
       if (moved.path !== result.path) throw new Error('rows would move on a different sheet from the other changes; nothing was saved.');
       edited = { ...edited, styles: moved.styles, workbook: moved.workbook, sheets: { ...edited.sheets, [moved.path]: moved.xml } };
+    }
+    // Then whole sections, into the order of their folders
+    const sections = sectionOrder ? RegisterCore.moveXlsxSections(edited, sectionOrder) : { moved: [] };
+    if (sections.moved.length) {
+      if (sections.path !== result.path) throw new Error('sections would move on a different sheet from the other changes; nothing was saved.');
+      edited = { ...edited, styles: sections.styles, workbook: sections.workbook, sheets: { ...edited.sheets, [sections.path]: sections.xml } };
     }
     const insert = additions.length
       ? RegisterCore.insertXlsxRows(edited, additions.map(e => ({ ...e, after: e.after && newNumber(e.after) })))
@@ -4522,7 +4698,7 @@ async function saveToExcel() {
     zip.file(result.path, edited.sheets[result.path]);
     if (edited.styles !== parts.styles) zip.file('xl/styles.xml', edited.styles);
     if (edited.workbook !== parts.workbook) zip.file('xl/workbook.xml', edited.workbook);
-    if (insert.inserted.length || moved.moved.length) await afterXlsxRowsInserted(zip, result.path, insert.inserted.length ? insert.move : null);
+    if (insert.inserted.length || moved.moved.length || sections.moved.length) await afterXlsxRowsInserted(zip, result.path, insert.inserted.length ? insert.move : null);
     const data = await zip.generateAsync({ type: 'arraybuffer', compression: 'DEFLATE', compressionOptions: { level: 6 } });
     await nfs.writeBinaryFile(xlsx, data);
 
@@ -4534,6 +4710,10 @@ async function saveToExcel() {
     for (const e of added) appendLog(`➕ ${e.token}: added "${e.title}" ${describePlace(e.after)}`);
     for (const code of insert.skipped) appendLog(`⚠️ ${code} is already in ${baseName(xlsx)}, so it wasn't added again.`);
     if (moved.moved.length) appendLog(`↕️ Moved ${[...new Set(moved.moved)].join(', ')} in the register`);
+    if (sections.moved.length) {
+      appendLog(`📁 Moved the section${sections.moved.length === 1 ? '' : 's'} ${sections.moved.map(h => h.join(' › ')).join(', ')} into the folder order`);
+    }
+    if (sectionOrder) clearSectionOrder();
     for (const code of moved.notFound) appendLog(`⚠️ ${code} wasn't found on sheet "${result.sheet}", so it wasn't moved.`);
     // Saved moves are done; any later ones (made after this save started) stay
     state.layout.moves = state.layout.moves.filter(m => !moves.includes(m));
@@ -4553,7 +4733,7 @@ async function saveToExcel() {
     await saveLayout();
     const detailCount = Object.keys(result.applied.scales).length + Object.keys(result.applied.sizes).length;
     const issueText = result.applied.issue ? (issue.mode === 'new' ? ', a new issue' : ', an issue update') : '';
-    appendLog(`✅ Saved ${Object.keys(result.applied.titles).length} title change(s), ${detailCount} scale/size change(s), ${Object.keys(result.applied.project).length} project detail change(s)${issueText}, ${Object.keys(result.applied.numbers).length} new number(s), ${new Set(moved.moved).size} move(s) and ${added.length} new entr${added.length === 1 ? 'y' : 'ies'} to sheet "${result.sheet}" of ${baseName(xlsx)}.`);
+    appendLog(`✅ Saved ${Object.keys(result.applied.titles).length} title change(s), ${detailCount} scale/size change(s), ${Object.keys(result.applied.project).length} project detail change(s)${issueText}, ${Object.keys(result.applied.numbers).length} new number(s), ${new Set(moved.moved).size} move(s)${sections.moved.length ? `, ${sections.moved.length} section move(s)` : ''} and ${added.length} new entr${added.length === 1 ? 'y' : 'ies'} to sheet "${result.sheet}" of ${baseName(xlsx)}.`);
 
     if (options.exportPdf) {
       const pdf = options.pdf;
@@ -6531,7 +6711,8 @@ function unsavedRegisterChanges() {
     issue: pendingIssue() ? 1 : 0,
     numbers: pendingNumberEdits().length,
     entries: pendingNewEntries().length,
-    moves: state.movedTokens.size
+    moves: state.movedTokens.size,
+    sections: pendingSectionOrder() ? 1 : 0
   };
   const parts = [];
   if (counts.titles) parts.push(`${counts.titles} title change(s)`);
@@ -6541,7 +6722,8 @@ function unsavedRegisterChanges() {
   if (counts.numbers) parts.push(`${counts.numbers} new number(s)`);
   if (counts.entries) parts.push(`${counts.entries} new entr${counts.entries === 1 ? 'y' : 'ies'}`);
   if (counts.moves) parts.push(`${counts.moves} moved drawing(s)`);
-  return { ...counts, total: counts.titles + counts.details + counts.project + counts.issue + counts.numbers + counts.entries + counts.moves, summary: parts.join(', ') };
+  if (counts.sections) parts.push('the new order of the register\'s sections');
+  return { ...counts, total: counts.titles + counts.details + counts.project + counts.issue + counts.numbers + counts.entries + counts.moves + counts.sections, summary: parts.join(', ') };
 }
 
 // Forget title and number edits, new entries and moves that haven't been saved to the register.
@@ -6572,6 +6754,7 @@ async function discardRegisterChanges() {
   for (const e of state.layout.newEntries) {
     if (!(e.token in state.tokenMap)) delete assignments[e.token];
   }
+  if (state.registerKind === 'xlsx') clearSectionOrder();
   state.layout.titleEdits = {};
   state.layout.detailEdits = {};
   state.layout.projectEdits = {};
@@ -6890,6 +7073,30 @@ function renderRowMenu(row, copy) {
     el('div', undefined, 'menu-sep'),
     rowMenuItem('Show in Explorer', undefined, () => showInExplorer(absPath(row.rel)))
   );
+}
+
+// Right-clicking a folder: rename it, or sort the drawings in it
+function openFolderMenu(x, y, folder, tr) {
+  const heading = isHeadingFolder(folder);
+  const sortNote = canReorder() ? undefined : 'Sorting reorders the register, which needs a Word or Excel register';
+  const sortItem = (label, mode) => rowMenuItem(label, sortNote, canReorder() && !state.busy ? () => sortFolderContents(folder, mode) : null);
+  const rename = !folder ? rowMenuItem('Rename folder', 'The top folder is the project folder')
+    : heading ? rowMenuItem('Rename folder', 'Named after its heading in the register')
+    : rowMenuItem('Rename folder', undefined, () => {
+      const name = tr.querySelector('.section-name');
+      if (name) startFolderRename(name, folder);
+    });
+  rowMenuRow = null;
+  rowMenu.replaceChildren(
+    rename,
+    el('div', undefined, 'menu-sep'),
+    sortItem('Sort contents (alphabetically)', 'title'),
+    sortItem('Sort contents (by number)', 'number')
+  );
+  rowMenu.hidden = false;
+  const { width, height } = rowMenu.getBoundingClientRect();
+  rowMenu.style.left = `${Math.max(4, Math.min(x, window.innerWidth - width - 4))}px`;
+  rowMenu.style.top = `${Math.max(4, Math.min(y, window.innerHeight - height - 4))}px`;
 }
 
 async function openRowMenu(x, y, row, copy = null) {
