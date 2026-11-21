@@ -500,7 +500,7 @@
             section = heading;
             subsection = '';
           }
-          headingCells.push({ ...headingCell, path: [section] });
+          headingCells.push({ ...headingCell, path: [section], headerRow: row });
         }
         heading = null;
         codeFrom = header.code;
@@ -546,13 +546,18 @@
         details[code] = { scale: cellOf(place.scaleCol), size: cellOf(place.sizeCol) };
         continue;
       }
-      // A heading: text in the code column (the first header's, above it) with no title beside it
-      const headCol = codeFrom !== null ? codeFrom : hasHeader ? headers[0].code : undefined;
-      const text = headCol !== undefined && cells[headCol] ? collapse(cells[headCol]) : '';
-      const titleCell = titleCol !== null ? titleCol : hasHeader ? headers[0].title : undefined;
-      if (text && !NOT_HEADINGS.test(norm(text)) && !isLooseCode(text.toUpperCase()) && !(titleCell !== undefined && cells[titleCell] && collapse(cells[titleCell]))) {
+      // A heading: text in the first drawing number column (the first header's, above it) and no
+      // other drawing details: nothing in the rest of the number's columns or the title, and
+      // nothing but DAY / MONTH / YEAR labels in the scale and size columns. "ELEVATIONS-2" looks
+      // like a drawing number, but without a title it's a heading.
+      const head = codeFrom !== null ? { code: codeFrom, title: titleCol, scale: scaleCol, size: sizeCol } : hasHeader ? headers[0] : null;
+      const text = head && cells[head.code] ? collapse(cells[head.code]) : '';
+      const filled = c => c !== undefined && cells[c] && collapse(cells[c]);
+      const otherDetails = head && (cols.some(c => c > head.code && c < head.title && filled(c)) || filled(head.title) ||
+        [head.scale, head.size].some(c => filled(c) && !NOT_HEADINGS.test(norm(cells[c]))));
+      if (text && !NOT_HEADINGS.test(norm(text)) && !otherDetails) {
         heading = text;
-        headingCell = { row, col: headCol };
+        headingCell = { row, col: head.code };
       }
     }
     return { titles, details, issue, places, sections, headingCells };
