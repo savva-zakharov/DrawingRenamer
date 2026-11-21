@@ -355,6 +355,7 @@ input.title-input{ width:100%; padding:3px 5px; font:inherit }
 #word-changes del{ color:var(--bad) }
 #word-changes ins{ color:var(--ok); text-decoration:none; font-weight:600 }
 label.option{ display:flex; align-items:center; gap:6px; margin:6px 0 2px; color:var(--fg) }
+label.option[hidden]{ display:none }
 p.indent{ margin:0 0 8px 22px }
 
 /* New register entries */

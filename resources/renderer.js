@@ -1204,15 +1204,14 @@ function updateButtons() {
   folderBtn.textContent = selected ? `FOLDER (${selected})` : '+ FOLDER';
   folderBtn.disabled = state.busy || selected === 0;
 
-  const isDocx = state.registerKind === 'docx';
   const editable = canEditRegister();
   wordBtn.hidden = !editable;
   entryBtn.hidden = !editable;
   entryBtn.disabled = state.busy;
   entryBtn.title = `Add a drawing to the ${registerAppName()} register`;
-  const changes = isDocx
+  const changes = editable
     ? pendingTitleEdits().length + pendingDetailEdits().length + pendingProjectEdits().length + (pendingIssue() ? 1 : 0) + pendingNumberEdits().length + pendingNewEntries().length + state.movedTokens.size
-    : editable ? pendingTitleEdits().length + pendingDetailEdits().length + pendingProjectEdits().length + (pendingIssue() ? 1 : 0) + pendingNumberEdits().length + pendingNewEntries().length : 0;
+    : 0;
   wordBtn.textContent = changes ? `${saveButtonLabel()} (${changes})` : saveButtonLabel();
   wordBtn.title = `Write edited titles and numbers into the ${registerAppName()} register`;
   wordBtn.disabled = state.busy || changes === 0;
@@ -1419,9 +1418,9 @@ function startFolderRename(nameEl, folder) {
 // Dragging: drawings to reorder the register or change folder, folders to nest them
 // --------------------
 
-// Reordering needs a Word register; folder changes work with any register
+// Reordering needs a Word or Excel register; folder changes work with any register
 function canReorder() {
-  return state.registerKind === 'docx';
+  return canEditRegister();
 }
 
 function canDragDrawings() {
@@ -1489,7 +1488,7 @@ function addFolderHandle(td, tr, folder) {
 }
 
 // Any row of a drawing is a drop target for drawings: the top half drops before it, the bottom
-// half after it (without a Word register, only the folder changes)
+// half after it (without a Word or Excel register, only the folder changes)
 function makeDropTarget(tr, row) {
   const above = (e) => e.clientY < tr.getBoundingClientRect().top + tr.offsetHeight / 2;
   // A file not in the register dropped on a row goes into that row's folder; drawings are only
@@ -1631,7 +1630,7 @@ async function moveDrawing(token, target, before, targetFolder) {
       if (!pendingMoves().length) state.layout.moves = []; // back to the register's order
     }
     reordered = true;
-    appendLog(`↕️ ${token} moved ${prev ? 'after ' + prev : 'to the top of the register'}${entry ? '' : ' (press SAVE TO WORD to reorder the register)'}.`);
+    appendLog(`↕️ ${token} moved ${prev ? 'after ' + prev : 'to the top of the register'}${entry ? '' : ` (press ${saveButtonLabel()} to reorder the register)`}.`);
   }
   const refiled = targetFolder !== undefined && targetFolder !== null && setDrawingFolder(token, targetFolder);
   if (!reordered && !refiled) return;
@@ -1972,7 +1971,7 @@ function renderTitle(td, row) {
     const badge = document.createElement('button');
     badge.className = 'edit-badge moved';
     badge.textContent = 'moved ✕';
-    badge.title = 'Moved in the register; press SAVE TO WORD to reorder it.\nClick to put it back';
+    badge.title = `Moved in the register; press ${saveButtonLabel()} to reorder it.\nClick to put it back`;
     badge.addEventListener('click', (e) => {
       e.stopPropagation();
       undoMove(row.token);
@@ -4272,10 +4271,11 @@ async function exportRegisterPdf() {
   }
 }
 
-// After rows were added to a sheet: pictures below them move down with the rows, and Excel's
-// formula calculation order (which names cells) is dropped for Excel to rebuild
+// After rows were added to a sheet or moved: pictures below added rows move down with the rows
+// (move: row => its new row; null when no rows were added), and Excel's formula calculation order
+// (which names cells) is dropped for Excel to rebuild
 async function afterXlsxRowsInserted(zip, sheetPath, move) {
-  const relsFile = zip.file(RegisterCore.relsPathOf(sheetPath));
+  const relsFile = move && zip.file(RegisterCore.relsPathOf(sheetPath));
   const rels = relsFile ? await relsFile.async('string') : '';
   for (const m of rels.matchAll(/<Relationship\b[^>]*\/>/g)) {
     if (!/\bType="[^"]*\/drawing"/.test(m[0])) continue;
@@ -4308,8 +4308,9 @@ async function saveToExcel() {
   const project = pendingProjectEdits();
   const issue = pendingIssue();
   const additions = pendingNewEntries();
-  if (!edits.length && !details.length && !project.length && !issue && !numbers.length && !additions.length) return;
-  const options = await askWordOptions(edits, additions, numbers, 0, details, project, issue);
+  const moves = pendingMoves();
+  if (!edits.length && !details.length && !project.length && !issue && !numbers.length && !additions.length && !moves.length) return;
+  const options = await askWordOptions(edits, additions, numbers, state.movedTokens.size, details, project, issue);
   const wantOrder = Object.keys(state.titles);
   if (!options) return;
 
@@ -4333,9 +4334,16 @@ async function saveToExcel() {
     });
     if (result.errors.length) throw new Error(result.errors.join('; ') + '; nothing was saved.');
     const newNumber = t => (result.applied.numbers[t] ? result.applied.numbers[t].to : t);
-    // New rows go in after the edits (numbers as they now are), each copying the formatting of a
-    // drawing row next to it
+    // Rows move after the edits (numbers as they now are), then new rows go in, each copying the
+    // formatting of a drawing row next to it
     let edited = { ...parts, styles: result.styles, sheets: { ...parts.sheets, [result.path]: result.xml } };
+    const moved = moves.length
+      ? RegisterCore.moveXlsxRows(edited, moves.map(m => ({ token: newNumber(m.token), after: m.after && newNumber(m.after) })))
+      : { moved: [], notFound: [] };
+    if (moved.moved.length) {
+      if (moved.path !== result.path) throw new Error('rows would move on a different sheet from the other changes; nothing was saved.');
+      edited = { ...edited, styles: moved.styles, workbook: moved.workbook, sheets: { ...edited.sheets, [moved.path]: moved.xml } };
+    }
     const insert = additions.length
       ? RegisterCore.insertXlsxRows(edited, additions.map(e => ({ ...e, after: e.after && newNumber(e.after) })))
       : { inserted: [], skipped: [], errors: [] };
@@ -4390,7 +4398,7 @@ async function saveToExcel() {
     zip.file(result.path, edited.sheets[result.path]);
     if (edited.styles !== parts.styles) zip.file('xl/styles.xml', edited.styles);
     if (edited.workbook !== parts.workbook) zip.file('xl/workbook.xml', edited.workbook);
-    if (insert.inserted.length) await afterXlsxRowsInserted(zip, result.path, insert.move);
+    if (insert.inserted.length || moved.moved.length) await afterXlsxRowsInserted(zip, result.path, insert.inserted.length ? insert.move : null);
     const data = await zip.generateAsync({ type: 'arraybuffer', compression: 'DEFLATE', compressionOptions: { level: 6 } });
     await nfs.writeBinaryFile(xlsx, data);
 
@@ -4401,6 +4409,10 @@ async function saveToExcel() {
     for (const [code, { to }] of Object.entries(result.applied.numbers)) appendLog(`# ${code} renumbered to ${to}`);
     for (const e of added) appendLog(`➕ ${e.token}: added "${e.title}" ${describePlace(e.after)}`);
     for (const code of insert.skipped) appendLog(`⚠️ ${code} is already in ${baseName(xlsx)}, so it wasn't added again.`);
+    if (moved.moved.length) appendLog(`↕️ Moved ${[...new Set(moved.moved)].join(', ')} in the register`);
+    for (const code of moved.notFound) appendLog(`⚠️ ${code} wasn't found on sheet "${result.sheet}", so it wasn't moved.`);
+    // Saved moves are done; any later ones (made after this save started) stay
+    state.layout.moves = state.layout.moves.filter(m => !moves.includes(m));
     state.layout.newEntries = state.layout.newEntries.filter(e => !insert.inserted.includes(e.token) && !insert.skipped.includes(e.token));
     for (const code of result.notFound) appendLog(`⚠️ ${code} wasn't found on sheet "${result.sheet}"; its edit was kept.`);
     for (const code of Object.keys(result.applied.titles)) delete state.layout.titleEdits[code];
@@ -4417,7 +4429,7 @@ async function saveToExcel() {
     await saveLayout();
     const detailCount = Object.keys(result.applied.scales).length + Object.keys(result.applied.sizes).length;
     const issueText = result.applied.issue ? (issue.mode === 'new' ? ', a new issue' : ', an issue update') : '';
-    appendLog(`✅ Saved ${Object.keys(result.applied.titles).length} title change(s), ${detailCount} scale/size change(s), ${Object.keys(result.applied.project).length} project detail change(s)${issueText}, ${Object.keys(result.applied.numbers).length} new number(s) and ${added.length} new entr${added.length === 1 ? 'y' : 'ies'} to sheet "${result.sheet}" of ${baseName(xlsx)}.`);
+    appendLog(`✅ Saved ${Object.keys(result.applied.titles).length} title change(s), ${detailCount} scale/size change(s), ${Object.keys(result.applied.project).length} project detail change(s)${issueText}, ${Object.keys(result.applied.numbers).length} new number(s), ${new Set(moved.moved).size} move(s) and ${added.length} new entr${added.length === 1 ? 'y' : 'ies'} to sheet "${result.sheet}" of ${baseName(xlsx)}.`);
 
     if (options.exportPdf) {
       const pdf = options.pdf;
@@ -4640,7 +4652,7 @@ function updateToolbarActions() {
   resetFoldersBtn.disabled = !loaded || !state.layout.folders.length;
   resetFoldersBtn.title = state.layout.folders.length ? 'Take every drawing out of its folder' : 'There are no folders';
   sortRegisterBtn.disabled = !loaded || !canReorder();
-  sortRegisterBtn.title = canReorder() ? 'Put the register in drawing number order' : 'Sorting reorders the register, which needs a Word register';
+  sortRegisterBtn.title = canReorder() ? 'Put the register in drawing number order' : 'Sorting reorders the register, which needs a Word or Excel register';
   const pending = state.registerPath ? unsavedRegisterChanges() : { total: 0 };
   discardChangesBtn.disabled = !loaded || !pending.total;
   discardChangesBtn.title = pending.total ? `Forget ${pending.summary}` : 'There are no unsaved register changes';
@@ -6914,7 +6926,7 @@ function longestIncreasing(values) {
 }
 
 // Put the register in drawing number order (natural: PA-2 before PA-10), by the numbers shown.
-// Only drawings that are out of order get a move, so SAVE TO WORD changes as few rows as possible.
+// Only drawings that are out of order get a move, so saving changes as few rows as possible.
 async function sortByNumber() {
   if (!canReorder()) return;
   const shown = t => state.layout.numberEdits[t] || t;
@@ -6946,7 +6958,7 @@ async function sortByNumber() {
   }
   state.layout.moves.push(...moves);
   if (!pendingMoves().length) state.layout.moves = [];
-  appendLog(`↕️ Sorted the register by drawing number: ${moves.length} drawing(s)${entriesMoved ? ` and ${entriesMoved} new entr${entriesMoved === 1 ? 'y' : 'ies'}` : ''} move (press SAVE TO WORD to reorder the register).`);
+  appendLog(`↕️ Sorted the register by drawing number: ${moves.length} drawing(s)${entriesMoved ? ` and ${entriesMoved} new entr${entriesMoved === 1 ? 'y' : 'ies'}` : ''} move (press ${saveButtonLabel()} to reorder the register).`);
   await saveLayout();
   rebuild();
 }
