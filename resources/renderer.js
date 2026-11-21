@@ -1438,19 +1438,28 @@ function renderSectionHeader(section, visible, inside) {
       name.addEventListener('dblclick', () => startFolderRename(name, section.folder));
     }
     td.style.paddingLeft = `${8 + (depth - 1) * 22}px`;
-  } else name.textContent = `📂 ${baseName(state.targetDir)} (top folder)`;
+  } else {
+    name.textContent = '📂 Top Folder';
+    name.title = displayPath(state.targetDir) || state.targetDir;
+  }
   td.appendChild(name);
 
   if (!section.unmatched) {
-    const plural = n => n === 1 ? '1 drawing' : `${n} drawings`;
-    // Files not in the register count one each
-    const direct = new Set(section.rows.map(r => r.token || r.key)).size;
+    // Drawings with a file found / all drawings (files not in the register count one each)
+    const tally = rows => {
+      const all = new Set(rows.map(r => r.token || r.key));
+      const found = new Set(rows.filter(r => r.status !== 'none').map(r => r.token || r.key));
+      return { found: found.size, all: all.size };
+    };
+    const show = ({ found, all }) => `${found}/${all} ${all === 1 ? 'drawing' : 'drawings'}`;
+    const direct = tally(section.rows);
     const count = document.createElement('span');
     count.className = 'muted section-count';
-    count.textContent = plural(direct);
+    count.textContent = show(direct);
+    count.title = `Files found for ${direct.found} of the ${direct.all} drawing(s) in this folder`;
     if (section.folder) {
-      const total = new Set(state.rows.filter(r => (r.token || r.unregistered) && r.folder && isInside(r.folder, section.folder)).map(r => r.token || r.key)).size;
-      if (total > direct) count.textContent += ` · ${plural(total)} including subfolders`;
+      const total = tally(state.rows.filter(r => (r.token || r.unregistered) && r.folder && isInside(r.folder, section.folder)));
+      if (total.all > direct.all) count.textContent += ` · ${show(total)} including subfolders`;
     }
     td.appendChild(count);
   }
