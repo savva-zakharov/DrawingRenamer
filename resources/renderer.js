@@ -2189,6 +2189,7 @@ function fileDetailsShown() {
 
 // The title block cells, with misspelt words in the titles underlined when Spelling is ticked
 function renderFileDetails(tds, row) {
+  scheduleFit();
   renderFileDetailCells(tds, row);
   underlineMisspellings(tds.title);
   if (tds.title.tagName === 'DIV') underlineMisspellings(tds.title.parentElement.querySelector('.title-text'));
@@ -3235,6 +3236,7 @@ function render(newFiles) {
   renderProjectData();
   renderRevisionData();
   renderWarnings();
+  scheduleFit();
   emptyEl.style.display = dataRows ? 'none' : '';
   if (!dataRows) {
     const filtered = tableFilterInput.value.trim() || onlyWarningsCheckbox.checked;
@@ -6467,7 +6469,7 @@ function copyTarget(target) {
   const line = target.closest('.stack-top, .stack-bottom');
   const part = line && td.contains(line) ? line : td;
   if (part.classList.contains('pending') || part.classList.contains('none') || td.classList.contains('missing')) return null;
-  const clone = part.cloneNode(true);
+  const clone = withFullText(part);
   for (const node of clone.querySelectorAll('button, input, .status-icon, .reordered')) node.remove();
   const text = clone.textContent.replace(/^\s*→\s*/, '').replace(/\s+/g, ' ').trim();
   if (!text) return null;
@@ -6497,6 +6499,183 @@ async function copyText(text, label) {
     return false;
   }
 }
+
+// ---------- two-line cells ----------
+// Table text that would take more than two lines is shortened in the middle, keeping its start and
+// end ("PAWE-DA-BF-06-DR-A-1022-Park W…Sheet 1 of 2.pdf"). The full text is in the tooltip and is
+// what gets copied. Cells are measured with their full text first, so column widths come from it.
+const FIT_LINES = 2;
+const FIT_HOLDERS = 'td, .stack-top, .stack-bottom, .title-text, .register-line';
+const fitOriginals = new WeakMap(); // shortened element => its full child nodes
+const fitShown = new WeakMap();     // shortened element => the shortened nodes put in its place
+const fitTitles = new WeakMap();    // shortened element => the tooltip added for it
+const fitContext = document.createElement('canvas').getContext('2d');
+let fitFrame = 0;
+
+function scheduleFit() {
+  if (!fitFrame) fitFrame = requestAnimationFrame(() => {
+    fitFrame = 0;
+    fitCells();
+  });
+}
+
+// Puts an element's full text back, unless something else has replaced its content since
+function restoreFit(el) {
+  const shown = fitShown.get(el);
+  if (!shown) return;
+  if (el.childNodes.length === shown.length && shown.every((n, i) => el.childNodes[i] === n)) el.replaceChildren(...fitOriginals.get(el));
+  if (fitTitles.has(el) && el.title === fitTitles.get(el)) el.removeAttribute('title');
+  fitShown.delete(el);
+  fitOriginals.delete(el);
+  fitTitles.delete(el);
+}
+
+// A copy of `el` with any shortened text inside it put back in full (for copying)
+function withFullText(el) {
+  const clone = el.cloneNode(true);
+  for (const shortened of [el, ...el.querySelectorAll(FIT_HOLDERS)].filter(e => fitShown.has(e))) {
+    // The same element in the copy, by its position under `el`
+    const path = [];
+    for (let n = shortened; n !== el; n = n.parentNode) path.unshift([...n.parentNode.childNodes].indexOf(n));
+    let target = clone;
+    for (const i of path) target = target.childNodes[i];
+    if (target) target.replaceChildren(...fitOriginals.get(shortened).map(n => n.cloneNode(true)));
+  }
+  return clone;
+}
+
+// Elements holding a cell's text: only text, misspelt-word underlines and difference marks inside
+// (no buttons, badges, inputs or nested lines), and allowed to wrap
+function fitHolders() {
+  return [...rowsEl.querySelectorAll(FIT_HOLDERS)].filter(el =>
+    !el.closest('tr.section') && el.textContent.trim() && [...el.querySelectorAll('*')].every(c => c.matches('span.misspelled, mark')));
+}
+
+// How many lines `text` takes at `width` with the context's font, wrapping after spaces and
+// hyphens and breaking words too long for a line (as word-break: break-word does)
+function fitLineCount(text, width) {
+  let lines = 1;
+  let x = 0;
+  for (const piece of text.split(/(?<=[\s-])/)) {
+    const w = fitContext.measureText(piece).width;
+    const ink = fitContext.measureText(piece.trimEnd()).width;
+    if (x + ink <= width) {
+      x += w;
+      continue;
+    }
+    if (x > 0) lines++;
+    if (ink > width) {
+      lines += Math.ceil(ink / width) - 1;
+      x = ink % width;
+    } else x = w;
+  }
+  return lines;
+}
+
+// The text kept from each end when `keep` characters are kept: [start, end]
+function fitEnds(text, keep) {
+  const start = text.slice(0, Math.ceil(keep / 2)).replace(/\s+$/, '');
+  const end = text.slice(text.length - Math.floor(keep / 2)).replace(/^\s+/, '');
+  return [start, end];
+}
+
+// The most characters that can be kept (with … between them) within FIT_LINES, or null if the
+// whole text fits
+function fitLength(text, width) {
+  if (fitLineCount(text, width) <= FIT_LINES) return null;
+  let lo = 2;
+  let hi = text.length - 1;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    const [start, end] = fitEnds(text, mid);
+    if (fitLineCount(`${start}…${end}`, width) <= FIT_LINES) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo;
+}
+
+// Shortens an element's content to its first and last parts with … between, keeping the
+// underlines and marks on the parts kept
+function shortenTo(el, text, keep) {
+  const originals = fitOriginals.get(el) || [...el.childNodes];
+  const [start, end] = fitEnds(text, keep);
+  const a = start.length;
+  const b = text.length - end.length;
+  const head = [];
+  const tail = [];
+  let pos = 0;
+  for (const node of originals) {
+    const t = node.textContent;
+    const s = pos;
+    pos += t.length;
+    const piece = (from, to) => {
+      if (node.nodeType === Node.TEXT_NODE) return document.createTextNode(t.slice(from, to));
+      const copy = node.cloneNode(false);
+      copy.textContent = t.slice(from, to);
+      return copy;
+    };
+    if (s < a) head.push(piece(0, Math.min(pos, a) - s));
+    if (pos > b) tail.push(piece(Math.max(s, b) - s, t.length));
+  }
+  const shown = [...head, document.createTextNode('…'), ...tail];
+  el.replaceChildren(...shown);
+  fitOriginals.set(el, originals);
+  fitShown.set(el, shown);
+  if (!el.title) {
+    el.title = text;
+    fitTitles.set(el, text);
+  }
+}
+
+// Lines an element's text takes on screen
+function shownLines(el) {
+  const range = document.createRange();
+  range.selectNodeContents(el);
+  const tops = new Set([...range.getClientRects()].filter(r => r.width > 0).map(r => Math.round(r.top)));
+  return Math.max(1, tops.size);
+}
+
+let fitColumns = []; // header cells given a fixed width by the last fitCells()
+
+function fitCells() {
+  for (const el of rowsEl.querySelectorAll(FIT_HOLDERS)) restoreFit(el);
+  // The columns take the widths they'd have with the full text, held there so that shortening
+  // a column's text doesn't narrow it (which would shorten its text further)
+  for (const th of fitColumns) th.style.width = '';
+  tableEl.style.tableLayout = '';
+  const heads = [...tableEl.querySelectorAll('thead th')].filter(th => th.offsetParent !== null);
+  const widths = heads.map(th => th.getBoundingClientRect().width);
+  heads.forEach((th, i) => { th.style.width = `${widths[i]}px`; });
+  fitColumns = heads;
+  tableEl.style.tableLayout = 'fixed';
+  // Read every width first, then write, so the page is laid out once
+  const jobs = [];
+  for (const el of fitHolders()) {
+    const style = getComputedStyle(el);
+    if (/nowrap|pre/.test(style.whiteSpace)) continue;
+    const box = style.display === 'inline' ? el.parentElement.closest('td, div') : el;
+    const boxStyle = box === el ? style : getComputedStyle(box);
+    const width = box.clientWidth - parseFloat(boxStyle.paddingLeft) - parseFloat(boxStyle.paddingRight);
+    if (width > 20) jobs.push({ el, font: style.font, width: width * 0.98, text: el.textContent });
+  }
+  for (const job of jobs) {
+    fitContext.font = job.font;
+    job.keep = fitLength(job.text, job.width);
+    if (job.keep !== null) shortenTo(job.el, job.text, job.keep);
+  }
+  // Shorter texts can let the columns settle differently: shorten further any that still wrap more
+  for (let pass = 0; pass < 2; pass++) {
+    const over = jobs.map(job => ({ job, lines: shownLines(job.el) })).filter(o => o.lines > FIT_LINES);
+    if (!over.length) break;
+    for (const { job, lines } of over) {
+      job.keep = Math.max(2, Math.floor((job.keep ?? job.text.length) * FIT_LINES / lines * 0.95));
+      shortenTo(job.el, job.text, job.keep);
+    }
+  }
+}
+
+window.addEventListener('resize', scheduleFit);
+new ResizeObserver(scheduleFit).observe(document.getElementById('table-wrap'));
 
 // ---------- copy button shown on hover ----------
 // One button, moved to the right end of the cell (or stacked line) under the mouse
@@ -6899,6 +7078,7 @@ for (const [cb, hideClass] of fileDetailCheckboxes) {
   cb.addEventListener('change', () => {
     tableEl.classList.toggle(hideClass, !cb.checked);
     if (cb.checked) loadFileDetails();
+    scheduleFit(); // the columns' widths change
   });
 }
 
