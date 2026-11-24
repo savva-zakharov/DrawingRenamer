@@ -632,7 +632,7 @@ function layoutPath() {
 }
 
 async function loadLayout() {
-  state.layout = { folders: [], assignments: {}, titleEdits: {}, detailEdits: {}, projectEdits: {}, issueEdit: null, numberEdits: {}, numberHistory: {}, newEntries: [], moves: [], foldersToRemove: [], nameTemplate: DEFAULT_TEMPLATE, options: {}, ignoredWarnings: [], spellingWords: [], view: null, titleBlock: { areas: {}, folders: {}, originators: {}, files: {}, missing: {} }, fileFolders: {} };
+  state.layout = { folders: [], assignments: {}, titleEdits: {}, detailEdits: {}, projectEdits: {}, issueEdit: null, numberEdits: {}, numberHistory: {}, newEntries: [], moves: [], foldersToRemove: [], nameTemplate: DEFAULT_TEMPLATE, options: {}, ignoredWarnings: [], spellingWords: [], view: null, titleBlock: { areas: {}, folders: {}, originators: {}, files: {}, missing: {} }, fileFolders: {}, deletions: [] };
   state.layoutBroken = false;
   if (!(await getStatsOrNull(layoutPath()))) return;
   try {
@@ -707,6 +707,8 @@ async function loadLayout() {
     const view = validView(data.view);
     const externalRegister = typeof data.externalRegister === 'string' && data.externalRegister ? data.externalRegister : null;
     const titleBlock = validTitleBlock(data.titleBlock);
+    // Register entries to delete when the register is next saved
+    const deletions = [...new Set((Array.isArray(data.deletions) ? data.deletions : []).filter(t => typeof t === 'string' && numberRe.test(t)))];
     // Files not in the register put in a folder: file name => folder ('' the top folder)
     const fileFolders = {};
     for (const [name, folder] of Object.entries(data.fileFolders || {})) {
@@ -714,7 +716,7 @@ async function loadLayout() {
       fileFolders[name] = folder;
       if (folder && !folders.includes(folder)) folders.push(folder);
     }
-    state.layout = { folders: withAncestors(folders), assignments, titleEdits, detailEdits, projectEdits, issueEdit, otherDrafts: drafts, numberEdits, numberHistory, newEntries, moves, foldersToRemove, nameTemplate, options, ignoredWarnings, spellingWords, view, externalRegister, titleBlock, fileFolders };
+    state.layout = { folders: withAncestors(folders), assignments, titleEdits, detailEdits, projectEdits, issueEdit, otherDrafts: drafts, numberEdits, numberHistory, newEntries, moves, foldersToRemove, nameTemplate, options, ignoredWarnings, spellingWords, view, externalRegister, titleBlock, fileFolders, deletions };
     appendLog(`📁 Loaded folder layout from ${LAYOUT_FILE} (${folders.length} folders).`);
   } catch (err) {
     state.layoutBroken = true;
@@ -786,6 +788,8 @@ async function saveLayout() {
     view: state.layout.view || undefined,
     // Where title block fields are read from, where they aren't found by their labels
     titleBlock: titleBlockSaved(),
+    // Register entries to delete when it's next saved
+    deletions: (state.layout.deletions || []).length ? state.layout.deletions : undefined,
     // Files not in the register put in a folder (by file name)
     fileFolders: Object.keys(state.layout.fileFolders || {}).length ? state.layout.fileFolders : undefined,
     newEntries: state.layout.newEntries
@@ -1053,10 +1057,11 @@ function computeRows(tokenMap, match, files, addedTimes, choices) {
     const edited = !isNew && title !== registerTitle;
     const renumbered = !isNew && origToken !== token;
     const moved = !isNew && state.movedTokens.has(origToken);
+    const deleted = !isNew && (state.layout.deletions || []).includes(origToken);
     const folder = folderOf(token);
     const matches = match.byToken[token];
     if (!matches) {
-      rows.push({ key: '#' + token, token, origToken, title, edited, renumbered, moved, isNew, registerTitle, folder, status: 'none' });
+      rows.push({ key: '#' + token, token, origToken, title, edited, renumbered, moved, deleted, isNew, registerTitle, folder, status: 'none' });
       continue;
     }
     // {filerev} comes from the file picked for the drawing, or else the newest
@@ -1074,7 +1079,7 @@ function computeRows(tokenMap, match, files, addedTimes, choices) {
     const ordered = matches.slice().sort((a, b) => (addedTimes[b.rel] || 0) - (addedTimes[a.rel] || 0) || a.rel.localeCompare(b.rel));
     ordered.forEach((f, i) => {
       const row = {
-        key: f.rel, token, origToken, title, edited, renumbered, moved, isNew, registerTitle, folder, file: f.name, dir: f.dir, rel: f.rel, newName, targetRel,
+        key: f.rel, token, origToken, title, edited, renumbered, moved, deleted, isNew, registerTitle, folder, file: f.name, dir: f.dir, rel: f.rel, newName, targetRel,
         group, chosen: f === chosen, first: i === 0, last: i === ordered.length - 1
       };
       if (match.short && match.short.has(f.rel)) {
@@ -1211,8 +1216,8 @@ function updateButtons() {
   entryBtn.hidden = !isDocx;
   entryBtn.disabled = state.busy;
   const changes = isDocx
-    ? pendingTitleEdits().length + pendingDetailEdits().length + pendingProjectEdits().length + (pendingIssue() ? 1 : 0) + pendingNumberEdits().length + pendingNewEntries().length + state.movedTokens.size
-    : editable ? pendingTitleEdits().length + pendingDetailEdits().length + pendingProjectEdits().length + (pendingIssue() ? 1 : 0) + pendingNumberEdits().length : 0;
+    ? pendingTitleEdits().length + pendingDetailEdits().length + pendingProjectEdits().length + (pendingIssue() ? 1 : 0) + pendingNumberEdits().length + pendingNewEntries().length + state.movedTokens.size + pendingDeletions().length
+    : editable ? pendingTitleEdits().length + pendingDetailEdits().length + pendingProjectEdits().length + (pendingIssue() ? 1 : 0) + pendingNumberEdits().length + pendingDeletions().length : 0;
   wordBtn.textContent = changes ? `${saveButtonLabel()} (${changes})` : saveButtonLabel();
   wordBtn.title = `Write edited titles and numbers into the ${registerAppName()} register`;
   wordBtn.disabled = state.busy || changes === 0;
@@ -1759,25 +1764,21 @@ function renderRow(row, newFiles, alt, depth) {
       return;
     }
     const copy = copyTarget(e.target);
-    if (!copy && !row.rel) return;
+    if (!copy && !row.rel && !(row.token && canEditRegister())) return;
     e.preventDefault();
     openRowMenu(e.clientX, e.clientY, row, copy);
   });
-  // Clicking the row's background shows its drawing in the viewer
-  if (row.rel) {
-    tr.addEventListener('click', (e) => {
-      if (e.target.closest('input, button, label, select, a, .drag-handle') || !window.getSelection().isCollapsed) return;
-      showPdf(absPath(row.rel), row.key);
-    });
-    if (viewer.key === row.key) tr.classList.add('viewing');
-  }
-  // Double-clicking the row opens its file, except where double-clicking edits (titles, numbers)
+  // Double-clicking the row shows its drawing in the viewer, except where double-clicking edits
+  // (titles, numbers); it's opened in its program from the right-click menu or the viewer's button
+  // (or by double-clicking, with the viewer turned off in the options)
   if (row.rel) {
     tr.addEventListener('dblclick', (e) => {
-      if (e.target.closest('input, button, label, select, a, .editable')) return;
+      if (e.target.closest('input, button, label, select, a, .editable, .drag-handle')) return;
       window.getSelection().removeAllRanges();
-      openFile(row.rel);
+      if (settings.pdfViewer) showPdf(absPath(row.rel), row.key);
+      else openFile(row.rel);
     });
+    if (viewer.key === row.key) tr.classList.add('viewing');
   }
 
   const dragTd = cell(tr, '', 'drag');
@@ -1789,6 +1790,7 @@ function renderRow(row, newFiles, alt, depth) {
     makeDropTarget(tr, row);
   }
   if (row.moved) tr.classList.add('moved');
+  if (row.deleted) tr.classList.add('deleted');
 
   const checkTd = cell(tr, '');
   if (isSelectable(row)) {
@@ -1968,6 +1970,17 @@ function renderTitle(td, row) {
   text.textContent = row.title;
   td.appendChild(text);
   underlineMisspellings(text);
+  if (row.deleted) {
+    const badge = document.createElement('button');
+    badge.className = 'edit-badge deleted';
+    badge.textContent = 'deleted ✕';
+    badge.title = `Will be deleted from the register when you press ${saveButtonLabel()}.\nClick to keep it`;
+    badge.addEventListener('click', (e) => {
+      e.stopPropagation();
+      setDeletion(row.origToken, false);
+    });
+    td.append(' ', badge);
+  }
   if (row.moved) {
     const badge = document.createElement('button');
     badge.className = 'edit-badge moved';
@@ -3340,6 +3353,46 @@ function pendingNumberEdits() {
     .map(t => ({ token: t, to: state.layout.numberEdits[t] }));
 }
 
+// A staged issue without the marks of entries being deleted (null if there's no issue)
+function issueWithout(issue, deletions) {
+  if (!issue || !deletions.length) return issue;
+  return { ...issue, marks: Object.fromEntries(Object.entries(issue.marks || {}).filter(([t]) => !deletions.includes(t))) };
+}
+
+// Deleted from the register: nothing staged for them is left
+function forgetDeleted(tokens) {
+  for (const token of tokens) {
+    delete state.layout.titleEdits[token];
+    delete state.layout.detailEdits[token];
+    delete state.layout.numberEdits[token];
+  }
+  state.layout.deletions = (state.layout.deletions || []).filter(t => !tokens.includes(t));
+}
+
+// Register entries to delete (their numbers in the register), in register order
+function pendingDeletions() {
+  const marked = new Set(state.layout.deletions || []);
+  return Object.keys(state.tokenMap).filter(t => marked.has(t));
+}
+
+// Marks a register entry (its number in the register) to be deleted when it's next saved, or not
+async function setDeletion(token, on) {
+  const list = (state.layout.deletions || []).filter(t => t !== token);
+  if (on) list.push(token);
+  state.layout.deletions = list;
+  await saveLayout();
+  appendLog(on
+    ? `🗑️ ${token} will be deleted from the register when you press ${saveButtonLabel()}.`
+    : `↩️ ${token} stays in the register.`);
+  rebuild();
+}
+
+// The other changes, without those to entries being deleted (there'd be nothing to change)
+function withoutDeleted(list, deletions) {
+  const gone = new Set(deletions);
+  return list.filter(e => !gone.has(e.token));
+}
+
 // Title edits for drawings in the register that differ from it
 function pendingTitleEdits() {
   return Object.keys(state.tokenMap)
@@ -3891,18 +3944,30 @@ try {
 const wordDialog = document.getElementById('word-dialog');
 
 // Resolves to { tracked, exportPdf } or null if cancelled
-async function askWordOptions(edits, additions, numbers, movedCount, details = [], project = [], issue = null) {
+async function askWordOptions(edits, additions, numbers, movedCount, details = [], project = [], issue = null, deletions = []) {
   const excel = state.registerKind === 'xlsx';
   const wordOk = excel ? await checkExcelAvailable() : await checkWordAvailable();
   const pdfTarget = excel ? await excelPdfPath() : registerPdfPath();
   // Excel has no tracked changes
   document.getElementById('word-tracked').closest('label').hidden = excel;
   document.getElementById('word-export-label').textContent = `Also update the register PDF using ${registerAppName()}`;
-  const total = edits.length + additions.length + numbers.length + movedCount + details.length + project.length + (issue ? 1 : 0);
+  const total = edits.length + additions.length + numbers.length + movedCount + details.length + project.length + (issue ? 1 : 0) + deletions.length;
   document.getElementById('word-dialog-title').textContent =
     `Save ${total === 1 ? '1 change' : total + ' changes'} to ${baseName(state.registerPath)}`;
   const list = document.getElementById('word-changes');
   list.textContent = '';
+  for (const token of deletions) {
+    const li = document.createElement('li');
+    const num = document.createElement('del');
+    num.textContent = token;
+    const title = document.createElement('del');
+    title.textContent = state.tokenMap[token] || '';
+    const what = document.createElement('span');
+    what.className = 'muted';
+    what.textContent = excel ? ' (deleted: its row is emptied)' : ' (row deleted)';
+    li.append('🗑️ ', num, ' ', title, what);
+    list.appendChild(li);
+  }
   for (const e of additions) {
     const li = document.createElement('li');
     const num = document.createElement('b');
@@ -4033,15 +4098,16 @@ function clearSavedDetails(scalesApplied, sizesApplied) {
 
 async function saveToWord() {
   if (state.registerKind === 'xlsx') return saveToExcel();
-  const edits = pendingTitleEdits();
-  const details = pendingDetailEdits();
+  const deletions = pendingDeletions();
+  const edits = withoutDeleted(pendingTitleEdits(), deletions);
+  const details = withoutDeleted(pendingDetailEdits(), deletions);
   const additions = pendingNewEntries();
-  const numbers = pendingNumberEdits();
-  const moves = pendingMoves();
+  const numbers = withoutDeleted(pendingNumberEdits(), deletions);
+  const moves = withoutDeleted(pendingMoves(), deletions);
   const project = pendingProjectEdits();
-  const issue = pendingIssue();
-  if ((!edits.length && !details.length && !project.length && !issue && !additions.length && !numbers.length && !moves.length) || state.registerKind !== 'docx') return;
-  const options = await askWordOptions(edits, additions, numbers, state.movedTokens.size, details, project, issue);
+  const issue = issueWithout(pendingIssue(), deletions);
+  if ((!edits.length && !details.length && !project.length && !issue && !additions.length && !numbers.length && !moves.length && !deletions.length) || state.registerKind !== 'docx') return;
+  const options = await askWordOptions(edits, additions, numbers, state.movedTokens.size, details, project, issue, deletions);
   const wantOrder = Object.keys(state.titles);
   if (!options) return;
 
@@ -4072,7 +4138,11 @@ async function saveToWord() {
     const renumber = RegisterCore.editDocxNumbers(issued.xml, Object.fromEntries(numbers.map(e => [e.token, e.to])), revOpts);
     const newNumber = t => (renumber.applied[t] ? renumber.applied[t].to : t);
     const move = RegisterCore.moveDocxRows(renumber.xml, moves.map(m => ({ token: newNumber(m.token), after: m.after && newNumber(m.after) })), revOpts);
-    const insert = RegisterCore.insertDocxRows(move.xml, additions.map(e => ({ ...e, after: e.after && newNumber(e.after) })), revOpts);
+    const inserted = RegisterCore.insertDocxRows(move.xml, additions.map(e => ({ ...e, after: e.after && newNumber(e.after) })), revOpts);
+    // Deleted last, so new rows can still be placed after them
+    const removal = RegisterCore.deleteDocxRows(inserted.xml, deletions, revOpts);
+    const insert = { ...inserted, xml: removal.xml };
+    if (removal.notFound.length) throw new Error(`${removal.notFound.join(', ')} wasn't found in a table row to delete; nothing was saved.`);
 
     // Check the edited document reads back exactly as intended before touching the file
     const expected = {};
@@ -4080,6 +4150,7 @@ async function saveToWord() {
       expected[newNumber(token)] = result.applied[token] ? result.applied[token].to : title;
     }
     for (const e of additions) if (insert.inserted.includes(e.token)) expected[e.token] = e.title.replace(/\s+/g, ' ').trim();
+    for (const token of removal.deleted) delete expected[token];
     const check = RegisterCore.readDocxTitles(insert.xml);
     const wrong = [...new Set([...Object.keys(expected), ...Object.keys(check)])].filter(t => check[t] !== expected[t]);
     if (wrong.length) throw new Error(`the edited document didn't read back as expected for ${wrong.join(', ')}; nothing was saved.`);
@@ -4090,7 +4161,7 @@ async function saveToWord() {
     // ...with every scale and size as intended
     const detailsBefore = RegisterCore.readDocxDetails(xml);
     const detailsAfter = RegisterCore.readDocxDetails(insert.xml);
-    const wrongDetails = Object.keys(detailsBefore).filter(token => {
+    const wrongDetails = Object.keys(detailsBefore).filter(token => !removal.deleted.includes(token)).filter(token => {
       const want = {
         scale: scales.applied[token] ? scales.applied[token].to : detailsBefore[token].scale,
         size: sizes.applied[token] ? sizes.applied[token].to : detailsBefore[token].size
@@ -4137,6 +4208,8 @@ async function saveToWord() {
     for (const token of insert.skipped) appendLog(`⚠️ ${token} is already in ${baseName(docx)}, so it wasn't added again.`);
     for (const [token, { to }] of Object.entries(renumber.applied)) appendLog(`# ${token} renumbered to ${to} (${how})`);
     if (move.moved.length) appendLog(`↕️ Moved ${[...new Set(move.moved)].join(', ')} in the register (${how})`);
+    for (const token of removal.deleted) appendLog(`🗑️ ${token}: deleted "${state.tokenMap[token] || ''}" (${how})`);
+    forgetDeleted(removal.deleted);
     for (const token of [...new Set([...result.notFound, ...scales.notFound, ...sizes.notFound, ...renumber.notFound])]) {
       appendLog(`⚠️ ${token} wasn't found in a table row of ${baseName(docx)}; its edit was kept.`);
     }
@@ -4156,7 +4229,8 @@ async function saveToWord() {
       ...(issue ? [issue.mode === 'new' ? 'a new issue' : 'an issue update'] : []),
       `${Object.keys(renumber.applied).length} new number(s)`,
       `${new Set(move.moved).size} move(s)`,
-      `${insert.inserted.length} new entr${insert.inserted.length === 1 ? 'y' : 'ies'}`
+      `${insert.inserted.length} new entr${insert.inserted.length === 1 ? 'y' : 'ies'}`,
+      ...(removal.deleted.length ? [`${removal.deleted.length} deletion(s)`] : [])
     ];
     appendLog(`✅ Saved ${saved.join(', ')} to ${baseName(docx)}.`);
 
@@ -4271,13 +4345,14 @@ async function exportRegisterPdf() {
 }
 
 async function saveToExcel() {
-  const edits = pendingTitleEdits();
-  const details = pendingDetailEdits();
-  const numbers = pendingNumberEdits();
+  const deletions = pendingDeletions();
+  const edits = withoutDeleted(pendingTitleEdits(), deletions);
+  const details = withoutDeleted(pendingDetailEdits(), deletions);
+  const numbers = withoutDeleted(pendingNumberEdits(), deletions);
   const project = pendingProjectEdits();
-  const issue = pendingIssue();
-  if (!edits.length && !details.length && !project.length && !issue && !numbers.length) return;
-  const options = await askWordOptions(edits, [], numbers, 0, details, project, issue);
+  const issue = issueWithout(pendingIssue(), deletions);
+  if (!edits.length && !details.length && !project.length && !issue && !numbers.length && !deletions.length) return;
+  const options = await askWordOptions(edits, [], numbers, 0, details, project, issue, deletions);
   if (!options) return;
 
   const xlsx = state.registerPath;
@@ -4296,7 +4371,8 @@ async function saveToExcel() {
       scales: Object.fromEntries(details.filter(e => e.field === 'scale').map(e => [e.token, e.to])),
       sizes: Object.fromEntries(details.filter(e => e.field === 'size').map(e => [e.token, e.to])),
       project: Object.fromEntries(project.map(e => [e.label, e.to])),
-      issue
+      issue,
+      deletions
     });
     if (result.errors.length) throw new Error(result.errors.join('; ') + '; nothing was saved.');
 
@@ -4307,8 +4383,10 @@ async function saveToExcel() {
     for (const [code, title] of Object.entries(before.titles)) {
       expected[newNumber(code)] = result.applied.titles[code] ? result.applied.titles[code].to : title;
     }
+    for (const code of result.applied.deletions) delete expected[code];
     const wrong = [...new Set([...Object.keys(expected), ...Object.keys(after.titles)])].filter(t => after.titles[t] !== expected[t]);
     for (const [code, was] of Object.entries(before.details)) {
+      if (result.applied.deletions.includes(code)) continue;
       const want = {
         scale: result.applied.scales[code] ? result.applied.scales[code].to : was.scale,
         size: result.applied.sizes[code] ? result.applied.sizes[code].to : was.size
@@ -4341,6 +4419,8 @@ async function saveToExcel() {
       for (const [code, { from, to }] of Object.entries(applied)) appendLog(`📝 ${code} ${DETAIL_NAMES[field]}: "${from}" → "${to}"`);
     }
     for (const [code, { to }] of Object.entries(result.applied.numbers)) appendLog(`# ${code} renumbered to ${to}`);
+    for (const code of result.applied.deletions) appendLog(`🗑️ ${code}: deleted "${state.tokenMap[code] || ''}" (its row on sheet "${result.sheet}" emptied)`);
+    forgetDeleted(result.applied.deletions);
     for (const code of result.notFound) appendLog(`⚠️ ${code} wasn't found on sheet "${result.sheet}"; its edit was kept.`);
     for (const code of Object.keys(result.applied.titles)) delete state.layout.titleEdits[code];
     clearSavedDetails(result.applied.scales, result.applied.sizes);
@@ -4356,7 +4436,7 @@ async function saveToExcel() {
     await saveLayout();
     const detailCount = Object.keys(result.applied.scales).length + Object.keys(result.applied.sizes).length;
     const issueText = result.applied.issue ? (issue.mode === 'new' ? ', a new issue' : ', an issue update') : '';
-    appendLog(`✅ Saved ${Object.keys(result.applied.titles).length} title change(s), ${detailCount} scale/size change(s), ${Object.keys(result.applied.project).length} project detail change(s)${issueText} and ${Object.keys(result.applied.numbers).length} new number(s) to sheet "${result.sheet}" of ${baseName(xlsx)}.`);
+    appendLog(`✅ Saved ${Object.keys(result.applied.titles).length} title change(s), ${detailCount} scale/size change(s), ${Object.keys(result.applied.project).length} project detail change(s)${issueText}, ${Object.keys(result.applied.numbers).length} new number(s) and ${result.applied.deletions.length} deletion(s) to sheet "${result.sheet}" of ${baseName(xlsx)}.`);
 
     if (options.exportPdf) {
       const pdf = options.pdf;
@@ -5926,9 +6006,10 @@ async function registerPdf() {
   return pdfs.length ? joinPath(dir, pdfs[pdfs.length - 1]) : null;
 }
 
-// Clicking the table's header shows the register
-tableEl.querySelector('thead').addEventListener('click', async (e) => {
+// Double-clicking the table's header shows the register
+tableEl.querySelector('thead').addEventListener('dblclick', async (e) => {
   if (!settings.pdfViewer || e.target.closest('input, button, label, select, a')) return;
+  window.getSelection().removeAllRanges();
   const pdf = await registerPdf();
   if (pdf) showPdf(pdf);
   else if (state.registerPath) appendLog(isTitleBlockMode() ? 'ℹ️ There is no register: drawings are read from their title blocks.' : `ℹ️ No PDF of ${baseName(state.registerPath)} was found beside it; export one first.`);
@@ -6019,7 +6100,7 @@ viewerExternalBtn.addEventListener('click', () => {
   if (viewer.path) openPath(viewer.path, baseName(viewer.path));
 });
 optPdfViewer.addEventListener('change', () =>
-  setOption('pdfViewer', optPdfViewer.checked, optPdfViewer.checked ? 'Drawings show beside the table when their row is clicked.' : 'The PDF viewer is off.'));
+  setOption('pdfViewer', optPdfViewer.checked, optPdfViewer.checked ? 'Drawings show beside the table when their row is double-clicked.' : 'The PDF viewer is off.'));
 
 // ---------- view ----------
 // What the table and Warnings tab show: kept per folder in its layout file, so a folder opens as
@@ -6378,10 +6459,11 @@ function rowMenuItem(label, detail, onClick) {
 
 // The source file entry: what the drawing's title block says, reading the file first if needed
 // The text of the table cell (or stacked line) at `target`, and its column's name, for copying;
-// null when there's nothing to copy. Badges, buttons and the new name's arrow are left out.
+// null when there's nothing to copy. Badges, buttons and the new name's arrow are left out, and
+// the Status column (only badges and notes) isn't offered at all.
 function copyTarget(target) {
   const td = target.closest('td');
-  if (!td || !td.closest('#rows') || td.classList.contains('pending')) return null;
+  if (!td || !td.closest('#rows') || td.classList.contains('pending') || td.classList.contains('status-cell')) return null;
   const line = target.closest('.stack-top, .stack-bottom');
   const part = line && td.contains(line) ? line : td;
   if (part.classList.contains('pending') || part.classList.contains('none') || td.classList.contains('missing')) return null;
@@ -6470,6 +6552,17 @@ function renderRowMenu(row, copy) {
     copyItem.title = copy.text;
     items.push(copyItem);
   }
+  // Deleting the entry from the register (or keeping it); a new entry is just dropped
+  if (row.token && canEditRegister() && (!row.group || row.first || row.chosen)) {
+    if (items.length) items.push(el('div', undefined, 'menu-sep'));
+    if (row.isNew) items.push(rowMenuItem('Remove this new entry', 'Not in the register yet', () => removeNewEntry(row.token)));
+    else if (row.deleted) items.push(rowMenuItem('Keep in the register', `Don't delete ${row.origToken}`, () => setDeletion(row.origToken, false)));
+    else {
+      const del = rowMenuItem('Delete from the register', `${row.origToken}, when you press ${saveButtonLabel()}`, () => setDeletion(row.origToken, true));
+      del.classList.add('danger');
+      items.push(del);
+    }
+  }
   if (!row.rel) return rowMenu.replaceChildren(...items);
   if (items.length) items.push(el('div', undefined, 'menu-sep'));
   const entry = state.fileDetails.get(absPath(row.rel));
@@ -6482,7 +6575,8 @@ function renderRowMenu(row, copy) {
   if (sources && sources.length) source.title = sources[0];
   rowMenu.replaceChildren(
     ...items,
-    rowMenuItem('Open drawing', displayPath(row.rel), () => openFile(row.rel)),
+    rowMenuItem('Show in the PDF viewer', settings.pdfViewer ? undefined : 'Turned off in the options', settings.pdfViewer ? () => showPdf(absPath(row.rel), row.key) : null),
+    rowMenuItem('Open in the PDF program', displayPath(row.rel), () => openFile(row.rel)),
     source,
     el('div', undefined, 'menu-sep'),
     rowMenuItem('Show in Explorer', undefined, () => showInExplorer(absPath(row.rel)))

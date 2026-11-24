@@ -697,12 +697,17 @@
     const { open, inner, close } = splitElement(rowXml);
     const cells = childElements(inner);
     for (const [colText, value] of Object.entries(values)) {
-      const text = typeof value === 'object' ? value.text : value;
-      const asNumber = typeof value === 'object' && value.number && /^\d+$/.test(text);
+      const text = value && typeof value === 'object' ? value.text : value;
+      const asNumber = !!value && typeof value === 'object' && value.number && /^\d+$/.test(text);
       const col = Number(colText);
       const ref = columnName(col) + rowNum;
       const i = cells.findIndex(c => (/\br="([A-Z]+\d+)"/.exec(c) || [])[1] === ref);
       const old = i >= 0 ? cells[i] : null;
+      // null empties the cell, keeping its formatting
+      if (value === null) {
+        if (old) cells[i] = /^<c\b[^>]*?(?=\/?>)/.exec(old)[0].replace(/\s+t="[^"]*"/, '') + '/>';
+        continue;
+      }
       const oldOpen = old ? /^<c\b[^>]*?(?=\/?>)/.exec(old)[0] : `<c r="${ref}"`;
       const style = (/\bs="(\d+)"/.exec(oldOpen) || [])[1];
       const wasNumber = !!old && !/\bt="/.test(oldOpen) && /<v>/.test(old);
@@ -741,7 +746,7 @@
     const rowCells = {};
     for (const r of readSheetRows(parts.sheets[reg.path], sharedStrings, zeroPad)) rowCells[r.row] = r.cells;
 
-    const applied = { titles: {}, numbers: {}, scales: {}, sizes: {}, project: {}, issue: null };
+    const applied = { titles: {}, numbers: {}, scales: {}, sizes: {}, project: {}, issue: null, deletions: [] };
     const notFound = [];
     const errors = [];
     const byRow = {}; // row => { column: text }
@@ -844,6 +849,17 @@
         });
       }
       applied.numbers[code] = { from: code, to };
+    }
+
+    // Deleted entries: every cell of the row emptied (after the other edits, so nothing is left)
+    for (const code of edits.deletions || []) {
+      const place = reg.places[code];
+      if (!place) {
+        notFound.push(code);
+        continue;
+      }
+      for (const col of Object.keys(rowCells[place.row] || {})) set(place.row, Number(col), null);
+      applied.deletions.push(code);
     }
 
     let xml = parts.sheets[reg.path];
@@ -1503,6 +1519,27 @@
     return { xml: out, moved, notFound };
   }
 
+  // Delete drawings' rows: [token]. With opts.tracked each row is marked deleted (Word keeps it,
+  // struck through, until the change is accepted), else it's taken out.
+  // Returns { xml, deleted: [token], notFound: [token] }
+  function deleteDocxRows(xml, tokens, opts = {}) {
+    const rev = makeRevisions(xml, opts.author || 'Drawing Renamer', opts.date || new Date().toISOString().replace(/\.\d+Z$/, 'Z'));
+    const deleted = [];
+    const notFound = [];
+    let out = xml;
+    for (const token of tokens) {
+      const source = registerRows(out).find(r => r.token === token);
+      if (!source) {
+        notFound.push(token);
+        continue;
+      }
+      const row = source.row;
+      out = out.slice(0, row.start) + (opts.tracked ? markRowDeleted(row.xml, rev) : '') + out.slice(row.end);
+      deleted.push(token);
+    }
+    return { xml: out, deleted, notFound };
+  }
+
   // Text of the cells after number/title/scale/size in a drawing's row (its revision marks)
   function readRowMarks(xml, token) {
     const r = registerRows(xml).find(x => x.token === token);
@@ -2033,6 +2070,7 @@
     editDocxSizes,
     insertDocxRows,
     moveDocxRows,
+    deleteDocxRows,
     decodeXml
   };
 });

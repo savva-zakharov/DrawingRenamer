@@ -533,3 +533,7 @@ nav.tabs .viewer-tab:hover, .viewer-bar .viewer-tab:hover{ color:var(--accent) }
 tbody tr.viewing td{ box-shadow:inset 0 2px 0 var(--accent), inset 0 -2px 0 var(--accent) }
 tbody tr.viewing td:first-child{ box-shadow:inset 2px 2px 0 var(--accent), inset 0 -2px 0 var(--accent) }
 #drawings thead th{ cursor:default }
+/* An entry to be deleted from the register: struck through until it's saved */
+tbody tr.deleted td.number, tbody tr.deleted .title-text{ text-decoration:line-through; color:var(--muted) }
+button.edit-badge.deleted{ border-color:var(--bad); background:none; color:var(--bad) }
+.menu button.danger{ color:var(--bad) }
