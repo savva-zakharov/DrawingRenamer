@@ -19,6 +19,7 @@
     "dictionary-en-gb": "^3.0.0",
     "jszip": "^3.10.2",
     "nspell": "^2.1.5",
+    "pdf-lib": "^1.17.1",
     "pdf-parse": "^1.1.1"
   },
   "engines": {

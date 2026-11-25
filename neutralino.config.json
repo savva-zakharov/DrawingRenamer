@@ -21,6 +21,7 @@
     "filesystem.*",
     "storage.*",
     "clipboard.*",
+    "window.print",
     "debug.log"
   ],
   "modes": {

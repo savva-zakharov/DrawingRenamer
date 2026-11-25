@@ -5,6 +5,11 @@ const emptyEl = document.getElementById('empty');
 const summaryEl = document.getElementById('summary');
 const watchingEl = document.getElementById('watching');
 const renameBtn = document.getElementById('rename');
+const printBtn = document.getElementById('print');
+const printDialogBtn = document.getElementById('print-dialog');
+const binderBindBtn = document.getElementById('binder-bind');
+const binderBySizeBtn = document.getElementById('binder-by-size');
+const printing = { busy: false, urls: [], measuring: false }; // PDFs being drawn for printing, and their pages' image URLs
 const folderBtn = document.getElementById('make-folder');
 const wordBtn = document.getElementById('save-word');
 const openRegisterBtn = document.getElementById('open-register');
@@ -50,6 +55,10 @@ const DEFAULT_SETTINGS = {
   pdfViewer: true,                  // drawings shown beside the table when their row is clicked
   viewerWidth: 0.5,                 // the viewer's share of the window's width
   viewerFields: true,               // the title block fields marked on a drawing in the viewer
+  printer: '',                      // the printer to print to ('' = Windows' default printer)
+  printPaper: '',                   // the paper to fit every drawing to ('A4' ... 'A0'), or '' for each drawing's own size
+  printDpi: 200,                    // resolution of the printed pages, or 'pdf' to print the PDFs themselves
+  binderMaxMb: null,                // the largest a PDF binder file may be, in MB (null: no limit)
   defaultView: null                 // what the table and Warnings tab show in a folder opened for the first time (null: the built-in view)
 };
 let settings = JSON.parse(JSON.stringify(DEFAULT_SETTINGS));
@@ -1394,6 +1403,13 @@ function updateButtons() {
   const n = registrarows().length;
   renameBtn.textContent = n ? `RENAME (${n})` : 'RENAME';
   renameBtn.disabled = state.busy || n === 0;
+  if (!printing.busy) {
+    const p = printableRows().length;
+    printBtn.textContent = p ? `PRINT (${p})` : 'PRINT';
+    printBtn.disabled = printDialogBtn.disabled = state.busy || p === 0;
+    binderBindBtn.disabled = binderBySizeBtn.disabled = state.busy || p === 0;
+    updatePrintTab();
+  }
 
   const selected = selectedRows().length;
   folderBtn.textContent = selected ? `FOLDER (${selected})` : '+ FOLDER';
@@ -2865,6 +2881,7 @@ function switchTab(name) {
     renderProjectData();
     loadFileDetails();
   }
+  if (name === 'print') openPrintTab();
   if (name === 'revisions') {
     renderRevisionData(true);
     loadFileDetails();
@@ -5781,6 +5798,706 @@ onlyWarningsCheckbox.addEventListener('change', () => {
   if (onlyWarningsCheckbox.checked) loadFileDetails();
 });
 
+// ---------- printing ----------
+// PDFs are printed as images of their pages, drawn by pdf.js. Without a printer chosen they're
+// printed from the app's own window, each on a sheet of its size (or the paper chosen), through
+// the print dialog. With one chosen they're sent straight to it by Windows' printing (.NET,
+// through PowerShell), on the paper chosen or the drawing's own size where the printer has it.
+const printArea = document.getElementById('print-area');
+const printPagesStyle = document.getElementById('print-pages');
+const printPrinterSelect = document.getElementById('print-printer');
+const printPaperSelect = document.getElementById('print-paper');
+const printDpiSelect = document.getElementById('print-dpi');
+const printSizeFilter = document.getElementById('print-size-filter');
+const printSizeNote = document.getElementById('print-size-note');
+const printSummary = document.getElementById('print-summary');
+const PRINT_DPIS = [150, 200, 300, 400, 600]; // the resolutions offered (settings.printDpi)
+const PRINT_MAX_PIXELS = 64e6;    // per page (an A1 sheet at 300 dpi is ~70 MP): lower resolution past that
+const PAPER_SIZES_MM = { A4: [210, 297], A3: [297, 420], A2: [420, 594], A1: [594, 841], A0: [841, 1189] };
+const SIZE_ORDER = ['A0', 'A1', 'A2', 'A3', 'A4'];
+
+// The ticked rows with a PDF to print (one row per drawing: the file used for it)
+function printableRows() {
+  return selectedRows().filter(r => r.rel && /\.pdf$/i.test(r.rel));
+}
+
+function clearPrintArea() {
+  for (const url of printing.urls) URL.revokeObjectURL(url);
+  printing.urls = [];
+  printArea.textContent = '';
+  printPagesStyle.textContent = '';
+}
+
+// Every page of the PDFs (full paths) drawn as PNG images: [{ blob, width, height (points),
+// file }]. progress(fraction, text): as each page is drawn.
+async function drawPrintPages(filePaths, progress) {
+  const pages = [];
+  const worker = new PDFJS.PDFWorker();
+  try {
+    for (let k = 0; k < filePaths.length; k++) {
+      const filePath = filePaths[k];
+      const of = filePaths.length === 1 ? baseName(filePath) : `drawing ${k + 1} of ${filePaths.length}`;
+      progress(k / filePaths.length, `Preparing ${of}…`);
+      let doc = null;
+      try {
+        doc = await PDFJS.getDocument({ data: new Uint8Array(await nfs.readBinaryFile(filePath)), worker });
+        for (let n = 1; n <= doc.numPages; n++) {
+          progress((k + (n - 1) / doc.numPages) / filePaths.length, `Preparing ${of}${doc.numPages > 1 ? `, page ${n} of ${doc.numPages}` : ''}…`);
+          const page = await doc.getPage(n);
+          const size = page.getViewport(1); // in points, as the page is shown (rotation applied)
+          let scale = settings.printDpi / 72;
+          const pixels = size.width * size.height * scale * scale;
+          if (pixels > PRINT_MAX_PIXELS) scale *= Math.sqrt(PRINT_MAX_PIXELS / pixels);
+          const vp = page.getViewport(scale);
+          const canvas = document.createElement('canvas');
+          canvas.width = Math.ceil(vp.width);
+          canvas.height = Math.ceil(vp.height);
+          const ctx = canvas.getContext('2d');
+          ctx.fillStyle = '#fff';
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          await page.render({ canvasContext: ctx, viewport: vp }).promise;
+          const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+          canvas.width = canvas.height = 0; // let the canvas's memory go
+          pages.push({ blob, width: size.width, height: size.height, file: filePath });
+        }
+      } catch (err) {
+        appendLog(`❌ Could not prepare ${baseName(filePath)} for printing: ${err.message || err}`);
+      } finally {
+        if (doc) doc.destroy();
+      }
+    }
+  } finally {
+    worker.destroy();
+  }
+  progress(1, `${pages.length} page${pages.length === 1 ? '' : 's'} ready`);
+  return pages;
+}
+
+// Prints the PDFs (full paths) on the printer chosen in the Print tab (or Windows' default), at
+// the paper size and resolution chosen there: straight away, or (dialog) through the Windows
+// print dialog. Without any printer found, the app window's print dialog is used instead.
+async function printPdfs(filePaths, dialog = false) {
+  if (!filePaths.length || printing.busy) return;
+  printing.busy = true;
+  printBtn.disabled = printDialogBtn.disabled = binderBindBtn.disabled = binderBySizeBtn.disabled = true;
+  clearPrintArea();
+  try {
+    if (!printerList) await loadPrinters();
+    const printer = settings.printer || ((printerList || []).find(p => p.isDefault) || {}).name || '';
+    if (settings.printDpi === 'pdf') return await printOriginalPdfs(filePaths, printer, dialog);
+    const pages = await drawPrintPages(filePaths, showPrintProgress);
+    if (!pages.length) return;
+    const files = new Set(pages.map(p => p.file)).size;
+    const what = files === 1 ? baseName(pages[0].file) : `${files} drawings`;
+    const paper = settings.printPaper;
+    appendLog(`🖨️ Printing ${what} (${pages.length} page${pages.length === 1 ? '' : 's'}${paper ? ', fitted to ' + paper : ''}, ${settings.printDpi} dpi)${printer ? ' on ' + printer : ''}.`);
+    showPrintProgress(null, dialog ? 'Waiting for the print dialog…' : `Sending to ${printer || 'the printer'}…`);
+    if (printer) await printToPrinter(pages, printer, paper, dialog);
+    else await printWithDialog(pages, paper);
+  } finally {
+    printing.busy = false;
+    showPrintProgress();
+    updateButtons();
+  }
+}
+
+// ---- printing the PDFs themselves
+// Windows can't print a PDF itself: the files are handed to a PDF program, which prints them as
+// they are (vectors, at the printer's resolution). Which program: the one set for PDFs in the
+// Options tab when it's one that can print from its command line (Adobe Acrobat or Reader,
+// SumatraPDF), else the one registered with Windows to print PDFs (its Printto and Print commands).
+// { name, kind: 'sumatra' or 'template', exe, printTo, print } (templates with %1 the file, %2 the
+// printer), or null when there's none.
+// Looked up once (calls while it's being looked up wait for it); again when the PDF program
+// set in the Options tab changes
+let pdfPrintProgram;
+let pdfPrintLookup = null;
+let pdfPrintLookupFor = null;
+function findPdfPrintProgram() {
+  if (!pdfPrintLookup || pdfPrintLookupFor !== settings.apps.pdf) {
+    pdfPrintLookupFor = settings.apps.pdf;
+    pdfPrintLookup = lookUpPdfPrintProgram();
+  }
+  return pdfPrintLookup;
+}
+
+async function lookUpPdfPrintProgram() {
+  pdfPrintProgram = null;
+  const chosen = settings.apps.pdf;
+  if (chosen && /sumatrapdf[^\\/]*\.exe$/i.test(chosen)) {
+    return (pdfPrintProgram = { name: 'SumatraPDF', kind: 'sumatra', exe: chosen });
+  }
+  if (chosen && /(acrobat|acrord32)\.exe$/i.test(chosen)) {
+    return (pdfPrintProgram = { name: /acrord32/i.test(chosen) ? 'Adobe Acrobat Reader' : 'Adobe Acrobat', kind: 'template',
+      printTo: `"${chosen}" /t "%1" "%2"`, print: `"${chosen}" /p "%1"` });
+  }
+  try {
+    // The programs registered for .pdf (its own class first), with their Printto / Print commands
+    const res = await runPowerShell(`
+$ids = @((Get-ItemProperty 'Registry::HKEY_CLASSES_ROOT\\.pdf' -ErrorAction SilentlyContinue).'(default)')
+$ids += @((Get-Item 'Registry::HKEY_CLASSES_ROOT\\.pdf\\OpenWithProgids' -ErrorAction SilentlyContinue).Property)
+$out = foreach ($id in ($ids | Where-Object { $_ } | Select-Object -Unique)) {
+  $cmd = { param($verb) (Get-ItemProperty "Registry::HKEY_CLASSES_ROOT\\$id\\shell\\$verb\\command" -ErrorAction SilentlyContinue).'(default)' }
+  $to = & $cmd 'Printto'
+  if ($to) { [pscustomobject]@{ id = $id; printTo = $to; print = (& $cmd 'Print'); name = (Get-ItemProperty "Registry::HKEY_CLASSES_ROOT\\$id" -ErrorAction SilentlyContinue).'(default)' } }
+}
+@($out) | ConvertTo-Json -Compress`);
+    const found = JSON.parse((res.stdOut || '').trim() || '[]');
+    const first = (Array.isArray(found) ? found : [found]).find(p => p && p.printTo);
+    if (first) {
+      const m = first.printTo.match(/^"([^"]+)"|^(\S+)/) || [];
+      const exe = m[1] || m[2] || '';
+      const name = /sumatra/i.test(exe) ? 'SumatraPDF' : /acrord32/i.test(exe) ? 'Adobe Acrobat Reader' : /acrobat/i.test(exe) ? 'Adobe Acrobat'
+        : first.name || baseName(exe.replace(/\\/g, '/'));
+      pdfPrintProgram = /sumatra/i.test(exe) ? { name, kind: 'sumatra', exe } : { name, kind: 'template', printTo: first.printTo, print: first.print || '' };
+    }
+  } catch (err) {
+    // none found
+  }
+  return pdfPrintProgram;
+}
+
+// Under the resolution list, with Original PDF chosen: which program prints them, and what it decides
+async function renderOriginalNote() {
+  const note = document.getElementById('print-original-note');
+  const original = settings.printDpi === 'pdf';
+  note.hidden = !original;
+  printPaperSelect.disabled = false;
+  printPaperSelect.title = '';
+  if (!original) return;
+  note.textContent = 'Looking for a PDF program to print with…';
+  const program = await findPdfPrintProgram();
+  if (settings.printDpi !== 'pdf') return;
+  // Only SumatraPDF can be told the paper
+  if (program && program.kind !== 'sumatra') {
+    printPaperSelect.disabled = true;
+    printPaperSelect.title = `${program.name} prints with its own page size and fitting`;
+  }
+  note.textContent = !program
+    ? 'No PDF program that can print from the command line was found (e.g. Adobe Acrobat, Acrobat Reader or SumatraPDF); set one under Options › Open files with.'
+    : program.kind === 'sumatra'
+      ? `Printed by ${program.name}, fitted to the page size chosen (or each drawing's own).`
+      : `Printed by ${program.name}. The page size and fitting are its own print settings (the page size chosen here isn't used).`;
+}
+
+const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+// The PDFs (full paths) handed to the PDF program to print on printer: straight away, or (dialog)
+// through its print dialog (it can't be given the printer then: it's chosen there)
+async function printOriginalPdfs(filePaths, printer, dialog) {
+  const program = await findPdfPrintProgram();
+  if (!program) {
+    appendLog('❌ No PDF program that can print was found: set Adobe Acrobat, Acrobat Reader or SumatraPDF under Options › Open files with, or pick a resolution to print the drawings as images.');
+    return;
+  }
+  const win = p => p.replace(/\//g, '\\');
+  const what = filePaths.length === 1 ? baseName(filePaths[0]) : `${filePaths.length} drawings`;
+  appendLog(`🖨️ Printing ${what} as PDFs with ${program.name}${dialog ? '' : ` on ${printer || 'the default printer'}`}.`);
+  let sent = 0;
+  for (let k = 0; k < filePaths.length; k++) {
+    const file = win(filePaths[k]);
+    showPrintProgress(k / filePaths.length, `Sending ${filePaths.length === 1 ? baseName(filePaths[k]) : `drawing ${k + 1} of ${filePaths.length}`} to ${program.name}…`);
+    let command;
+    if (program.kind === 'sumatra') {
+      const paper = settings.printPaper ? `,paper=${settings.printPaper}` : '';
+      command = dialog
+        ? `"${program.exe}" -print-dialog -exit-when-done "${file}"`
+        : `"${program.exe}" -print-to ${printer ? `"${printer}"` : '-default'} -print-settings "fit${paper}" -silent -exit-when-done "${file}"`;
+    } else {
+      const template = dialog ? program.print : program.printTo;
+      if (!template) {
+        appendLog(`❌ ${program.name} has no ${dialog ? 'print dialog' : 'print-to'} command registered.`);
+        break;
+      }
+      command = template.replace(/%1|%L/gi, file).replace(/%2/g, printer).replace(/\s*"?%[3-9]"?/g, '');
+    }
+    try {
+      // Started, not waited for: PDF programs often stay open after printing
+      await Neutralino.os.spawnProcess(command);
+      sent++;
+    } catch (err) {
+      appendLog(`❌ Could not send ${baseName(filePaths[k])} to ${program.name}: ${err.message || err}`);
+    }
+    // One at a time, so they reach the printer in order (and dialogs don't pile up)
+    if (k < filePaths.length - 1) await pause(dialog ? 2500 : 1500);
+  }
+  showPrintProgress(1, `${sent} sent`);
+  if (sent) appendLog(`✅ Sent ${sent} PDF${sent === 1 ? '' : 's'} to ${program.name} to print${dialog ? ' (choose the printer in its print dialog)' : ''}.`);
+}
+
+// The progress bar in the Print tab: fraction 0 to 1 (null: working, no fraction), or hidden
+// when called with nothing
+const printProgressEl = document.getElementById('print-progress');
+const printProgressBar = document.getElementById('print-progress-bar');
+const printProgressText = document.getElementById('print-progress-text');
+const binderProgressEl = document.getElementById('binder-progress');
+function showPrintProgress(fraction, text) {
+  showProgressIn(printProgressEl, printProgressBar, printProgressText, fraction, text);
+}
+function showBinderProgress(fraction, text) {
+  showProgressIn(binderProgressEl, binderProgressEl.querySelector('progress'), binderProgressEl.querySelector('.progress-text'), fraction, text);
+}
+function showProgressIn(printProgressEl, printProgressBar, printProgressText, fraction, text) {
+  if (fraction === undefined) {
+    printProgressEl.hidden = true;
+    return;
+  }
+  printProgressEl.hidden = false;
+  if (fraction === null) printProgressBar.removeAttribute('value');
+  else printProgressBar.value = fraction;
+  printProgressText.textContent = text || '';
+}
+
+// The pages into #print-area, then the window printed: the print dialog opens
+async function printWithDialog(pages, paper) {
+  const named = new Map(); // @page name => size
+  for (const p of pages) {
+    const landscape = p.width > p.height;
+    let w, h, name;
+    if (paper) {
+      const [a, b] = PAPER_SIZES_MM[paper];
+      [w, h] = landscape ? [`${b}mm`, `${a}mm`] : [`${a}mm`, `${b}mm`];
+      name = `print-${paper}-${landscape ? 'landscape' : 'portrait'}`;
+    } else {
+      w = `${Math.round(p.width * 100) / 100}pt`;
+      h = `${Math.round(p.height * 100) / 100}pt`;
+      name = `print-size-${w}-${h}`.replace(/\./g, '_');
+    }
+    named.set(name, `${w} ${h}`);
+    const url = URL.createObjectURL(p.blob);
+    printing.urls.push(url);
+    const sheet = document.createElement('div');
+    sheet.className = 'print-page';
+    sheet.style.page = name;
+    sheet.style.width = w;
+    sheet.style.height = h;
+    const img = document.createElement('img');
+    img.src = url;
+    img.alt = '';
+    sheet.appendChild(img);
+    printArea.appendChild(sheet);
+    await img.decode().catch(() => {});
+  }
+  printPagesStyle.textContent = [...named].map(([name, size]) => `@page ${name} { size: ${size}; margin: 0 }`).join('\n');
+  // The pages are kept until printing is over (the dialog may still be open when print returns)
+  window.addEventListener('afterprint', clearPrintArea, { once: true });
+  // Neutralino's print (needs window.print in nativeAllowList), or else the web view's own
+  try {
+    await Neutralino.window.print();
+  } catch (err) {
+    try {
+      window.print();
+    } catch (err2) {
+      appendLog(`❌ Could not open the print dialog: ${err2.message || err2}`);
+    }
+  }
+}
+
+// A PowerShell single-quoted string (kept exactly, unlike psString's paths)
+function psText(s) {
+  return "'" + String(s).replace(/'/g, "''") + "'";
+}
+
+// The pages saved as images in a temporary folder, then printed by .NET's PrintDocument on the
+// printer (with dialog, after the Windows print dialog): each page turned to suit it and fitted to
+// the printable area of the paper (the one chosen, or the drawing's own size where the printer
+// has it, else its usual paper)
+async function printToPrinter(pages, printer, paper, dialog = false) {
+  let dir = null;
+  try {
+    dir = `${(await Neutralino.os.getPath('temp')).replace(/\\/g, '/')}/drawing-registrar-print-${Date.now()}`;
+    await nfs.createDirectory(dir);
+    const entries = [];
+    for (let i = 0; i < pages.length; i++) {
+      const p = pages[i];
+      const file = `${dir}/page-${String(i + 1).padStart(4, '0')}.png`;
+      await nfs.writeBinaryFile(file, await p.blob.arrayBuffer());
+      const own = RegisterCore.sheetSizeOf(p.width, p.height) || '';
+      entries.push(`@{ f = ${psString(file)}; l = $${p.width > p.height}; paper = ${psText(paper || own)} }`);
+    }
+    const script = `
+$ErrorActionPreference = 'Stop'
+try {
+  Add-Type -AssemblyName System.Drawing
+  Add-Type -AssemblyName System.Windows.Forms
+  $pages = @(${entries.join(', ')})
+  $st = @{ i = 0 }
+  $doc = New-Object System.Drawing.Printing.PrintDocument
+  $doc.PrinterSettings.PrinterName = ${psText(printer)}
+  if (-not $doc.PrinterSettings.IsValid) { throw "the printer wasn't found" }
+  $doc.DocumentName = 'Drawing Registrar'
+  $doc.PrintController = New-Object System.Drawing.Printing.StandardPrintController
+  $doc.DefaultPageSettings.Margins = New-Object System.Drawing.Printing.Margins(0, 0, 0, 0)
+  # With the dialog: the Windows print dialog first, with the printer chosen (it can be changed
+  # there, and copies set), in front of the app
+  if ($${dialog}) {
+  $dialog = New-Object System.Windows.Forms.PrintDialog
+  $dialog.Document = $doc
+  $dialog.UseEXDialog = $true
+  $dialog.AllowSomePages = $false
+  $owner = New-Object System.Windows.Forms.Form
+  $owner.TopMost = $true
+  $owner.ShowInTaskbar = $false
+  $owner.StartPosition = 'CenterScreen'
+  $owner.Size = New-Object System.Drawing.Size(1, 1)
+  $owner.Opacity = 0
+  $owner.Show()
+  $owner.Activate()
+  $answer = $dialog.ShowDialog($owner)
+  $owner.Close()
+  if ($answer -ne [System.Windows.Forms.DialogResult]::OK) { 'CANCELLED'; return }
+  }
+  $sizes = @($doc.PrinterSettings.PaperSizes)
+  $doc.add_QueryPageSettings({
+    param($sender, $e)
+    $p = $pages[$st.i]
+    $e.PageSettings.Landscape = $p.l
+    if ($p.paper) {
+      $match = $sizes | Where-Object { $_.Kind.ToString() -eq $p.paper } | Select-Object -First 1
+      if (-not $match) { $match = $sizes | Where-Object { $_.PaperName -match ('(^|\\W)' + $p.paper + '(\\W|$)') } | Select-Object -First 1 }
+      if ($match) { $e.PageSettings.PaperSize = $match }
+    }
+  })
+  $doc.add_PrintPage({
+    param($sender, $e)
+    $p = $pages[$st.i]
+    $img = [System.Drawing.Image]::FromFile($p.f)
+    try {
+      $g = $e.Graphics
+      $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+      $b = $g.VisibleClipBounds
+      $ratio = $img.Width / $img.Height
+      if ($b.Width / $b.Height -gt $ratio) { $h = $b.Height; $w = $h * $ratio } else { $w = $b.Width; $h = $w / $ratio }
+      $g.DrawImage($img, [System.Drawing.RectangleF]::new($b.X + ($b.Width - $w) / 2, $b.Y + ($b.Height - $h) / 2, $w, $h))
+    } finally { $img.Dispose() }
+    $st.i++
+    $e.HasMorePages = $st.i -lt $pages.Count
+  })
+  $doc.Print()
+  'PRINTED ' + $st.i + ' ' + $doc.PrinterSettings.PrinterName
+} catch {
+  'ERROR ' + $_.Exception.Message
+}
+`;
+    // Run from a file: with a page list it's too long for a command line. Saved with a BOM so
+    // Windows PowerShell reads its paths and printer name as UTF-8.
+    const scriptFile = `${dir}/print.ps1`;
+    await nfs.writeFile(scriptFile, '﻿' + script);
+    const res = await Neutralino.os.execCommand(`powershell.exe -NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File "${scriptFile.replace(/\//g, '\\')}"`);
+    const out = (res.stdOut || '').trim();
+    if (/^CANCELLED/m.test(out)) appendLog('🖨️ Printing cancelled.');
+    else if (/^PRINTED/m.test(out)) appendLog(`✅ Sent ${pages.length} page${pages.length === 1 ? '' : 's'} to ${(out.match(/^PRINTED \d+ (.+)$/m) || [])[1] || printer}.`);
+    else appendLog(`❌ Could not print on ${printer}: ${(out.replace(/^ERROR\s*/m, '') || res.stdErr || 'no reply from Windows printing').trim()}`);
+  } catch (err) {
+    appendLog(`❌ Could not print on ${printer}: ${err.message || err}`);
+  } finally {
+    if (dir) {
+      try {
+        await nfs.remove(dir);
+      } catch (e) {
+        // left in the temp folder
+      }
+    }
+  }
+}
+
+// ---- the Print tab
+// The printers Windows knows: [{ name, isDefault }] (looked up once, or again with ↻)
+let printerList = null;
+async function loadPrinters(force = false) {
+  if (printerList && !force) return renderPrinters();
+  printPrinterSelect.disabled = true;
+  try {
+    const res = await runPowerShell(`Get-CimInstance Win32_Printer | Select-Object Name, Default | ConvertTo-Json -Compress`);
+    const data = JSON.parse((res.stdOut || '').trim() || '[]');
+    printerList = (Array.isArray(data) ? data : [data]).filter(p => p && p.Name).map(p => ({ name: p.Name, isDefault: !!p.Default }));
+  } catch (err) {
+    printerList = [];
+    appendLog(`⚠️ Could not list the printers: ${err.message || err}`);
+  }
+  printPrinterSelect.disabled = false;
+  renderPrinters();
+}
+
+function renderPrinters() {
+  const list = printerList || [];
+  printPrinterSelect.textContent = '';
+  const def = list.find(p => p.isDefault);
+  printPrinterSelect.appendChild(new Option(def ? `Windows default printer (${def.name})` : 'Windows default printer', ''));
+  for (const p of list) printPrinterSelect.appendChild(new Option(p.name, p.name));
+  // A printer saved before but not found now is still shown, so it isn't lost
+  if (settings.printer && !list.some(p => p.name === settings.printer)) printPrinterSelect.appendChild(new Option(`${settings.printer} (not found)`, settings.printer));
+  printPrinterSelect.value = settings.printer;
+}
+
+// A drawing's sheet size: the register's (with unsaved changes), else read from its title block
+// or page; '' when it isn't known (yet)
+function rowSheetSize(row) {
+  const fromRegister = row.token ? registerDetail(row, 'size') : '';
+  const fromFile = row.rel && ((state.fileDetails.get(absPath(row.rel)) || {}).details || {}).size;
+  const size = (fromRegister || fromFile || '').toUpperCase().match(/\bA[0-4]\b/);
+  return size ? size[0] : '';
+}
+
+// The rows the size selector works on: one per drawing with a PDF, in the whole register or the
+// rows the table's filter shows
+function printScopeRows() {
+  const scope = document.querySelector('input[name="print-scope"]:checked').value;
+  const shown = rowShown();
+  return state.rows.filter(r => r.rel && /\.pdf$/i.test(r.rel) && isSelectable(r) && (scope === 'all' || shown(r)));
+}
+
+function renderPrintSizes() {
+  const rows = printScopeRows();
+  const counts = new Map();
+  for (const r of rows) {
+    const size = rowSheetSize(r);
+    counts.set(size, (counts.get(size) || 0) + 1);
+  }
+  const keep = printSizeFilter.value;
+  printSizeFilter.textContent = '';
+  const sizes = [...counts.keys()].sort((a, b) => (a ? SIZE_ORDER.indexOf(a) : 99) - (b ? SIZE_ORDER.indexOf(b) : 99));
+  for (const size of sizes) printSizeFilter.appendChild(new Option(`${size || 'Size not known'} (${counts.get(size)})`, size || '?'));
+  if (!sizes.length) printSizeFilter.appendChild(new Option('No drawings with a PDF', ''));
+  if ([...printSizeFilter.options].some(o => o.value === keep)) printSizeFilter.value = keep;
+  printSizeFilter.disabled = !sizes.length;
+  for (const id of ['print-select-only', 'print-select-add']) document.getElementById(id).disabled = !sizes.length;
+  const unknown = counts.get('') || 0;
+  printSizeNote.textContent = printing.measuring
+    ? 'Reading the sheet sizes of drawings the register has none for…'
+    : unknown ? `${unknown} drawing${unknown === 1 ? "'s" : "s'"} size isn't in the register or on the drawing.` : '';
+}
+
+// Ticks the drawings of the size chosen (only them, or as well as those ticked)
+function selectBySize(only) {
+  const wanted = printSizeFilter.value === '?' ? '' : printSizeFilter.value;
+  const rows = printScopeRows();
+  if (only) for (const r of state.rows) if (isSelectable(r)) setSelected(r.key, false);
+  let n = 0;
+  for (const r of rows) {
+    if (rowSheetSize(r) !== wanted) continue;
+    setSelected(r.key, true);
+    n++;
+  }
+  appendLog(`☑️ ${only ? 'Selected' : 'Added'} ${n} ${wanted || 'unknown-size'} drawing${n === 1 ? '' : 's'}.`);
+  render(new Set());
+}
+
+// The sheet sizes the register doesn't give, read from the drawings (their title block, or
+// else their page size), so they can be selected by size
+async function measureSheetSizes() {
+  if (printing.measuring) return;
+  const todo = state.rows.filter(r => r.rel && /\.pdf$/i.test(r.rel) && !rowSheetSize(r) && !state.fileDetails.has(absPath(r.rel)));
+  if (!todo.length) return;
+  printing.measuring = true;
+  renderPrintSizes();
+  const worker = new PDFJS.PDFWorker();
+  try {
+    for (const r of todo) {
+      const filePath = absPath(r.rel);
+      const stats = await getStatsOrNull(filePath);
+      if (!stats || state.fileDetails.has(filePath)) continue;
+      let details = null;
+      try {
+        details = await readFileDetails(filePath, worker);
+      } catch (e) {
+        // unreadable: its size stays unknown
+      }
+      state.fileDetails.set(filePath, { stamp: `${stats.size}:${stats.modifiedAt}`, details });
+    }
+  } finally {
+    worker.destroy();
+    printing.measuring = false;
+  }
+  renderPrintSizes();
+}
+
+function updatePrintTab() {
+  if (state.activeTab !== 'print') return;
+  const rows = printableRows();
+  const ticked = selectedRows().length;
+  printSummary.textContent = rows.length
+    ? `${rows.length} ticked drawing${rows.length === 1 ? '' : 's'} will print${ticked > rows.length ? ` (${ticked - rows.length} ticked have no PDF)` : ''} on ${settings.printer || 'the Windows default printer'}.`
+    : 'Tick the drawings to print in the table, or select them by sheet size.';
+  renderPrintSizes();
+}
+
+async function openPrintTab() {
+  printPaperSelect.value = settings.printPaper;
+  printDpiSelect.value = String(settings.printDpi);
+  binderMaxInput.value = settings.binderMaxMb || '';
+  // Looked for now (it takes a few seconds), so it's known by the time Original PDF is picked
+  findPdfPrintProgram();
+  renderOriginalNote();
+  updatePrintTab();
+  loadPrinters();
+  measureSheetSizes();
+}
+
+printPrinterSelect.addEventListener('change', async () => {
+  await setOption('printer', printPrinterSelect.value, `Printing on ${printPrinterSelect.value || 'the Windows default printer'}.`);
+  updatePrintTab();
+});
+document.getElementById('print-printers-refresh').addEventListener('click', () => loadPrinters(true));
+printDpiSelect.addEventListener('change', async () => {
+  const original = printDpiSelect.value === 'pdf';
+  await setOption('printDpi', original ? 'pdf' : Number(printDpiSelect.value),
+    original ? 'Drawings print from their PDFs as they are, by a PDF program.' : `Drawings print at ${printDpiSelect.value} dpi.`);
+  renderOriginalNote();
+});
+printPaperSelect.addEventListener('change', () =>
+  setOption('printPaper', printPaperSelect.value, printPaperSelect.value ? `Drawings print fitted to ${printPaperSelect.value}.` : 'Drawings print at their own size.'));
+for (const radio of document.querySelectorAll('input[name="print-scope"]')) radio.addEventListener('change', renderPrintSizes);
+document.getElementById('print-select-only').addEventListener('click', () => selectBySize(true));
+document.getElementById('print-select-add').addEventListener('click', () => selectBySize(false));
+
+// ---- PDF binder
+// The ticked drawings' PDFs joined into one (pdf-lib copies their pages as they are), in the
+// table's order; by sheet size, one binder per size. With a size limit, a binder too big is split
+// into parts: drawings are added while their files' sizes fit, then each part is measured once
+// written and drawings moved on to the next part until it fits. A drawing bigger than the limit
+// on its own gets a part of its own (with a warning).
+const binderMaxInput = document.getElementById('binder-max');
+const binderNote = document.getElementById('binder-note');
+
+binderMaxInput.addEventListener('change', () => {
+  const mb = Number(binderMaxInput.value);
+  const value = binderMaxInput.value.trim() && mb > 0 ? Math.round(mb * 10) / 10 : null;
+  binderMaxInput.value = value || '';
+  setOption('binderMaxMb', value, value ? `Binders are kept to ${value} MB a file.` : "Binders aren't split by size.");
+});
+
+const megabytes = bytes => bytes < 1048576 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : `${(bytes / 1048576).toFixed(1)} MB`;
+
+// The part files of one binder: [{ rows, bytes }]. loaded: the pdf-lib documents read so far
+// (by row key), shared while parts are built. progress(done): drawings handled.
+async function packBinder(rows, maxBytes, progress) {
+  const queue = [];
+  for (const row of rows) {
+    const stats = await getStatsOrNull(absPath(row.rel));
+    queue.push({ row, size: stats ? stats.size : 0, doc: null });
+  }
+  const load = async item => {
+    if (!item.doc) item.doc = await PDFLib.PDFDocument.load(await nfs.readBinaryFile(absPath(item.row.rel)), { ignoreEncryption: true });
+    return item.doc;
+  };
+  const build = async items => {
+    const out = await PDFLib.PDFDocument.create();
+    for (const item of items) {
+      const doc = await load(item);
+      for (const page of await out.copyPages(doc, doc.getPageIndices())) out.addPage(page);
+    }
+    out.setProducer('Drawing Registrar');
+    out.setCreator('Drawing Registrar');
+    return out.save({ useObjectStreams: true });
+  };
+  const parts = [];
+  let done = 0;
+  while (queue.length) {
+    // As many as the files' sizes say will fit (at least one)
+    const part = [queue.shift()];
+    let estimate = part[0].size;
+    while (queue.length && (!maxBytes || estimate + queue[0].size <= maxBytes)) {
+      estimate += queue[0].size;
+      part.push(queue.shift());
+    }
+    progress(done, `Binding ${part.length} drawing${part.length === 1 ? '' : 's'}…`);
+    let bytes = await build(part);
+    // Too big once written: the last drawings go on to the next part
+    while (maxBytes && bytes.length > maxBytes && part.length > 1) {
+      queue.unshift(part.pop());
+      bytes = await build(part);
+    }
+    if (maxBytes && bytes.length > maxBytes) {
+      appendLog(`⚠️ ${baseName(part[0].row.rel)} is ${megabytes(bytes.length)} on its own, over the ${megabytes(maxBytes)} limit; it's in a part by itself.`);
+    }
+    for (const item of part) item.doc = null; // done with: let it go
+    parts.push({ rows: part.map(i => i.row), bytes });
+    done += part.length;
+    progress(done);
+  }
+  return parts;
+}
+
+// Binds the ticked drawings: all into one binder, or (bySize) one binder per sheet size
+async function bindDrawings(bySize) {
+  const rows = printableRows();
+  if (!rows.length || printing.busy) return;
+  // Grouped by sheet size, largest first; drawings whose size isn't known together at the end
+  const groups = [];
+  if (bySize) {
+    const by = new Map();
+    for (const row of rows) {
+      const size = rowSheetSize(row);
+      if (!by.has(size)) by.set(size, []);
+      by.get(size).push(row);
+    }
+    for (const size of [...by.keys()].sort((a, b) => (a ? SIZE_ORDER.indexOf(a) : 99) - (b ? SIZE_ORDER.indexOf(b) : 99))) {
+      groups.push({ label: size || 'other sizes', rows: by.get(size) });
+    }
+  } else groups.push({ label: '', rows });
+
+  let base;
+  try {
+    base = await Neutralino.os.showSaveDialog(bySize ? 'Save the binders (one per sheet size)' : 'Save the binder', {
+      defaultPath: joinPath(state.targetDir, `${datePrefix()} Drawing binder.pdf`),
+      filters: [{ name: 'PDF files', extensions: ['pdf'] }]
+    });
+  } catch (err) {
+    appendLog(`❌ Could not choose where to save the binder: ${err.message || err}`);
+    return;
+  }
+  if (!base) return;
+  base = base.replace(/\\/g, '/').replace(/\.pdf$/i, '');
+
+  printing.busy = true;
+  printBtn.disabled = printDialogBtn.disabled = binderBindBtn.disabled = binderBySizeBtn.disabled = true;
+  const maxBytes = settings.binderMaxMb ? settings.binderMaxMb * 1048576 : 0;
+  const total = rows.length;
+  let before = 0;
+  const written = [];
+  try {
+    for (const group of groups) {
+      const name = group.label ? `${base} - ${group.label}` : base;
+      const progress = (done, text) => showBinderProgress((before + done) / total,
+        text || `Binding${group.label ? ' ' + group.label : ''}: ${before + done} of ${total} drawings`);
+      let parts;
+      try {
+        parts = await packBinder(group.rows, maxBytes, progress);
+      } catch (err) {
+        appendLog(`❌ Could not bind${group.label ? ' the ' + group.label + ' drawings' : ''}: ${err.message || err}`);
+        before += group.rows.length;
+        continue;
+      }
+      before += group.rows.length;
+      for (let i = 0; i < parts.length; i++) {
+        const file = parts.length === 1 ? `${name}.pdf` : `${name} (${i + 1} of ${parts.length}).pdf`;
+        showBinderProgress(before / total, `Saving ${baseName(file)}…`);
+        // A binder already there is kept in the superseded folder
+        if (await getStatsOrNull(file)) await backupToSS(file);
+        await nfs.writeBinaryFile(file, parts[i].bytes.buffer.slice(parts[i].bytes.byteOffset, parts[i].bytes.byteOffset + parts[i].bytes.byteLength));
+        written.push({ file, count: parts[i].rows.length, bytes: parts[i].bytes.length });
+      }
+    }
+    for (const w of written) appendLog(`📚 Saved ${displayPath(w.file)} (${w.count} drawing${w.count === 1 ? '' : 's'}, ${megabytes(w.bytes)}).`);
+    binderNote.textContent = written.length
+      ? `Saved ${written.length === 1 ? baseName(written[0].file) : written.length + ' files'} (see the log).`
+      : '';
+  } catch (err) {
+    appendLog(`❌ Could not save the binder: ${err.message || err}`);
+  } finally {
+    printing.busy = false;
+    showBinderProgress();
+    updateButtons();
+  }
+}
+
+binderBindBtn.addEventListener('click', () => bindDrawings(false));
+binderBySizeBtn.addEventListener('click', () => bindDrawings(true));
+
+printBtn.addEventListener('click', () => printPdfs(printableRows().map(r => absPath(r.rel)), false));
+printDialogBtn.addEventListener('click', () => printPdfs(printableRows().map(r => absPath(r.rel)), true));
+
 // ---------- PDF viewer ----------
 // The right half of the window: the pages drawn by pdf.js. On a drawing, the title block fields
 // read from it are marked, and the areas they're read from can be drawn and moved.
@@ -5789,6 +6506,7 @@ const viewerPages = document.getElementById('viewer-pages');
 const viewerName = document.getElementById('viewer-name');
 const viewerOpenBtn = document.getElementById('viewer-open');
 const viewerExternalBtn = document.getElementById('viewer-external');
+const viewerPrintBtn = document.getElementById('viewer-print');
 const viewerZoomEl = document.getElementById('viewer-zoom');
 const viewerZoomOutBtn = document.getElementById('viewer-zoom-out');
 const viewerZoomInBtn = document.getElementById('viewer-zoom-in');
@@ -5828,6 +6546,7 @@ function updateViewer() {
   setViewerWidth(settings.viewerWidth);
   viewerOpenBtn.hidden = !settings.pdfViewer || viewer.open;
   viewerExternalBtn.disabled = !viewer.path;
+  viewerPrintBtn.disabled = !viewer.path || !viewer.pages.length;
   for (const btn of [viewerZoomOutBtn, viewerZoomInBtn, viewerFitBtn]) btn.disabled = !viewer.pages.length;
   viewerFieldsBtn.setAttribute('aria-pressed', String(settings.viewerFields));
   for (const tr of rowsEl.querySelectorAll('tr.viewing')) if (tr.dataset.key !== viewer.key) tr.classList.remove('viewing');
@@ -6459,6 +7178,18 @@ document.addEventListener('keydown', (e) => {
 });
 window.addEventListener('blur', () => setViewMenuOpen(false));
 document.getElementById('viewer-close').addEventListener('click', () => setViewerOpen(false));
+viewerPrintBtn.addEventListener('click', async () => {
+  if (!viewer.path) return;
+  viewerPrintBtn.disabled = true;
+  viewerPrintBtn.textContent = 'Preparing…';
+  try {
+    await printPdfs([viewer.path], true);
+  } finally {
+    viewerPrintBtn.textContent = 'Print';
+    updateViewer();
+  }
+});
+
 viewerExternalBtn.addEventListener('click', () => {
   if (viewer.path) openPath(viewer.path, baseName(viewer.path));
 });
@@ -6621,7 +7352,11 @@ async function loadSettings() {
       defaultView: validView(data.defaultView),
       pdfViewer: data.pdfViewer !== false,
       viewerWidth: typeof data.viewerWidth === 'number' && data.viewerWidth > 0 && data.viewerWidth < 1 ? data.viewerWidth : 0.5,
-      viewerFields: data.viewerFields !== false
+      viewerFields: data.viewerFields !== false,
+      printer: typeof data.printer === 'string' ? data.printer : '',
+      printPaper: PAPER_SIZES_MM[data.printPaper] ? data.printPaper : '',
+      printDpi: PRINT_DPIS.includes(data.printDpi) || data.printDpi === 'pdf' ? data.printDpi : 200,
+      binderMaxMb: typeof data.binderMaxMb === 'number' && data.binderMaxMb > 0 ? data.binderMaxMb : null
     };
   } catch (e) {
     // nothing saved yet: the defaults

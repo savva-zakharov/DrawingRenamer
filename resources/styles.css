@@ -534,3 +534,38 @@ nav.tabs .viewer-tab:hover, .viewer-bar .viewer-tab:hover{ color:var(--accent) }
 tbody tr.viewing td{ box-shadow:inset 0 2px 0 var(--accent), inset 0 -2px 0 var(--accent) }
 tbody tr.viewing td:first-child{ box-shadow:inset 2px 2px 0 var(--accent), inset 0 -2px 0 var(--accent) }
 #drawings thead th{ cursor:default }
+
+/* Printing: only the pages of the PDFs being printed, each on a sheet of its own size (a named
+   @page per size, set in #print-pages) */
+#print-area{ display:none }
+@media print{
+  body{ display:block; padding:0; margin:0; background:#fff }
+  body > *:not(#print-area){ display:none !important }
+  #print-area{ display:block }
+  .print-page{ break-after:page; overflow:hidden }
+  .print-page:last-child{ break-after:auto }
+  .print-page img{ display:block; width:100%; height:100% }
+}
+
+/* The Print tab */
+.print-grid{ display:flex; flex-wrap:wrap; gap:12px; color:var(--fg) }
+.print-grid section{ flex:1 1 260px; min-width:0; padding:10px 12px; border:1px solid var(--border); border-radius:6px }
+.print-grid h4{ margin:0 0 6px; font-size:13px }
+.print-grid section h4:not(:first-child){ margin-top:12px }
+.print-grid .option-row{ display:flex; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:6px }
+.print-grid select{ min-width:0; max-width:100% }
+#print-printer{ flex:1 }
+.print-go{ display:flex; flex-direction:column; align-items:flex-start }
+.print-go .print-buttons{ display:flex; flex-wrap:wrap; gap:8px; margin-top:auto }
+/* The message above the bar; the bar as tall as a line of text */
+.print-progress{ display:flex; flex-direction:column; gap:4px; width:100%; margin:4px 0 8px; font-size:12px; line-height:1.5 }
+.print-progress[hidden]{ display:none }
+.print-progress progress{ -webkit-appearance:none; appearance:none; width:100%; height:1.5em; border:1px solid var(--border); border-radius:4px; overflow:hidden; background:var(--neutral-soft) }
+.print-progress progress::-webkit-progress-bar{ background:var(--neutral-soft) }
+.print-progress progress::-webkit-progress-value{ background:var(--accent); transition:width .2s }
+/* No fraction (sending, or waiting for the dialog): a band sweeping across */
+.print-progress progress:indeterminate{ background:linear-gradient(90deg, transparent 0 35%, var(--accent) 35% 65%, transparent 65% 100%) var(--neutral-soft); background-size:200% 100%; animation:print-sweep 1.2s linear infinite }
+.print-progress progress:indeterminate::-webkit-progress-bar{ background:transparent }
+@keyframes print-sweep{ from{ background-position:100% 0 } to{ background-position:-100% 0 } }
+
+.binder-max{ width:90px }

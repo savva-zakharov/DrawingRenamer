@@ -8,6 +8,8 @@ const copies = [
     ['node_modules/pdf-parse/lib/pdf.js/v1.10.100/build/pdf.js', 'resources/js/pdfjs/pdf.js'],
     ['node_modules/pdf-parse/lib/pdf.js/v1.10.100/build/pdf.worker.js', 'resources/js/pdfjs/pdf.worker.js'],
     ['node_modules/jszip/dist/jszip.min.js', 'resources/js/jszip/jszip.min.js'],
+    // pdf-lib writes PDFs (the PDF binder); pdf.js only reads them
+    ['node_modules/pdf-lib/dist/pdf-lib.min.js', 'resources/js/pdf-lib/pdf-lib.min.js'],
     // The built-in spelling dictionary (Hunspell format)
     ['node_modules/dictionary-en-gb/index.aff', 'resources/js/dictionaries/en-GB/en_GB.aff'],
     ['node_modules/dictionary-en-gb/index.dic', 'resources/js/dictionaries/en-GB/en_GB.dic'],
@@ -70,4 +72,4 @@ ${body}
 }
 bundleNspell();
 
-console.log('Copied pdf.js, JSZip, nspell and the en-GB dictionary into resources/js');
+console.log('Copied pdf.js, pdf-lib, JSZip, nspell and the en-GB dictionary into resources/js');

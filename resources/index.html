@@ -24,6 +24,7 @@
         <button role="tab" data-tab="revisions" aria-selected="false">Revisions</button>
         <button role="tab" data-tab="names" aria-selected="false">File names</button>
         <button role="tab" data-tab="warnings" aria-selected="false">Warnings</button>
+        <button role="tab" data-tab="print" aria-selected="false">Print</button>
         <button role="tab" data-tab="options" aria-selected="false">Options</button>
         <button id="viewer-open" class="viewer-tab" title="Show the PDF viewer" hidden>PDF viewer ◂</button>
       </nav>
@@ -83,6 +84,82 @@
       </div>
       <div class="tab-panel" data-panel="warnings" role="tabpanel" hidden>
         <div id="warnings" class="muted">No register loaded.</div>
+      </div>
+      <div class="tab-panel" data-panel="print" role="tabpanel" hidden>
+        <div class="print-grid">
+          <section>
+            <h4>Printer <span class="muted">(all folders)</span></h4>
+            <div class="option-row">
+              <select id="print-printer"><option value="">Windows default printer</option></select>
+              <button id="print-printers-refresh" title="Look for printers again">↻</button>
+            </div>
+            <div class="option-note">PRINT sends the drawings straight to this printer; PRINT WITH DIALOG opens the Windows print dialog with it chosen first.</div>
+            <h4>Page size and resolution <span class="muted">(all folders)</span></h4>
+            <div class="option-row">
+              <select id="print-paper">
+                <option value="">Each drawing's own size</option>
+                <option value="A4">A4</option>
+                <option value="A3">A3</option>
+                <option value="A2">A2</option>
+                <option value="A1">A1</option>
+                <option value="A0">A0</option>
+              </select>
+              <select id="print-dpi" title="Detail of the printed pages: higher is sharper but slower to prepare">
+                <option value="150">150 dpi</option>
+                <option value="200">200 dpi</option>
+                <option value="300">300 dpi</option>
+                <option value="400">400 dpi</option>
+                <option value="600">600 dpi</option>
+                <option value="pdf">Original PDF (no rasterising)</option>
+              </select>
+            </div>
+            <div id="print-original-note" class="option-note" hidden></div>
+            <div class="option-note">With a size chosen, every drawing is scaled to fit that sheet (turned to suit it). Very large sheets at a high resolution are kept to about 64 megapixels a page.</div>
+          </section>
+          <section>
+            <h4>Select by sheet size</h4>
+            <div class="option-row">
+              <select id="print-size-filter"></select>
+              <label class="inline"><input type="radio" name="print-scope" value="all" checked /> Whole register</label>
+              <label class="inline"><input type="radio" name="print-scope" value="shown" /> Rows shown</label>
+            </div>
+            <div class="option-row">
+              <button id="print-select-only" title="Tick these drawings and untick the rest">Select only these</button>
+              <button id="print-select-add" title="Tick these drawings too">Add to selection</button>
+            </div>
+            <div id="print-size-note" class="option-note"></div>
+          </section>
+          <section class="print-go">
+            <h4>PDF binder</h4>
+            <div class="option-note">Joins the ticked drawings into one PDF, in the table's order. Their pages are copied as they are (not rasterised).</div>
+            <div class="option-row">
+              <label for="binder-max">Max file size</label>
+              <input id="binder-max" type="number" min="1" step="1" placeholder="No limit" class="binder-max" /> MB
+            </div>
+            <div class="option-note">A binder bigger than this is split into parts ("… (1 of 3).pdf"). Leave it blank not to check.</div>
+            <div id="binder-note" class="option-note"></div>
+            <div id="binder-progress" class="print-progress" hidden>
+              <span class="muted progress-text"></span>
+              <progress max="1"></progress>
+            </div>
+            <div class="print-buttons">
+              <button id="binder-bind" class="secondary" title="Join the ticked drawings into one binder" disabled>BIND SELECTED</button>
+              <button id="binder-by-size" class="secondary" title="Join the ticked drawings into a binder for each sheet size" disabled>BIND BY SHEET SIZE</button>
+            </div>
+          </section>
+          <section class="print-go">
+            <h4>Print</h4>
+            <div id="print-summary" class="option-note">Tick the drawings to print in the table.</div>
+            <div id="print-progress" class="print-progress" hidden>
+              <span id="print-progress-text" class="muted"></span>
+              <progress id="print-progress-bar" max="1"></progress>
+            </div>
+            <div class="print-buttons">
+              <button id="print-dialog" class="secondary" title="Open the Windows print dialog for the ticked drawings, with the printer chosen above" disabled>PRINT WITH DIALOG…</button>
+              <button id="print" class="primary" title="Print the ticked drawings straight away on the printer chosen above" disabled>PRINT</button>
+            </div>
+          </section>
+        </div>
       </div>
       <div class="tab-panel" data-panel="options" role="tabpanel" hidden>
         <div id="options">
@@ -257,6 +334,10 @@
     </footer>
     </div>
 
+    <!-- What's printed: the pages of the PDFs being printed, drawn as images (hidden on screen) -->
+    <div id="print-area" aria-hidden="true"></div>
+    <style id="print-pages"></style>
+
     <!-- The PDF viewer: the right half of the window, while it's open -->
     <div id="viewer-divider" role="separator" aria-orientation="vertical" title="Drag to resize the PDF viewer; double-click for half and half" hidden></div>
     <aside id="pdf-viewer" hidden>
@@ -270,6 +351,7 @@
           <button id="viewer-fit" class="viewer-btn" title="Fit the page in the viewer" disabled>Fit</button>
           <button id="viewer-fields" class="viewer-btn" aria-pressed="true" title="Mark where the title block fields were read from" disabled>Fields</button>
           <button id="viewer-areas" class="viewer-btn" aria-pressed="false" title="Draw or move the areas the fields are read from, for title blocks laid out differently" disabled>Areas…</button>
+          <button id="viewer-print" class="viewer-btn" title="Print this PDF" disabled>Print</button>
           <button id="viewer-external" class="viewer-btn" title="Open it in the PDF program" disabled>Open ↗</button>
         </span>
       </div>
@@ -358,6 +440,7 @@
 
     <script src="js/pdfjs/pdf.js"></script>
     <script src="js/jszip/jszip.min.js"></script>
+    <script src="js/pdf-lib/pdf-lib.min.js"></script>
     <script src="js/nspell/nspell.js"></script>
     <script src="register-core.js"></script>
     <script src="js/neutralino.js"></script>

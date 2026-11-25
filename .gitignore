@@ -55,3 +55,4 @@ resources/js/jszip/
 .storage/
 resources/js/nspell/
 resources/js/dictionaries/
+resources/js/pdf-lib/
